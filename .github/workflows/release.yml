@@ -47,6 +47,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          # Prefix-key the cache per matrix target so the same target/
+          # subdir never gets another target's artifacts restored into it.
+          prefix-key: ${{ matrix.target }}-v1
 
       - name: Build release binary (stripped)
         run: |
