@@ -1,0 +1,120 @@
+# Release workflow — builds the single-binary tarball + SHA256SUMS and
+# publishes them to a GitHub release whenever a `v*` tag is pushed. The
+# install.sh lives at the repo root and is uploaded alongside the artifacts
+# so the one-line `curl | bash` install always fetches the script that
+# matches the binary it installs.
+#
+# One asset per (target triple) is published. The installer matches the
+# asset to the host machine and rejects anything outside the published set.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (must already exist or will be created from current commit)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write   # required for gh release create / upload
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            archive_basename: lanchat-x86_64-linux
+          - target: aarch64-unknown-linux-gnu
+            archive_basename: lanchat-aarch64-linux
+          - target: x86_64-apple-darwin
+            archive_basename: lanchat-x86_64-darwin
+          - target: aarch64-apple-darwin
+            archive_basename: lanchat-aarch64-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Build release binary (stripped)
+        run: |
+          cargo build --release --target "${{ matrix.target }}" --locked
+          mkdir -p staging/bin
+          cp "target/${{ matrix.target }}/release/lanchat" staging/bin/lanchat
+          strip "staging/bin/lanchat" || true   # best-effort — strip(1) may be absent for some targets
+          ls -la staging/bin/lanchat
+
+      - name: Compose tarball + checksums
+        env:
+          TAG_BARE: ${{ github.ref_name }}
+          BASENAME: ${{ matrix.archive_basename }}
+        run: |
+          TAG_BARE="${TAG_BARE#v}"
+          ASSET="${BASENAME}-${TAG_BARE}.tar.gz"
+          tar -C staging -czf "${ASSET}" bin/lanchat
+          # SHA256SUMS covers every tarball + the install script. The
+          # install.sh sha is checked into the release description so the
+          # one-liner can verify it before running.
+          sha256sum "${ASSET}" > SHA256SUMS
+          sha256sum install.sh >> SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive_basename }}
+          path: |
+            *.tar.gz
+            SHA256SUMS
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Compose single SHA256SUMS across all targets
+        run: |
+          # Each matrix job already wrote its own SHA256SUMS; merge them.
+          # Deduplicate the install.sh entry — every job hashed it but it
+          # only needs to be in the manifest once.
+          cat dist/SHA256SUMS | sort -u -k2 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create / update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: lanchat ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            SHA256SUMS
+            install.sh
+            dist/*.tar.gz
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false

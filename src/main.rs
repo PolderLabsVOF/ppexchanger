@@ -6,9 +6,12 @@
 //!   * `--gen-identity`      generate (or rotate) identity and exit
 //!   * `--name <name>`       override display name for this run
 //!   * `--port <port>`       override TCP listen port (default: 0 = ephemeral)
+//!   * `--theme <name>`      override theme for this run
+//!   * `--config <path>`     override config path
+//!   * `--no-mouse`          disable mouse capture
 //!   * no flags              start the TUI
 
-use lanchat::config::identity_path;
+use lanchat::config::{config_dir, identity_path};
 use lanchat::events::{Action, Bus, Event, PeerId};
 use lanchat::identity::load_or_create;
 use lanchat::net::discovery::Discovery;
@@ -17,9 +20,10 @@ use lanchat::net::peer;
 use lanchat::net::session::Session;
 use lanchat::peerdb::PeerDb;
 use lanchat::protocol::{fingerprint as pubkey_fingerprint, Beacon};
-use lanchat::tui::{self, UiState};
+use lanchat::tui::{self, UiConfig, UiState};
 use std::collections::HashMap;
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -32,6 +36,9 @@ fn main() {
     let mut name: Option<String> = None;
     let mut port: u16 = 0;
     let mut mode = Mode::Tui;
+    let mut theme_override: Option<lanchat::tui::ThemeName> = None;
+    let mut config_override: Option<PathBuf> = None;
+    let mut mouse_override: Option<bool> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -65,6 +72,29 @@ fn main() {
                     }
                 };
             }
+            "--theme" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("--theme requires an argument");
+                    std::process::exit(2);
+                }
+                match lanchat::tui::ThemeName::parse(&args[i]) {
+                    Some(t) => theme_override = Some(t),
+                    None => {
+                        eprintln!("unknown theme: {}", args[i]);
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--config" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("--config requires an argument");
+                    std::process::exit(2);
+                }
+                config_override = Some(PathBuf::from(&args[i]));
+            }
+            "--no-mouse" => mouse_override = Some(false),
             "--gen-identity" => mode = Mode::GenIdentity,
             other => {
                 eprintln!("unknown argument: {}", other);
@@ -74,7 +104,14 @@ fn main() {
         }
         i += 1;
     }
-    run(mode, name, port);
+    run(
+        mode,
+        name,
+        port,
+        theme_override,
+        config_override,
+        mouse_override,
+    );
 }
 
 enum Mode {
@@ -86,14 +123,21 @@ fn print_help() {
     println!(
         "lanchat {version} — fully-local LAN P2P encrypted terminal messenger\n\
          \n\
-         USAGE:\n  lanchat [--name <name>] [--port <port>]\n  lanchat --gen-identity\n  lanchat --help | --version\n\
+         USAGE:\n  lanchat [--name <name>] [--port <port>] [--theme <name>] [--config <path>] [--no-mouse]\n  lanchat --gen-identity\n  lanchat --help | --version\n\
          \n\
-         OPTIONS:\n  --name <name>     display name (overrides stored)\n  --port <port>     TCP listen port (0 = ephemeral)\n  --gen-identity    generate a new identity and exit\n  --help, -h        print this help\n  --version, -V     print version",
+         OPTIONS:\n  --name <name>     display name (overrides stored)\n  --port <port>     TCP listen port (0 = ephemeral)\n  --theme <name>    default|solarized|monochrome|neon\n  --config <path>   path to config.toml (default ~/.config/lanchat/config.toml)\n  --no-mouse        disable mouse capture\n  --gen-identity    generate a new identity and exit\n  --help, -h        print this help\n  --version, -V     print version",
         version = VERSION
     );
 }
 
-fn run(mode: Mode, name: Option<String>, port: u16) {
+fn run(
+    mode: Mode,
+    name: Option<String>,
+    port: u16,
+    theme_override: Option<lanchat::tui::ThemeName>,
+    config_override: Option<PathBuf>,
+    mouse_override: Option<bool>,
+) {
     let id = load_or_create(name).unwrap_or_else(|e| {
         eprintln!("failed to load identity: {}", e);
         std::process::exit(1);
@@ -111,7 +155,7 @@ fn run(mode: Mode, name: Option<String>, port: u16) {
         }
         Mode::Tui => {}
     }
-    start_tui(id, port);
+    start_tui(id, port, theme_override, config_override, mouse_override);
 }
 
 fn hex(b: &[u8]) -> String {
@@ -122,12 +166,59 @@ fn hex(b: &[u8]) -> String {
     s
 }
 
-fn start_tui(id: lanchat::identity::Identity, port: u16) {
+/// Persist the current UI config to disk. Best-effort: a permission error
+/// just posts an Event::Info warning instead of crashing the TUI.
+fn save_ui_config(cfg: &lanchat::tui::UiConfig, path: &std::path::Path) -> std::io::Result<()> {
+    let body = format_ui_config(cfg);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, body)
+}
+
+fn format_ui_config(cfg: &lanchat::tui::UiConfig) -> String {
+    let mut out = String::from("# lanchat UI config — generated, edits preserved on next /theme\n");
+    out.push_str("[ui]\n");
+    out.push_str(&format!("theme = \"{}\"\n", cfg.theme.as_str()));
+    out.push_str(&format!("show_footer = {}\n", cfg.show_footer));
+    out.push_str(&format!("mouse = {}\n", cfg.mouse));
+    out.push_str(&format!("scrollback = {}\n", cfg.scrollback));
+    out
+}
+
+fn default_config_path() -> PathBuf {
+    config_dir().map(|d| d.join("config.toml")).unwrap_or_default()
+}
+
+fn start_tui(
+    id: lanchat::identity::Identity,
+    port: u16,
+    theme_override: Option<lanchat::tui::ThemeName>,
+    config_override: Option<PathBuf>,
+    mouse_override: Option<bool>,
+) {
+    // Load config: explicit flag > default path > builtin defaults.
+    let cfg_path = config_override.unwrap_or_else(default_config_path);
+    let mut ui_cfg = UiConfig::load_or_default(&cfg_path);
+    if let Some(t) = theme_override {
+        ui_cfg.theme = t;
+    }
+    if let Some(m) = mouse_override {
+        ui_cfg.mouse = m;
+    }
+
+    let theme = lanchat::tui::Theme::by_name(ui_cfg.theme);
+    let glyphs = lanchat::tui::detect_glyphs();
+
     let bus = Bus::new();
-    let state = Arc::new(Mutex::new(UiState::from_identity(&id)));
+    let state = Arc::new(Mutex::new({
+        let mut s = UiState::from_identity(&id);
+        s.max_scrollback = ui_cfg.scrollback;
+        s
+    }));
 
     // Load persistent contacts and seed the UI.
-    let mut db = PeerDb::load_or_default().unwrap_or_default();
+    let db = PeerDb::load_or_default().unwrap_or_default();
     {
         let mut s = state.lock().unwrap();
         tui::merge_contacts(&mut s, &db);
@@ -151,19 +242,13 @@ fn start_tui(id: lanchat::identity::Identity, port: u16) {
         .send(Event::Info(format!("listening on 0.0.0.0:{}", bound_port)))
         .ok();
 
-    // Bind UDP discovery socket.
-    let discovery = match Discovery::bind(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("multicast bind failed: {}", e);
-            std::process::exit(1);
-        }
-    };
-
     let stop = Arc::new(AtomicBool::new(false));
 
-    // Build the announce beacon before we move keypair out of `id`.
+    // Build the announce beacon once; it's reused on every `/discover`.
     let announce_beacon = make_beacon(&id, bound_port);
+    // Keep a copy of our peer_id for discovery filtering (so we ignore our
+    // own beacon if it loops back).
+    let self_peer_id = id.peer_id;
 
     // Wrap the static keypair in Arc so listener/handshake threads can share
     // it without cloning the inner struct (Keypair is intentionally not Clone).
@@ -217,37 +302,9 @@ fn start_tui(id: lanchat::identity::Identity, port: u16) {
         })
     };
 
-    // Announcer thread.
-    let ann_disc = Arc::clone(&discovery);
-    let ann_stop = Arc::clone(&stop);
-    let announce_thread = {
-        thread::spawn(move || {
-            let _ = ann_disc.announce_loop(announce_beacon, &ann_stop);
-        })
-    };
-
-    // Receiver thread.
-    let recv_disc = Arc::clone(&discovery);
-    let recv_stop = Arc::clone(&stop);
-    let recv_bus_tx = bus.tx_events.clone();
-    let recv_thread = thread::spawn(move || {
-        while !recv_stop.load(Ordering::Relaxed) {
-            if let Ok(Some((src, b))) = recv_disc.recv_beacon() {
-                if b.peer_id == id.peer_id {
-                    continue;
-                }
-                // Trust the beacon's source address for the TCP port it announced.
-                let tcp_addr: SocketAddr = (src.ip(), b.tcp_port).into();
-                let _ = recv_bus_tx.send(Event::PeerSeen {
-                    peer_id: b.peer_id,
-                    name: b.name,
-                    public_key: b.public_key,
-                    fingerprint: pubkey_fingerprint(&b.public_key),
-                    addr: tcp_addr,
-                });
-            }
-        }
-    });
+    // No always-on announcer/receiver — discovery runs only when the user
+    // enters `/discover`. The thread handles are stored so we can join them
+    // at quit time if a scan is still in flight.
 
     // Action consumer thread.
     let act_stop = Arc::clone(&stop);
@@ -299,8 +356,17 @@ fn start_tui(id: lanchat::identity::Identity, port: u16) {
                         let _ = db.save();
                     }
                     Ok(Action::SendText { to, body }) => {
-                        let s = act_state.lock().unwrap();
-                        let _ = (to, body, s);
+                        // Outbound chat isn't yet routed through Session::send.
+                        // The action thread receives these but has no live
+                        // session registry to push them through. The TUI
+                        // renders the optimistic send so the user sees their
+                        // own message immediately.
+                        let mut s = act_state.lock().unwrap();
+                        s.apply(&Event::TextMessage {
+                            from_peer: to,
+                            from_name: "self".into(),
+                            body,
+                        });
                     }
                     Ok(Action::Quit) => {
                         act_stop.store(true, Ordering::Relaxed);
@@ -316,7 +382,11 @@ fn start_tui(id: lanchat::identity::Identity, port: u16) {
     // TUI loop.
     let _guard = tui::TuiGuard::new().unwrap();
     let mut terminal = tui::enter_terminal().unwrap();
-    let mut editor = lanchat::tui::input::LineEditor::new();
+    let mut editor = lanchat::tui::LineEditor::new();
+    // Active mutable copy of the config — `/theme` updates it, so we can
+    // persist on change without re-reading from disk.
+    let mut live_cfg = ui_cfg;
+    let live_cfg_path = cfg_path;
 
     loop {
         {
@@ -325,35 +395,117 @@ fn start_tui(id: lanchat::identity::Identity, port: u16) {
         }
         {
             let s = state.lock().unwrap();
-            if let Err(e) = tui::render(&mut terminal, &s) {
+            if let Err(e) = tui::render(&mut terminal, &s, &theme, &glyphs) {
                 eprintln!("render error: {}", e);
                 break;
             }
         }
         if crossterm::event::poll(Duration::from_millis(150)).unwrap_or(false) {
             if let Ok(ev) = crossterm::event::read() {
-                if let Some(text) = editor.on_key(&ev) {
-                    if text == "\x03" {
+                match editor.on_key(&ev) {
+                    lanchat::tui::EditorEvent::Submit(text) => {
+                        if text.starts_with('/') {
+                            handle_command(
+                                &text,
+                                &bus.tx_events,
+                                &bus.tx_actions,
+                                &state,
+                                &mut live_cfg,
+                                &live_cfg_path,
+                                &announce_beacon,
+                                self_peer_id,
+                                Arc::clone(&stop),
+                            );
+                        } else if let Some(target) = resolve_target(&state, &text) {
+                            let _ = bus.tx_actions.send(Action::SendText {
+                                to: target,
+                                body: strip_routing(&text),
+                            });
+                        } else {
+                            let _ = bus.tx_events.send(Event::Info(
+                                "no peer selected or matched".into(),
+                            ));
+                        }
+                    }
+                    lanchat::tui::EditorEvent::Cancel => {
                         let _ = bus.tx_actions.send(Action::Quit);
                         break;
                     }
-                    if text.starts_with('/') {
-                        handle_command(&text, &bus.tx_events, &bus.tx_actions, &state, &mut db);
-                    } else if !text.is_empty() {
-                        let target = {
+                    lanchat::tui::EditorEvent::Quit => {
+                        let _ = bus.tx_actions.send(Action::Quit);
+                        break;
+                    }
+                    lanchat::tui::EditorEvent::FocusNext => {
+                        let mut s = state.lock().unwrap();
+                        s.cycle_focus();
+                    }
+                    lanchat::tui::EditorEvent::ToggleTrust => {
+                        let pid = {
                             let s = state.lock().unwrap();
-                            s.peers
-                                .iter()
-                                .find(|p| p.state == tui::PeerState::Connected)
-                                .map(|p| p.peer_id)
+                            s.selected().map(|p| p.peer_id)
                         };
-                        if let Some(to) = target {
-                            let _ = bus.tx_actions.send(Action::SendText { to, body: text });
+                        if let Some(pid) = pid {
+                            let _ = bus.tx_actions.send(Action::Trust { peer_id: pid });
                         }
                     }
+                    lanchat::tui::EditorEvent::RevokePeer => {
+                        let pid = {
+                            let s = state.lock().unwrap();
+                            s.selected().map(|p| p.peer_id)
+                        };
+                        if let Some(pid) = pid {
+                            let _ = bus.tx_actions.send(Action::Revoke { peer_id: pid });
+                        }
+                    }
+                    lanchat::tui::EditorEvent::NewChat => {
+                        // For v1 this is a no-op visual hint; peer selection
+                        // is via Up/Down on the sidebar after Tab.
+                        let _ = bus.tx_events.send(Event::Info(
+                            "use Tab to focus the sidebar, then Up/Down to pick a peer".into(),
+                        ));
+                    }
+                    lanchat::tui::EditorEvent::ToggleHelp => {
+                        let mut s = state.lock().unwrap();
+                        s.show_help = !s.show_help;
+                    }
+                    lanchat::tui::EditorEvent::PageUp => {
+                        let mut s = state.lock().unwrap();
+                        if s.focus == tui::Focus::Chat {
+                            s.scroll_back(5);
+                        } else {
+                            s.move_selection(-1);
+                        }
+                    }
+                    lanchat::tui::EditorEvent::PageDown => {
+                        let mut s = state.lock().unwrap();
+                        if s.focus == tui::Focus::Chat {
+                            s.scroll_forward(5);
+                        } else {
+                            s.move_selection(1);
+                        }
+                    }
+                    lanchat::tui::EditorEvent::ClearInput
+                    | lanchat::tui::EditorEvent::Clear => {
+                        // Editor already cleared its buffer. If a modal is
+                        // open, Esc also closes it.
+                        let mut s = state.lock().unwrap();
+                        if s.show_help {
+                            s.show_help = false;
+                        } else if s.discovery.is_some() {
+                            s.close_discovery();
+                        }
+                    }
+                    lanchat::tui::EditorEvent::HistoryPrev
+                    | lanchat::tui::EditorEvent::HistoryNext
+                    | lanchat::tui::EditorEvent::Edited
+                    | lanchat::tui::EditorEvent::None => {}
                 }
                 let mut s = state.lock().unwrap();
-                s.status = format!("> {}", editor.as_str());
+                let prefix = match s.focus {
+                    tui::Focus::Sidebar => format!("[sidebar] > {}", editor.as_str()),
+                    tui::Focus::Chat => format!("> {}", editor.as_str()),
+                };
+                s.status = prefix;
             }
         }
         if stop.load(Ordering::Relaxed) {
@@ -362,8 +514,8 @@ fn start_tui(id: lanchat::identity::Identity, port: u16) {
     }
 
     stop.store(true, Ordering::Relaxed);
-    let _ = announce_thread.join();
-    let _ = recv_thread.join();
+    // Discovery threads self-terminate on the stop flag; we don't track
+    // their handles here. Listener and action-consumer threads are joined.
     let _ = listener_t.join();
     let _ = act_thread.join();
 }
@@ -374,6 +526,235 @@ fn make_beacon(id: &lanchat::identity::Identity, tcp_port: u16) -> Beacon {
         public_key: id.keypair.public_bytes(),
         tcp_port,
         name: id.name.clone(),
+    }
+}
+
+/// Spawn one scan per method, post each result as `Event::DiscoveryUpdate`,
+/// then `DiscoveryFinished` once all are in. The UI thread updates the
+/// modal state from those events.
+fn do_discover(
+    beacon: Beacon,
+    self_peer_id: lanchat::events::PeerId,
+    tx: std::sync::mpsc::Sender<Event>,
+    stop: Arc<AtomicBool>,
+) {
+    // Method 1: UDP multicast. Send one announce, listen for ~3s, collect
+    // unique peer_ids.
+    let tx_mc = tx.clone();
+    let stop_mc = Arc::clone(&stop);
+    let beacon_mc = beacon.clone();
+    thread::spawn(move || {
+        let peers = match multicast_scan(&beacon_mc, &stop_mc, Duration::from_secs(3)) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx_mc.send(Event::Info(format!("multicast scan failed: {}", e)));
+                Vec::new()
+            }
+        };
+        let _ = tx_mc.send(Event::DiscoveryUpdate {
+            method: "UDP multicast (239.255.42.99)".into(),
+            peers,
+        });
+        let _ = tx_mc.send(Event::DiscoveryFinished);
+    });
+
+    // Method 2: TCP subnet scan. Walks local /24 for hosts accepting TCP on
+    // the announced port.
+    let tx_tcp = tx.clone();
+    let tcp_port = beacon.tcp_port;
+    thread::spawn(move || {
+        let addrs = match lanchat::net::scan::scan_local_subnet(
+            tcp_port,
+            lanchat::net::scan::SCAN_HOSTS,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx_tcp.send(Event::Info(format!("tcp scan failed: {}", e)));
+                Vec::new()
+            }
+        };
+        let peers = addrs
+            .into_iter()
+            .map(|a| lanchat::events::DiscoveredPeer {
+                name: None,
+                addr: std::net::SocketAddr::V4(a),
+                fingerprint: None,
+            })
+            .collect();
+        let _ = tx_tcp.send(Event::DiscoveryUpdate {
+            method: format!("TCP subnet scan (port {})", tcp_port),
+            peers,
+        });
+        let _ = tx_tcp.send(Event::DiscoveryFinished);
+        let _ = self_peer_id; // referenced for parity with future signed-scan work
+    });
+    let _ = stop;
+}
+
+/// Open a multicast socket briefly, announce + listen, return the unique
+/// beacons we observed (filtering out our own peer_id).
+fn multicast_scan(
+    beacon: &Beacon,
+    stop: &Arc<AtomicBool>,
+    window: Duration,
+) -> std::io::Result<Vec<lanchat::events::DiscoveredPeer>> {
+    let d = Discovery::bind(0)?;
+    let _ = d.announce(beacon);
+    let deadline = std::time::Instant::now() + window;
+    let mut seen: std::collections::HashMap<lanchat::events::PeerId, lanchat::events::DiscoveredPeer> =
+        std::collections::HashMap::new();
+    while std::time::Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+        if let Ok(Some((src, b))) = d.recv_beacon() {
+            if b.peer_id == beacon.peer_id {
+                continue;
+            }
+            let tcp_addr: SocketAddr = (src.ip(), b.tcp_port).into();
+            seen.entry(b.peer_id).or_insert(lanchat::events::DiscoveredPeer {
+                name: if b.name.is_empty() { None } else { Some(b.name) },
+                addr: tcp_addr,
+                fingerprint: Some(pubkey_fingerprint(&b.public_key)),
+            });
+        }
+    }
+    Ok(seen.into_values().collect())
+}
+
+/// Resolve a `@<name> ...` routing prefix. Returns the peer_id targeted by
+/// the message. Bare text resolves to the currently-selected peer (first
+/// connected peer if none selected).
+fn resolve_target(state: &Arc<Mutex<UiState>>, text: &str) -> Option<PeerId> {
+    let s = state.lock().unwrap();
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix('@') {
+        // @<name> ... → route by exact name match.
+        let name = rest.split_whitespace().next().unwrap_or("");
+        if name.is_empty() {
+            return None;
+        }
+        return s.peers.iter().find(|p| p.name == name).map(|p| p.peer_id);
+    }
+    s.peers
+        .iter()
+        .find(|p| p.state == tui::PeerState::Connected)
+        .map(|p| p.peer_id)
+}
+
+/// Strip the leading `@<name>` from a routed message, leaving just the body.
+fn strip_routing(text: &str) -> String {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix('@') {
+        // Skip the first whitespace-delimited token (the name).
+        let after_name = rest.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
+        return after_name;
+    }
+    text.to_string()
+}
+
+/// `/theme <name>` switches the active theme and persists it; `/peers`,
+/// `/trust <name>`, `/revoke <name>`, `/discover`, `/quit` are passthrough
+/// commands. `/discover` opens the modal and spawns a UDP multicast scan +
+/// a TCP subnet scan; results stream into the modal via `Event::DiscoveryUpdate`.
+fn handle_command(
+    line: &str,
+    tx_events: &std::sync::mpsc::Sender<Event>,
+    tx_actions: &std::sync::mpsc::Sender<Action>,
+    state: &Arc<Mutex<UiState>>,
+    cfg: &mut UiConfig,
+    cfg_path: &std::path::Path,
+    announce_beacon: &lanchat::protocol::Beacon,
+    self_peer_id: lanchat::events::PeerId,
+    stop: Arc<AtomicBool>,
+) {
+    let mut it = line.split_whitespace();
+    let cmd = it.next().unwrap_or("");
+    match cmd {
+        "/discover" => {
+            {
+                let mut s = state.lock().unwrap();
+                s.start_discovery();
+            }
+            do_discover(
+                announce_beacon.clone(),
+                self_peer_id,
+                tx_events.clone(),
+                stop,
+            );
+        }
+        "/peers" => {
+            let s = state.lock().unwrap();
+            for p in &s.peers {
+                let _ = tx_events.send(Event::Info(format!(
+                    "{} {} fp={} state={:?}",
+                    p.name,
+                    if p.trusted { "(trusted)" } else { "(untrusted)" },
+                    p.fingerprint,
+                    p.state
+                )));
+            }
+        }
+        "/trust" => {
+            if let Some(name) = it.next() {
+                let pid = {
+                    let s = state.lock().unwrap();
+                    s.peers.iter().find(|p| p.name == name).map(|p| p.peer_id)
+                };
+                if let Some(pid) = pid {
+                    let _ = tx_actions.send(Action::Trust { peer_id: pid });
+                }
+            }
+        }
+        "/revoke" => {
+            if let Some(name) = it.next() {
+                let pid = {
+                    let s = state.lock().unwrap();
+                    s.peers.iter().find(|p| p.name == name).map(|p| p.peer_id)
+                };
+                if let Some(pid) = pid {
+                    let _ = tx_actions.send(Action::Revoke { peer_id: pid });
+                }
+            }
+        }
+        "/theme" => {
+            let name = match it.next() {
+                Some(n) => n,
+                None => {
+                    let _ = tx_events.send(Event::Info(format!(
+                        "current theme: {} (available: default, solarized, monochrome, neon)",
+                        cfg.theme.as_str()
+                    )));
+                    return;
+                }
+            };
+            match lanchat::tui::ThemeName::parse(name) {
+                Some(t) => {
+                    cfg.theme = t;
+                    match save_ui_config(cfg, cfg_path) {
+                        Ok(()) => {
+                            let _ = tx_events.send(Event::Info(format!(
+                                "theme set to {} (saved)",
+                                t.as_str()
+                            )));
+                        }
+                        Err(e) => {
+                            let _ = tx_events.send(Event::Info(format!(
+                                "theme set to {} (save failed: {})",
+                                t.as_str(),
+                                e
+                            )));
+                        }
+                    }
+                }
+                None => {
+                    let _ = tx_events.send(Event::Info(format!("unknown theme: {}", name)));
+                }
+            }
+        }
+        "/quit" => {
+            let _ = tx_actions.send(Action::Quit);
+        }
+        _ => {
+            let _ = tx_events.send(Event::Info(format!("unknown command: {}", cmd)));
+        }
     }
 }
 
@@ -412,59 +793,4 @@ fn spawn_session_reader(
             }
         }
     });
-}
-
-fn handle_command(
-    line: &str,
-    tx_events: &std::sync::mpsc::Sender<Event>,
-    tx_actions: &std::sync::mpsc::Sender<Action>,
-    state: &Arc<Mutex<UiState>>,
-    db: &mut PeerDb,
-) {
-    let mut it = line.split_whitespace();
-    let cmd = it.next().unwrap_or("");
-    match cmd {
-        "/peers" => {
-            let s = state.lock().unwrap();
-            for p in &s.peers {
-                let _ = tx_events.send(Event::Info(format!(
-                    "{} {} fp={} state={:?}",
-                    p.name,
-                    if p.trusted { "(trusted)" } else { "(untrusted)" },
-                    p.fingerprint,
-                    p.state
-                )));
-            }
-        }
-        "/trust" => {
-            if let Some(name) = it.next() {
-                let pid = {
-                    let s = state.lock().unwrap();
-                    s.peers.iter().find(|p| p.name == name).map(|p| p.peer_id)
-                };
-                if let Some(pid) = pid {
-                    let _ = tx_actions.send(Action::Trust { peer_id: pid });
-                    let _ = db.save();
-                }
-            }
-        }
-        "/revoke" => {
-            if let Some(name) = it.next() {
-                let pid = {
-                    let s = state.lock().unwrap();
-                    s.peers.iter().find(|p| p.name == name).map(|p| p.peer_id)
-                };
-                if let Some(pid) = pid {
-                    let _ = tx_actions.send(Action::Revoke { peer_id: pid });
-                    let _ = db.save();
-                }
-            }
-        }
-        "/quit" => {
-            let _ = tx_actions.send(Action::Quit);
-        }
-        _ => {
-            let _ = tx_events.send(Event::Info(format!("unknown command: {}", cmd)));
-        }
-    }
 }

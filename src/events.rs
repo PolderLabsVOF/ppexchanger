@@ -50,6 +50,22 @@ pub enum Event {
     PeerGone { peer_id: PeerId, name: String },
     /// Free-form status string the UI should display.
     Info(String),
+    /// One scan method finished — its findings land in the discovery modal.
+    DiscoveryUpdate {
+        method: String,
+        peers: Vec<DiscoveredPeer>,
+    },
+    /// All `/discover` methods have completed.
+    DiscoveryFinished,
+}
+
+/// One peer discovered by a scan. Mirrors the public struct in
+/// `tui::discovery_popup` so the network thread can construct it directly.
+#[derive(Debug, Clone)]
+pub struct DiscoveredPeer {
+    pub name: Option<String>,
+    pub addr: SocketAddr,
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug)]
