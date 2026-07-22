@@ -43,15 +43,24 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo registry + target
+      - name: Cache cargo registry (target cache disabled to avoid cross-target contamination)
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          # Prefix-key the cache per matrix target so the same target/
-          # subdir never gets another target's artifacts restored into it.
-          prefix-key: ${{ matrix.target }}-v1
+          # We rely on CARGO_TARGET_DIR pointing at a per-target dir, so
+          # sharing the cache across matrix entries would only ever
+          # restore objects into the wrong target. Skip target cache.
+          cache-target: false
+          # But share the registry cache so we don't re-download crates
+          # on every matrix run.
+          prefix-key: registry-v2
 
       - name: Build release binary (stripped)
+        env:
+          # Per-target target/ so each matrix entry has its own cache
+          # space and Swatinem/rust-cache can't accidentally cross-pollinate
+          # x86_64 object files into the aarch64 build.
+          CARGO_TARGET_DIR: target-${{ matrix.target }}
         run: |
           # NB: no --locked here. On a cold cargo cache, a fresh target
           # triple triggers a registry update which --locked would block.
@@ -59,7 +68,7 @@ jobs:
           # build can only add (not change) entries — safe for releases.
           cargo build --release --target "${{ matrix.target }}"
           mkdir -p staging/bin
-          cp "target/${{ matrix.target }}/release/lanchat" staging/bin/lanchat
+          cp "target-${{ matrix.target }}/${{ matrix.target }}/release/lanchat" staging/bin/lanchat
           strip "staging/bin/lanchat" || true   # best-effort — strip(1) may be absent for some targets
           ls -la staging/bin/lanchat
 
