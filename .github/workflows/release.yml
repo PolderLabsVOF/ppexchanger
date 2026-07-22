@@ -50,7 +50,11 @@ jobs:
 
       - name: Build release binary (stripped)
         run: |
-          cargo build --release --target "${{ matrix.target }}" --locked
+          # NB: no --locked here. On a cold cargo cache, a fresh target
+          # triple triggers a registry update which --locked would block.
+          # The dep list is version-pinned and small, so an unlocked
+          # build can only add (not change) entries — safe for releases.
+          cargo build --release --target "${{ matrix.target }}"
           mkdir -p staging/bin
           cp "target/${{ matrix.target }}/release/lanchat" staging/bin/lanchat
           strip "staging/bin/lanchat" || true   # best-effort — strip(1) may be absent for some targets
