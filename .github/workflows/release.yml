@@ -32,13 +32,9 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            archive_basename: lanchat-x86_64-linux
           - target: aarch64-unknown-linux-gnu
-            archive_basename: lanchat-aarch64-linux
           - target: x86_64-apple-darwin
-            archive_basename: lanchat-x86_64-darwin
           - target: aarch64-apple-darwin
-            archive_basename: lanchat-aarch64-darwin
     steps:
       - uses: actions/checkout@v4
 
@@ -63,22 +59,20 @@ jobs:
       - name: Compose tarball + checksums
         env:
           TAG_BARE: ${{ github.ref_name }}
-          BASENAME: ${{ matrix.archive_basename }}
+          TARGET: ${{ matrix.target }}
         run: |
           TAG_BARE="${TAG_BARE#v}"
-          ASSET="${BASENAME}-${TAG_BARE}.tar.gz"
+          ASSET="lanchat-${TAG_BARE}-${TARGET}.tar.gz"
           tar -C staging -czf "${ASSET}" bin/lanchat
-          # SHA256SUMS covers every tarball + the install script. The
-          # install.sh sha is checked into the release description so the
-          # one-liner can verify it before running.
-          sha256sum "${ASSET}" > SHA256SUMS
-          sha256sum install.sh >> SHA256SUMS
+          # SHA256SUMS covers the tarball + the install script so the
+          # installer's checksum check matches what's published.
+          sha256sum "${ASSET}" install.sh > SHA256SUMS
           cat SHA256SUMS
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.archive_basename }}
+          name: lanchat-${{ matrix.target }}
           path: |
             *.tar.gz
             SHA256SUMS
@@ -95,14 +89,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-          merge-multiple: true
+          merge-multiple: false   # keep each target in its own subdir
 
       - name: Compose single SHA256SUMS across all targets
         run: |
-          # Each matrix job already wrote its own SHA256SUMS; merge them.
-          # Deduplicate the install.sh entry — every job hashed it but it
-          # only needs to be in the manifest once.
-          cat dist/SHA256SUMS | sort -u -k2 > SHA256SUMS
+          # Each matrix job wrote its own SHA256SUMS containing one
+          # tarball + the install.sh entry. Concatenate, then dedupe by
+          # filename (the install.sh line repeats once per target but it
+          # hashes identically so sort -u collapses it).
+          cat dist/*/SHA256SUMS | sort -u -k2 > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create / update GitHub release
@@ -114,7 +109,7 @@ jobs:
           files: |
             SHA256SUMS
             install.sh
-            dist/*.tar.gz
+            dist/**/*.tar.gz
           fail_on_unmatched_files: true
           draft: false
           prerelease: false
