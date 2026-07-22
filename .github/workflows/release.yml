@@ -47,13 +47,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          # We rely on CARGO_TARGET_DIR pointing at a per-target dir, so
-          # sharing the cache across matrix entries would only ever
-          # restore objects into the wrong target. Skip target cache.
-          cache-target: false
+          # Disable target-dir caching. Each matrix entry writes to its
+          # own CARGO_TARGET_DIR, but rust-cache can't reliably isolate
+          # overlapping target/ subdirs across matrix jobs — it has been
+          # restoring x86_64 .o files into the aarch64 build dir, which
+          # then fails to link.
+          cache-targets: false
           # But share the registry cache so we don't re-download crates
           # on every matrix run.
-          prefix-key: registry-v2
+          prefix-key: registry-v3
 
       - name: Build release binary (stripped)
         env:
