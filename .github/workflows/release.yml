@@ -53,18 +53,16 @@ jobs:
           # aarch64 std library available for codegen.
           rustup target add "${{ matrix.target }}"
 
-      - name: Cache cargo registry only (target artifacts per-build)
+      - name: Cache cargo registry (per-target key)
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          # Disable target-dir caching entirely. Each matrix entry writes
-          # to its own CARGO_TARGET_DIR, but rust-cache's target cache
-          # has been restoring host (x86_64) .o files into aarch64 build
-          # dirs, breaking the link. The cost of recompiling on every
-          # release is small (5 deps, ~10 crates total).
+          # Per-target prefix-key — sharing the cache across matrix entries
+          # was restoring x86_64 compiled artifacts into the aarch64 build
+          # dir. Each target now has its own cache namespace.
+          prefix-key: ${{ matrix.target }}-v5
           cache-targets: false
           cache-workspace-crates: false
-          prefix-key: registry-v4
 
       - name: Build release binary (stripped)
         env:
