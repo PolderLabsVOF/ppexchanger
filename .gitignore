@@ -1,3 +1,9 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# Local release staging (created when building tarballs by hand for
+# upload — the GH Actions workflow writes its own to GHA's workspace).
+staging/
+SHA256SUMS
+lanchat-*.tar.gz
