@@ -55,10 +55,13 @@ pub fn peer_id_from_pubkey(pubkey: &[u8; 32]) -> [u8; 16] {
     out
 }
 
-/// Bind on `0.0.0.0:port` (use port `0` for ephemeral) and return the listener.
+/// Bind on `0.0.0.0:port` (use port `0` for ephemeral) and return a
+/// non-blocking listener. Non-blocking lets the accept loop also check
+/// a stop flag between attempts so shutdown doesn't hang on a parked
+/// `accept()` call.
 pub fn bind(port: u16) -> std::io::Result<TcpListener> {
     let l = TcpListener::bind(("0.0.0.0", port))?;
-    l.set_nonblocking(false)?;
+    l.set_nonblocking(true)?;
     Ok(l)
 }
 

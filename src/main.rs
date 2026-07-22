@@ -269,8 +269,10 @@ fn start_tui(
         let stop2 = Arc::clone(&stop);
         let reg_tx2 = reg_tx.clone();
         thread::spawn(move || {
-            let _ = stop2; // currently unused — listener runs until drop
             loop {
+                if stop2.load(Ordering::Relaxed) {
+                    break;
+                }
                 match listener.accept() {
                     Ok((stream, addr)) => {
                         let kp2 = Arc::clone(&kp);
@@ -477,6 +479,8 @@ fn start_tui(
         {
             let mut s = state.lock().unwrap();
             tui::drain_events(&bus.rx_events, &mut s);
+            // Stable sidebar ordering: Connected > Seen > Gone, then name.
+            s.sort_peers();
         }
         {
             let s = state.lock().unwrap();

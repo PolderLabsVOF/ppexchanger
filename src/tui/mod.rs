@@ -283,6 +283,29 @@ impl UiState {
         self.peers.get(self.selected_peer)
     }
 
+    /// Re-sort peers so Connected come first, then Seen, then Gone, then
+    /// alphabetical by name. Called once after each event drain so the
+    /// sidebar order stays stable as peers come and go.
+    pub fn sort_peers(&mut self) {
+        self.peers.sort_by(|a, b| {
+            let ra = match a.state {
+                PeerState::Connected => 0,
+                PeerState::Seen => 1,
+                PeerState::Gone => 2,
+            };
+            let rb = match b.state {
+                PeerState::Connected => 0,
+                PeerState::Seen => 1,
+                PeerState::Gone => 2,
+            };
+            ra.cmp(&rb).then_with(|| a.name.cmp(&b.name))
+        });
+        // Keep selection on the same peer (or clamp if it moved).
+        if self.selected_peer >= self.peers.len() {
+            self.selected_peer = self.peers.len().saturating_sub(1);
+        }
+    }
+
     /// Move selection by `delta`, clamped to `0..peers.len()`.
     pub fn move_selection(&mut self, delta: i32) {
         if self.peers.is_empty() {
@@ -765,5 +788,60 @@ mod tests {
         // Same method reported twice — should produce one entry, not two.
         assert_eq!(d.results.len(), 1);
         assert_eq!(d.results[0].peers.len(), 2);
+    }
+
+    #[test]
+    fn sort_peers_groups_connected_first_then_seen_then_gone() {
+        let id = Identity {
+            peer_id: [0u8; 16],
+            keypair: crate::crypto::Keypair::generate(),
+            name: "alice".into(),
+        };
+        let mut s = UiState::from_identity(&id);
+        let mk = |pid: u8, name: &str, state: PeerState| UiPeer {
+            peer_id: [pid; 16],
+            name: name.into(),
+            fingerprint: String::new(),
+            trusted: false,
+            state,
+        };
+        s.peers = vec![
+            mk(1, "carol", PeerState::Seen),
+            mk(2, "bob", PeerState::Connected),
+            mk(3, "alice-friend", PeerState::Gone),
+            mk(4, "dave", PeerState::Connected),
+        ];
+        s.selected_peer = 0;
+        s.sort_peers();
+        // Connected (bob, dave) sorted alphabetically, then Seen (carol),
+        // then Gone (alice-friend).
+        let names: Vec<&str> = s.peers.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["bob", "dave", "carol", "alice-friend"]);
+    }
+
+    #[test]
+    fn sort_peers_clamps_selection_when_peers_removed() {
+        let id = Identity {
+            peer_id: [0u8; 16],
+            keypair: crate::crypto::Keypair::generate(),
+            name: "alice".into(),
+        };
+        let mut s = UiState::from_identity(&id);
+        let mk = |pid: u8, name: &str, state: PeerState| UiPeer {
+            peer_id: [pid; 16],
+            name: name.into(),
+            fingerprint: String::new(),
+            trusted: false,
+            state,
+        };
+        s.peers = vec![
+            mk(1, "a", PeerState::Connected),
+            mk(2, "b", PeerState::Connected),
+            mk(3, "c", PeerState::Connected),
+        ];
+        s.selected_peer = 2;
+        s.peers.remove(2);
+        s.sort_peers();
+        assert_eq!(s.selected_peer, 1);
     }
 }
