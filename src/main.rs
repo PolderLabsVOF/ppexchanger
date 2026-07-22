@@ -12,19 +12,20 @@
 //!   * no flags              start the TUI
 
 use lanchat::config::{config_dir, identity_path};
-use lanchat::events::{Action, Bus, Event, PeerId};
+use lanchat::events::{Action, Bus, Event, PeerId, RegistryMsg};
 use lanchat::identity::load_or_create;
 use lanchat::net::discovery::Discovery;
-use lanchat::net::listener::{self, AcceptedPeer};
+use lanchat::net::listener;
 use lanchat::net::peer;
 use lanchat::net::session::Session;
 use lanchat::peerdb::PeerDb;
-use lanchat::protocol::{fingerprint as pubkey_fingerprint, Beacon};
+use lanchat::protocol::{fingerprint as pubkey_fingerprint, Beacon, FrameBody};
 use lanchat::tui::{self, UiConfig, UiState};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -244,6 +245,11 @@ fn start_tui(
 
     let stop = Arc::new(AtomicBool::new(false));
 
+    // Registry channel: the inbound listener uses it to hand outbound
+    // senders (for newly-accepted sessions) over to the action consumer,
+    // which owns the registry and routes outbound messages through it.
+    let (reg_tx, reg_rx) = mpsc::channel::<RegistryMsg>();
+
     // Build the announce beacon once; it's reused on every `/discover`.
     let announce_beacon = make_beacon(&id, bound_port);
     // Keep a copy of our peer_id for discovery filtering (so we ignore our
@@ -254,12 +260,14 @@ fn start_tui(
     // it without cloning the inner struct (Keypair is intentionally not Clone).
     let static_kp: Arc<lanchat::crypto::Keypair> = Arc::new(id.keypair);
 
-    // Listener thread: accepts inbound TCP, runs responder handshake, posts
-    // AcceptedPeer to the bus.
+    // Listener thread: accepts inbound TCP, runs responder handshake,
+    // hands the outbound sender to the action thread via RegistryMsg,
+    // and spawns the per-connection session driver.
     let listener_t = {
         let tx = bus.tx_events.clone();
         let kp = Arc::clone(&static_kp);
         let stop2 = Arc::clone(&stop);
+        let reg_tx2 = reg_tx.clone();
         thread::spawn(move || {
             let _ = stop2; // currently unused — listener runs until drop
             loop {
@@ -267,6 +275,7 @@ fn start_tui(
                     Ok((stream, addr)) => {
                         let kp2 = Arc::clone(&kp);
                         let tx2 = tx.clone();
+                        let reg_tx3 = reg_tx2.clone();
                         thread::spawn(move || {
                             let mut s = stream;
                             match lanchat::net::handshake::run_responder(&mut s, &kp2) {
@@ -277,18 +286,36 @@ fn start_tui(
                                         res.recv_key,
                                         res.remote_static,
                                     );
+                                    let peer_id = lanchat::net::listener::peer_id_from_pubkey(
+                                        &session.remote_static,
+                                    );
+                                    let fp = res.remote_fingerprint.clone();
                                     let _ = tx2.send(Event::Info(format!(
                                         "inbound peer from {} (fp {})",
-                                        addr, res.remote_fingerprint
+                                        addr, fp
                                     )));
-                                    let (event, _peer_session) = AcceptedPeer {
-                                        remote_addr: addr,
-                                        remote_static: res.remote_static,
-                                        remote_fingerprint: res.remote_fingerprint.clone(),
+                                    let _ = tx2.send(Event::PeerConnected {
+                                        peer_id,
+                                        name: format!("peer@{}", addr),
+                                        fingerprint: fp.clone(),
+                                        trusted: false,
+                                        addr,
+                                    });
+                                    let (otx, orx) = mpsc::channel::<FrameBody>();
+                                    let _ = reg_tx3.send(RegistryMsg::Register {
+                                        peer_id,
+                                        name: format!("peer@{}", addr),
+                                        sender: otx,
+                                    });
+                                    let reg_tx4 = reg_tx3.clone();
+                                    peer::spawn_session_driver_with_reg(
                                         session,
-                                    }
-                                    .into_event();
-                                    let _ = tx2.send(event);
+                                        peer_id,
+                                        fp,
+                                        orx,
+                                        tx2,
+                                        Some(reg_tx4),
+                                    );
                                 }
                                 Err(_e) => {}
                             }
@@ -306,34 +333,59 @@ fn start_tui(
     // enters `/discover`. The thread handles are stored so we can join them
     // at quit time if a scan is still in flight.
 
-    // Action consumer thread.
+    // Action consumer thread. Owns the outbound registry: one
+    // `mpsc::Sender<FrameBody>` per live peer session. Inbound listener
+    // feeds it `RegistryMsg::Register`; the driver disconnects post
+    // `Event::PeerGone`, which we translate to `RegistryMsg::Unregister`.
+    // Action::SendText pushes a frame into the registered sender.
     let act_stop = Arc::clone(&stop);
     let act_bus_tx = bus.tx_events.clone();
     let act_bus_rx = bus.rx_actions; // moved in
     let act_state = Arc::clone(&state);
     let act_thread = {
         let kp = Arc::clone(&static_kp);
+        let act_reg_tx = reg_tx.clone();
         thread::spawn(move || {
-            let mut _known: HashMap<PeerId, SocketAddr> = HashMap::new();
+            let mut outbound: HashMap<PeerId, mpsc::Sender<FrameBody>> = HashMap::new();
+            let mut peer_names: HashMap<PeerId, String> = HashMap::new();
             while !act_stop.load(Ordering::Relaxed) {
-                match act_bus_rx.recv_timeout(Duration::from_millis(200)) {
+                // Poll the action channel with a short timeout so we can
+                // also drain the registry channel between bursts.
+                match act_bus_rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(Action::Connect {
                         addr,
                         name_hint,
                         public_key: _,
                     }) => {
-                        if let Ok(sess) = peer::dial(addr, &kp) {
-                            let fp = pubkey_fingerprint(&sess.remote_static);
-                            let peer_id = lanchat::net::listener::peer_id_from_pubkey(&sess.remote_static);
-                            let _ = act_bus_tx.send(Event::PeerConnected {
-                                peer_id,
-                                name: name_hint,
-                                fingerprint: fp,
-                                trusted: false,
+                        // peer::connect dials, handshakes, spawns the
+                        // driver, and registers its outbound sender with
+                        // the action consumer's registry before returning.
+                        // On any failure it has already posted an Info
+                        // event and returns None.
+                        let tx_clone = act_bus_tx.clone();
+                        let kp_clone = Arc::clone(&kp);
+                        let reg_clone = act_reg_tx.clone();
+                        thread::spawn(move || {
+                            if let Some((peer_id, discovered)) = peer::connect(
                                 addr,
-                            });
-                            spawn_session_reader(sess, addr, act_bus_tx.clone());
-                        }
+                                Some(name_hint.clone()),
+                                &kp_clone,
+                                tx_clone.clone(),
+                                reg_clone,
+                            ) {
+                                let _ = tx_clone.send(Event::PeerConnected {
+                                    peer_id,
+                                    name: discovered
+                                        .name
+                                        .unwrap_or_else(|| format!("peer@{}", addr)),
+                                    fingerprint: discovered
+                                        .fingerprint
+                                        .unwrap_or_else(|| "?".into()),
+                                    trusted: false,
+                                    addr,
+                                });
+                            }
+                        });
                     }
                     Ok(Action::Trust { peer_id }) => {
                         let mut s = act_state.lock().unwrap();
@@ -344,9 +396,13 @@ fn start_tui(
                         db.trust(&peer_id);
                         let _ = db.save();
                     }
-                    Ok(Action::Disconnect { peer_id: _ }) => {
-                        // For v1, peer disconnects are handled via PeerGone events;
-                        // we don't actively close sessions here yet.
+                    Ok(Action::Disconnect { peer_id }) => {
+                        // Drop our reference to the outbound sender; the
+                        // driver thread sees the channel close and exits
+                        // on its next drain, posting Unregister via the
+                        // registry channel as a side-effect.
+                        outbound.remove(&peer_id);
+                        peer_names.remove(&peer_id);
                     }
                     Ok(Action::Revoke { peer_id }) => {
                         let mut s = act_state.lock().unwrap();
@@ -354,26 +410,55 @@ fn start_tui(
                         let mut db = PeerDb::default();
                         db.revoke(&peer_id);
                         let _ = db.save();
+                        outbound.remove(&peer_id);
+                        peer_names.remove(&peer_id);
                     }
                     Ok(Action::SendText { to, body }) => {
-                        // Outbound chat isn't yet routed through Session::send.
-                        // The action thread receives these but has no live
-                        // session registry to push them through. The TUI
-                        // renders the optimistic send so the user sees their
-                        // own message immediately.
-                        let mut s = act_state.lock().unwrap();
-                        s.apply(&Event::TextMessage {
-                            from_peer: to,
-                            from_name: "self".into(),
-                            body,
-                        });
+                        // Optimistic local echo: render the sent line in
+                        // the UI immediately so the user sees feedback.
+                        let name = peer_names
+                            .get(&to)
+                            .cloned()
+                            .unwrap_or_else(|| "self".into());
+                        {
+                            let mut s = act_state.lock().unwrap();
+                            s.apply(&Event::TextMessage {
+                                from_peer: to,
+                                from_name: name,
+                                body: body.clone(),
+                            });
+                        }
+                        // Push the actual encrypted frame through the
+                        // session driver. If the peer is no longer
+                        // registered (disconnected mid-send), drop it.
+                        if let Some(tx) = outbound.get(&to) {
+                            let _ = tx.send(FrameBody::Text(body));
+                        }
                     }
                     Ok(Action::Quit) => {
                         act_stop.store(true, Ordering::Relaxed);
                         break;
                     }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     Err(_) => break,
+                }
+                // Drain registry messages produced by the inbound
+                // listener and by the connect helper.
+                while let Ok(msg) = reg_rx.try_recv() {
+                    match msg {
+                        RegistryMsg::Register {
+                            peer_id,
+                            name,
+                            sender,
+                        } => {
+                            peer_names.insert(peer_id, name);
+                            outbound.insert(peer_id, sender);
+                        }
+                        RegistryMsg::Unregister { peer_id } => {
+                            outbound.remove(&peer_id);
+                            peer_names.remove(&peer_id);
+                        }
+                    }
                 }
             }
         })
@@ -756,41 +841,4 @@ fn handle_command(
             let _ = tx_events.send(Event::Info(format!("unknown command: {}", cmd)));
         }
     }
-}
-
-fn spawn_session_reader(
-    mut sess: Session<std::net::TcpStream>,
-    addr: SocketAddr,
-    tx: std::sync::mpsc::Sender<Event>,
-) {
-    use lanchat::protocol::FrameBody;
-    let peer_id = lanchat::net::listener::peer_id_from_pubkey(&sess.remote_static);
-    thread::spawn(move || loop {
-        match sess.recv() {
-            Ok(frame) => {
-                let body = match frame.body {
-                    FrameBody::Text(s) => s,
-                    FrameBody::Bye => {
-                        let _ = tx.send(Event::PeerGone {
-                            peer_id,
-                            name: format!("peer@{}", addr),
-                        });
-                        break;
-                    }
-                };
-                let _ = tx.send(Event::TextMessage {
-                    from_peer: peer_id,
-                    from_name: format!("peer@{}", addr),
-                    body,
-                });
-            }
-            Err(_) => {
-                let _ = tx.send(Event::PeerGone {
-                    peer_id,
-                    name: format!("peer@{}", addr),
-                });
-                break;
-            }
-        }
-    });
 }

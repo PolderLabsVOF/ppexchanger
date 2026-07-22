@@ -3,6 +3,7 @@
 //! `Event` flows network → UI. `Action` flows UI → network. Two channels,
 //! one in each direction, connected by a `Bus`.
 
+use crate::protocol::FrameBody;
 use crate::net::session::Session;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -76,6 +77,21 @@ pub enum Action {
     Trust { peer_id: PeerId },
     Revoke { peer_id: PeerId },
     Quit,
+}
+
+/// Per-peer outbound-sender registration. The per-connection session
+/// driver registers its `mpsc::Sender<FrameBody>` on startup so the
+/// action consumer thread can route `Action::SendText` through it, and
+/// unregisters on exit so a stale entry doesn't outlive the session.
+pub enum RegistryMsg {
+    Register {
+        peer_id: PeerId,
+        name: String,
+        sender: Sender<FrameBody>,
+    },
+    Unregister {
+        peer_id: PeerId,
+    },
 }
 
 pub struct Bus {

@@ -8,6 +8,13 @@
 //! nonce is derived from the per-direction session key + monotonic sequence
 //! counter via `crypto::derive_nonce`. Reordering / replay of old sequences is
 //! rejected by `recv`.
+//!
+//! Concurrent send + recv on a single `Session<S>` is handled in the
+//! application layer: each connection runs in a dedicated thread that owns
+//! the whole `Session`. The thread loops on `recv` with a short timeout and
+//! between iterations drains outbound frames from an `mpsc::Receiver`
+//! registered for that peer. Outbound sends go through `Action::SendText`,
+//! which the action thread forwards to the registered sender handle.
 
 use crate::crypto::{derive_nonce, Aead, ChaCha20Poly1305, Key, KeyInit, Nonce, Payload};
 use crate::protocol::{decode_plain_frame, encode_plain_frame, FrameBody, PlainFrame};
@@ -42,8 +49,11 @@ impl<S: Read + Write> Session<S> {
         self.stream
     }
 
-    /// Encrypt and send one message body. The sequence counter is incremented
-    /// after the AEAD encrypt (so the on-wire ciphertext is bound to `send_seq`).
+    pub fn remote_pubkey(&self) -> PublicKey {
+        PublicKey::from(self.remote_static)
+    }
+
+    /// Encrypt and send one message body.
     pub fn send(&mut self, body: &FrameBody) -> std::io::Result<()> {
         let seq = self.send_seq;
         let plaintext = encode_plain_frame(seq, body);
@@ -51,13 +61,8 @@ impl<S: Read + Write> Session<S> {
         let nonce_arr = derive_nonce(self.send_key.as_slice().try_into().unwrap(), seq);
         let nonce = Nonce::from_slice(&nonce_arr);
         let ct = cipher
-            .encrypt(
-                nonce,
-                Payload { msg: &plaintext, aad: &[] },
-            )
-            .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::Other, "AEAD encrypt failed")
-            })?;
+            .encrypt(nonce, Payload { msg: &plaintext, aad: &[] })
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "AEAD encrypt failed"))?;
         let len = ct.len() as u32;
         self.stream.write_all(&len.to_be_bytes())?;
         self.stream.write_all(&ct)?;
@@ -66,8 +71,7 @@ impl<S: Read + Write> Session<S> {
     }
 
     /// Receive and decrypt one message body, validating the embedded sequence
-    /// matches the expected monotonic `recv_seq`. Returns `Err(InvalidData)`
-    /// on tamper, decode failure, or replay.
+    /// matches the expected monotonic `recv_seq`.
     pub fn recv(&mut self) -> std::io::Result<PlainFrame> {
         let mut len_buf = [0u8; 4];
         self.stream.read_exact(&mut len_buf)?;
@@ -103,16 +107,36 @@ impl<S: Read + Write> Session<S> {
         Ok(frame)
     }
 
-    /// Public accessor used by callers who need to display the remote key.
-    pub fn remote_pubkey(&self) -> PublicKey {
-        PublicKey::from(self.remote_static)
-    }
-
     /// Test/integration hook: write arbitrary bytes onto the underlying stream
     /// without AEAD framing. Used by the tamper-detection test to inject
     /// deliberately invalid ciphertext and confirm `recv` rejects it.
     #[doc(hidden)]
     pub fn write_raw(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         self.stream.write_all(bytes)
+    }
+}
+
+/// Concrete specialization: TcpStream supports `set_read_timeout`, so the
+/// generic `try_recv` (blocking) can be overridden to poll briefly.
+impl Session<std::net::TcpStream> {
+    /// Non-blocking poll for one inbound frame. Returns `Ok(None)` if no
+    /// frame arrives within ~50ms — the connection thread uses this to
+    /// interleave outbound sends with inbound receives.
+    pub fn try_recv(&mut self) -> std::io::Result<Option<PlainFrame>> {
+        use std::time::Duration;
+        self.stream.set_read_timeout(Some(Duration::from_millis(50)))?;
+        let result = self.recv();
+        // Reset to blocking so a long-lived idle connection doesn't hang.
+        self.stream.set_read_timeout(None)?;
+        match result {
+            Ok(f) => Ok(Some(f)),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
     }
 }

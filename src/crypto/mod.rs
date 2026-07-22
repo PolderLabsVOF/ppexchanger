@@ -16,7 +16,6 @@ pub use hkdf::Hkdf;
 pub use sha2::Sha256;
 pub use x25519_dalek::{PublicKey as X25519Public, StaticSecret as X25519Secret};
 
-use chacha20poly1305::aead::AeadCore;
 use rand_core::{OsRng, RngCore};
 
 /// 32-byte X25519 keypair (private + public).
