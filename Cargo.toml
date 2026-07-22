@@ -1,0 +1,29 @@
+[package]
+name = "lanchat"
+version = "0.1.0"
+edition = "2021"
+description = "Fully-local, fully-encrypted LAN P2P terminal messenger (Rust)"
+license = "MIT"
+
+# Allowed dependencies (the ONLY external crates used by this project):
+#   ratatui          — TUI rendering (explicitly permitted)
+#   x25519-dalek     — X25519 ECDH (audited)
+#   chacha20poly1305 — AEAD cipher (audited)
+#   sha2             — SHA-256 (used inside HKDF)
+#   hkdf             — RFC 5869 HKDF-SHA256 (used in handshake + nonce derivation)
+#   rand_core        — OsRng for keypair + nonce generation (already pulled in
+#                      transitively by x25519-dalek 2.x; declared directly
+#                      because we import from it).
+# Everything else (networking, persistence, TUI plumbing) is pure std.
+[dependencies]
+ratatui = "0.29"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
+hkdf = "0.12"
+rand_core = "0.6"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
