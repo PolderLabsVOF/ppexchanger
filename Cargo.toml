@@ -1,6 +1,6 @@
 [package]
 name = "lanchat"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Fully-local, fully-encrypted LAN P2P terminal messenger (Rust)"
 license = "MIT"

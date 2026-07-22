@@ -3,7 +3,7 @@
 #
 # Usage:
 #   curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh | bash
-#   curl -fsSL ... | bash -s -- --tag v0.2.0
+#   curl -fsSL ... | bash -s -- --tag v0.3.0
 #   bash install.sh --uninstall
 #
 # Environment overrides:
@@ -44,7 +44,7 @@ USAGE:
     bash install.sh [options]
 
 OPTIONS:
-    --tag <tag>       Install a specific release tag (e.g. v0.2.0). Default: latest.
+    --tag <tag>       Install a specific release tag (e.g. v0.3.0). Default: latest.
     --dir <path>      Install directory. Default: \$HOME/.local/bin.
     --uninstall       Remove the installed binary.
     --help            Print this help.
@@ -57,7 +57,7 @@ ENV:
 
 EXAMPLES:
     curl -fsSL https://github.com/${REPO}/releases/latest/download/install.sh | bash
-    curl -fsSL https://github.com/${REPO}/releases/latest/download/install.sh | bash -s -- --tag v0.2.0
+    curl -fsSL https://github.com/${REPO}/releases/latest/download/install.sh | bash -s -- --tag v0.3.0
     LANCHAT_INSTALL_DIR=/usr/local/bin bash install.sh
 EOF
 }
@@ -114,7 +114,7 @@ else
 fi
 
 # Strip a leading "v" if present — assets are named `lanchat-<tag>.tar.gz`
-# where `<tag>` is the bare version string ("0.2.0", not "v0.2.0").
+# where `<tag>` is the bare version string ("0.3.0", not "v0.3.0").
 TAG_BARE="${TAG#v}"
 
 # Detect host target. The release workflow publishes one asset per target;
