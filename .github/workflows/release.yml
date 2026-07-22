@@ -51,7 +51,11 @@ jobs:
           # non-host triples on aarch64 (the rustup call only seems to
           # register the host triple). Add it explicitly so rustc has the
           # aarch64 std library available for codegen.
-          rustup target add "${{ matrix.target }}"
+          rustup target add "${{ matrix.target }}" --verbose
+          echo "--- rustup target list (installed) ---"
+          rustup target list --installed
+          echo "--- rustc verbose version (target triple) ---"
+          rustc --version --verbose
 
       - name: Cache cargo registry (per-target key)
         uses: Swatinem/rust-cache@v2
