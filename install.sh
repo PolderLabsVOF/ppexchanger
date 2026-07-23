@@ -42,7 +42,7 @@ die()  { printf '%b[lanchat]%b %b%s%b\n' "$BOLD" "$RESET" "$RED" "$*" "$RESET" >
 
 
 usage() {
-    cat <<EOF
+    cat <<'EOF'
 install.sh — install or update lanchat
 
 USAGE:
@@ -54,6 +54,7 @@ OPTIONS:
     --method <mode>     Install method: "binary" (download release tarball, the default),
                         "source" (git clone + cargo install --path . --locked), or
                         "auto" (prompt when stdin is a TTY, else "binary").
+                        Accepts both `--method source` and `--method=source` forms.
                         Equivalent env var: LANCHAT_METHOD.
     --yes               Skip the "replacing existing binary" prompt-style warning and
                         auto-pick the binary method when --method auto is in effect.
@@ -103,6 +104,7 @@ while [ $# -gt 0 ]; do
         --tag)          [ $# -ge 2 ] || die "--tag requires an argument"; VERSION="$2"; shift 2 ;;
         --dir)          [ $# -ge 2 ] || die "--dir requires an argument"; INSTALL_DIR="$2"; shift 2 ;;
         --method)       [ $# -ge 2 ] || die "--method requires an argument"; METHOD="$2"; shift 2 ;;
+        --method=*)     METHOD="${1#--method=}"; shift ;;
         --yes)          ASSUME_YES=1; shift ;;
         --uninstall)    uninstall ;;
         --print-target) PRINT_TARGET=1; shift ;;
