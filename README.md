@@ -30,7 +30,7 @@ curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download
 Pin a specific version:
 
 ```sh
-curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh | bash -s -- --tag v0.3.0
+curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh | bash -s -- --tag v0.3.1
 ```
 
 Install system-wide (needs sudo):
