@@ -122,7 +122,24 @@ Slash-commands are entered in the input line and start with `/`:
 | `/trust <name>`        | mark a peer as trusted; persists to peerdb                    |
 | `/revoke <name>`       | remove a peer from peerdb                                     |
 | `/theme <name>`        | switch theme (`default` / `solarized` / `monochrome` / `neon`); saved to config.toml |
+| `/send <path>`         | send a file at `<path>` to the selected peer (binary; max 32 KiB per chunk) |
 | `/quit`                | exit cleanly                                                  |
+
+### Sending files
+
+There are two ways to send a file to the selected peer:
+
+1. **Paste a path** — type or paste a path like
+   `/home/alice/report.pdf` and press Enter. If the path points at an
+   existing regular file, lanchat auto-detects it and starts a binary
+   transfer; otherwise the text is sent as a chat message.
+2. **`/send <path>`** — explicit escape hatch. Bypasses auto-detect; use
+   this when the file has no extension or you want unambiguous behaviour.
+
+The receiver sees a file-offer popup with the sender's name, file name,
+and human-readable size. `Enter` accepts, `Esc` rejects. Received files
+land under `<config_dir>/received/<id>-<sanitized-name>` and the
+sender's bytes are written verbatim (sha256 matches across both ends).
 
 Send to a specific peer by name even when your focus is on the chat pane:
 
@@ -148,6 +165,28 @@ selected, the first connected peer receives it.
 | `Esc`         | cancel / clear input / close modal                     |
 | `Ctrl-C` / `Ctrl-Q` | quit                                              |
 | `?`           | toggle the help overlay                                |
+
+### Mouse
+
+Mouse capture is **off by default** — start lanchat with no flags for
+keyboard-only mode. To enable click-to-select and scroll-wheel chat
+scrolling, drop `mouse = true` into the `[ui]` section of your
+`config.toml` (or run with the default — the field flips per session).
+With capture on:
+
+* Left-click a row in the sidebar to select that peer and focus the sidebar.
+* Left-click the chat pane to focus the chat.
+* Scroll wheel in the chat pane scrolls the message history.
+
+Capture breaks tmux / native drag-select inside the TUI; run with
+`--no-mouse` to recover native selection.
+
+### Pasting
+
+Bracketed paste is **always on**. Paste any text — including a path
+that resolves to an existing file — directly into the input line and
+press Enter. Pasted payloads are capped at 1 MiB; anything bigger is
+dropped silently so a stray log-file paste can't OOM the UI thread.
 
 ## Discovery
 

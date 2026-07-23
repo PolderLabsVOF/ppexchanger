@@ -129,3 +129,88 @@ fn tampered_ciphertext_rejected() {
 
     server.join().unwrap();
 }
+
+/// Exercise the new wire-level `FileOffer` / `FileAccept` / `FileChunk`
+/// / `FileDone` variants end-to-end through `Session<TcpStream>`. The
+/// frames round-trip with bytes intact and per-frame sequence numbers
+/// increment as expected. Higher-level state machines (OutboundTransfer,
+/// InboundTransfer) live in `file_xfer` and have their own unit tests.
+#[test]
+fn file_offer_accept_chunk_done_roundtrip() {
+    let (mut alice, mut bob) = make_session_pair();
+    let id = lanchat::protocol::FileId::random();
+    let offer_name = "report.pdf".to_string();
+
+    // Bob is the sender (Alice is the receiver). The sender's first
+    // `recv()` call would consume nothing yet — both sides send then
+    // recv in their natural order.
+    bob.send(&FrameBody::FileOffer {
+        id,
+        name: offer_name.clone(),
+        size: 5,
+        mime: Some("application/pdf".into()),
+    })
+    .unwrap();
+    alice.send(&FrameBody::FileAccept { id }).unwrap();
+    alice.send(&FrameBody::FileChunk {
+        id,
+        offset: 0,
+        data: b"hello".to_vec(),
+    })
+    .unwrap();
+    alice.send(&FrameBody::FileDone { id }).unwrap();
+
+    let offer = alice.recv().unwrap();
+    assert_eq!(offer.seq, 0);
+    assert_eq!(
+        offer.body,
+        FrameBody::FileOffer {
+            id,
+            name: offer_name,
+            size: 5,
+            mime: Some("application/pdf".into()),
+        }
+    );
+
+    let accept = bob.recv().unwrap();
+    assert_eq!(accept.seq, 0);
+    assert_eq!(accept.body, FrameBody::FileAccept { id });
+
+    let chunk = bob.recv().unwrap();
+    assert_eq!(chunk.seq, 1);
+    assert_eq!(
+        chunk.body,
+        FrameBody::FileChunk {
+            id,
+            offset: 0,
+            data: b"hello".to_vec(),
+        }
+    );
+
+    let done = bob.recv().unwrap();
+    assert_eq!(done.seq, 2);
+    assert_eq!(done.body, FrameBody::FileDone { id });
+}
+
+/// A 32 KiB chunk is the protocol's upper bound for one `FileChunk`.
+/// This test confirms it survives the AEAD frame path unchanged.
+#[test]
+fn file_chunk_max_size_roundtrips() {
+    let (mut alice, mut bob) = make_session_pair();
+    let id = lanchat::protocol::FileId::random();
+    let payload = vec![0xABu8; lanchat::protocol::FILE_CHUNK_MAX_DATA];
+
+    bob.send(&FrameBody::FileChunk {
+        id,
+        offset: 0,
+        data: payload.clone(),
+    })
+    .unwrap();
+    let f = alice.recv().unwrap();
+    if let FrameBody::FileChunk { data, .. } = f.body {
+        assert_eq!(data.len(), lanchat::protocol::FILE_CHUNK_MAX_DATA);
+        assert_eq!(data, payload);
+    } else {
+        panic!("expected FileChunk, got {:?}", f.body);
+    }
+}
