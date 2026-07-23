@@ -1,6 +1,6 @@
 //! Theme + glyph palettes.
 //!
-//! Four built-in themes (default, solarized, monochrome, neon) plus a glyph set
+//! Five built-in themes (default, solarized, monochrome, neon, amber) plus a glyph set
 //! that auto-detects whether the terminal renders UTF-8 box-drawing characters
 //! or falls back to ASCII. Glyph detection is conservative: any non-ASCII
 //! codepoint in the set triggers the Unicode variant, otherwise ASCII.
@@ -15,6 +15,7 @@ pub enum ThemeName {
     Solarized,
     Monochrome,
     Neon,
+    Amber,
 }
 
 impl ThemeName {
@@ -24,6 +25,7 @@ impl ThemeName {
             ThemeName::Solarized => "solarized",
             ThemeName::Monochrome => "monochrome",
             ThemeName::Neon => "neon",
+            ThemeName::Amber => "amber",
         }
     }
 
@@ -33,6 +35,7 @@ impl ThemeName {
             "solarized" => Some(ThemeName::Solarized),
             "monochrome" | "mono" => Some(ThemeName::Monochrome),
             "neon" => Some(ThemeName::Neon),
+            "amber" => Some(ThemeName::Amber),
             _ => None,
         }
     }
@@ -56,6 +59,8 @@ pub struct Theme {
     pub highlight: Color,
     pub status_bg: Color,
     pub status_fg: Color,
+    pub gauge_filled: Color,
+    pub gauge_unfilled: Color,
 }
 
 impl Theme {
@@ -65,6 +70,7 @@ impl Theme {
             ThemeName::Solarized => Self::solarized(),
             ThemeName::Monochrome => Self::monochrome(),
             ThemeName::Neon => Self::neon(),
+            ThemeName::Amber => Self::amber(),
         }
     }
 
@@ -85,6 +91,8 @@ impl Theme {
             highlight: Color::Magenta,
             status_bg: Color::Indexed(236),
             status_fg: Color::White,
+            gauge_filled: Color::Cyan,
+            gauge_unfilled: Color::DarkGray,
         }
     }
 
@@ -105,6 +113,8 @@ impl Theme {
             highlight: Color::Rgb(211, 54, 130),
             status_bg: Color::Rgb(7, 54, 66),
             status_fg: Color::Rgb(147, 161, 161),
+            gauge_filled: Color::Rgb(133, 153, 0),
+            gauge_unfilled: Color::Rgb(7, 54, 66),
         }
     }
 
@@ -125,6 +135,8 @@ impl Theme {
             highlight: Color::White,
             status_bg: Color::Black,
             status_fg: Color::White,
+            gauge_filled: Color::White,
+            gauge_unfilled: Color::DarkGray,
         }
     }
 
@@ -145,6 +157,32 @@ impl Theme {
             highlight: Color::Rgb(255, 255, 0),
             status_bg: Color::Rgb(20, 0, 30),
             status_fg: Color::Rgb(0, 255, 255),
+            gauge_filled: Color::Rgb(255, 0, 255),
+            gauge_unfilled: Color::Rgb(80, 80, 80),
+        }
+    }
+
+    /// Retro amber-phosphor CRT vibe: dark brown background, amber fg,
+    /// green accent for selection + trusted markers.
+    fn amber() -> Self {
+        Self {
+            name: ThemeName::Amber,
+            bg: Color::Rgb(0x1a, 0x0f, 0x00),
+            fg: Color::Rgb(0xff, 0xb0, 0x00),
+            accent: Color::Rgb(0x66, 0xff, 0x66),
+            border_active: Color::Rgb(0xff, 0xb0, 0x00),
+            border_inactive: Color::Rgb(0x55, 0x32, 0x00),
+            self_text: Color::Rgb(0x66, 0xff, 0x66),
+            peer_text: Color::Rgb(0xff, 0xcc, 0x66),
+            trusted_mark: Color::Rgb(0x66, 0xff, 0x66),
+            untrusted_mark: Color::Rgb(0xff, 0x77, 0x33),
+            error: Color::Rgb(0xff, 0x55, 0x55),
+            info: Color::Rgb(0x88, 0xc0, 0x70),
+            highlight: Color::Rgb(0x66, 0xff, 0x66),
+            status_bg: Color::Rgb(0x33, 0x22, 0x00),
+            status_fg: Color::Rgb(0xff, 0xb0, 0x00),
+            gauge_filled: Color::Rgb(0xff, 0xb0, 0x00),
+            gauge_unfilled: Color::Rgb(0x33, 0x22, 0x00),
         }
     }
 
@@ -188,6 +226,18 @@ impl Theme {
 
     pub fn untrusted_style(&self) -> Style {
         Style::default().fg(self.untrusted_mark).bg(self.bg)
+    }
+
+    /// Gauge foreground (filled portion) — exposed as a Style so widgets
+    /// can apply both `fg` and `bg` from one call.
+    pub fn gauge_filled_style(&self) -> Style {
+        Style::default().fg(self.gauge_filled).bg(self.gauge_unfilled)
+    }
+
+    /// Gauge background (unfilled portion). Pair with `gauge_filled_style`
+    /// for the standard `Gauge::gauge_style` argument.
+    pub fn gauge_unfilled_style(&self) -> Style {
+        Style::default().fg(self.gauge_unfilled).bg(self.bg)
     }
 }
 
@@ -251,12 +301,30 @@ mod tests {
 
     #[test]
     fn parse_roundtrip() {
-        for n in [ThemeName::Default, ThemeName::Solarized, ThemeName::Monochrome, ThemeName::Neon] {
+        for n in [
+            ThemeName::Default,
+            ThemeName::Solarized,
+            ThemeName::Monochrome,
+            ThemeName::Neon,
+            ThemeName::Amber,
+        ] {
             assert_eq!(ThemeName::parse(n.as_str()), Some(n));
         }
         assert_eq!(ThemeName::parse("DEFAULT"), Some(ThemeName::Default));
         assert_eq!(ThemeName::parse("MONO"), Some(ThemeName::Monochrome));
+        assert_eq!(ThemeName::parse("amber"), Some(ThemeName::Amber));
         assert_eq!(ThemeName::parse("bogus"), None);
+    }
+
+    #[test]
+    fn amber_palette_matches_plan() {
+        let t = Theme::by_name(ThemeName::Amber);
+        // Dark brownish bg (0x1a0f00) and amber phosphor fg (0xffb000) per the plan.
+        assert!(matches!(t.bg, Color::Rgb(0x1a, 0x0f, 0x00)));
+        assert!(matches!(t.fg, Color::Rgb(0xff, 0xb0, 0x00)));
+        // Green accent (0x66ff66).
+        assert!(matches!(t.accent, Color::Rgb(0x66, 0xff, 0x66)));
+        assert_eq!(t.name, ThemeName::Amber);
     }
 
     #[test]

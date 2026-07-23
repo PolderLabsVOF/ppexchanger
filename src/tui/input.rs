@@ -45,6 +45,8 @@ pub enum EditorEvent {
     PageDown,
     /// `?` — toggle help overlay.
     ToggleHelp,
+    /// `Ctrl-,` — open the settings popup.
+    OpenSettings,
     /// A printable character was added (or backspace).
     Edited,
 }
@@ -129,6 +131,7 @@ impl LineEditor {
                 KeyCode::Char('n') => return EditorEvent::NewChat,
                 KeyCode::Char('t') => return EditorEvent::ToggleTrust,
                 KeyCode::Char('r') => return EditorEvent::RevokePeer,
+                KeyCode::Char(',') => return EditorEvent::OpenSettings,
                 _ => {}
             }
         }

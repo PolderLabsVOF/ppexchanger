@@ -8,7 +8,7 @@
 //! which we can parse with a handful of lines.
 //!
 //! Supported keys under `[ui]`:
-//!   theme        = "default" | "solarized" | "monochrome" | "neon"
+//!   theme        = "default" | "solarized" | "monochrome" | "neon" | "amber"
 //!   show_footer  = true | false
 //!   mouse        = true | false
 //!   scrollback   = <integer>
@@ -38,11 +38,11 @@ impl Default for UiConfig {
         Self {
             theme: ThemeName::Default,
             show_footer: true,
-            // Mouse capture is opt-in. With capture on, the terminal
-            // loses native drag-select (in tmux, in many browsers-of-
-            // -buffers, etc.). Set `mouse = true` in config.toml or pass
-            // no flag explicitly to enable.
-            mouse: false,
+            // Mouse capture is on by default — clicking the sidebar, the
+            // chat pane, and the settings popup is the main interaction.
+            // Disable with `--no-mouse` or `mouse = false` in config.toml
+            // when you need native drag-select (e.g. inside tmux).
+            mouse: true,
             scrollback: DEFAULT_SCROLLBACK,
         }
     }
@@ -150,8 +150,8 @@ mod tests {
         let c = UiConfig::parse("").unwrap();
         assert_eq!(c.theme, ThemeName::Default);
         assert!(c.show_footer);
-        // Mouse capture is opt-in — see Default impl.
-        assert!(!c.mouse);
+        // Mouse capture defaults to ON — see Default impl.
+        assert!(c.mouse);
         assert_eq!(c.scrollback, DEFAULT_SCROLLBACK);
     }
 

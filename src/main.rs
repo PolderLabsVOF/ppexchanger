@@ -126,8 +126,8 @@ fn print_help() {
          \n\
          USAGE:\n  lanchat [--name <name>] [--port <port>] [--theme <name>] [--config <path>] [--no-mouse]\n  lanchat --gen-identity\n  lanchat --help | --version\n\
          \n\
-         OPTIONS:\n  --name <name>     display name (overrides stored)\n  --port <port>     TCP listen port (0 = ephemeral)\n  --theme <name>    default|solarized|monochrome|neon\n  --config <path>   path to config.toml (default: $XDG_CONFIG_HOME/lanchat/config.toml on
-                    Linux/macOS, %APPDATA%\\lanchat\\config.toml on Windows)\n  --no-mouse        disable mouse capture\n  --gen-identity    generate a new identity and exit\n  --help, -h        print this help\n  --version, -V     print version",
+         OPTIONS:\n  --name <name>     display name (overrides stored)\n  --port <port>     TCP listen port (0 = ephemeral)\n  --theme <name>    default|solarized|monochrome|neon|amber\n  --config <path>   path to config.toml (default: $XDG_CONFIG_HOME/lanchat/config.toml on
+                    Linux/macOS, %APPDATA%\\lanchat\\config.toml on Windows)\n  --no-mouse        disable mouse capture (mouse is ON by default)\n  --gen-identity    generate a new identity and exit\n  --help, -h        print this help\n  --version, -V     print version",
         version = VERSION
     );
 }
@@ -715,6 +715,9 @@ fn start_tui(
     // persist on change without re-reading from disk.
     let mut live_cfg = ui_cfg;
     let live_cfg_path = cfg_path;
+    let received_dir_str = config_dir()
+        .map(|d| d.join("received").display().to_string())
+        .unwrap_or_else(|_| "<no config dir>".to_string());
 
     loop {
         {
@@ -724,8 +727,14 @@ fn start_tui(
             s.sort_peers();
         }
         {
-            let s = state.lock().unwrap();
-            if let Err(e) = tui::render(&mut terminal, &s, &theme, &glyphs) {
+            let mut s = state.lock().unwrap();
+            let view = tui::SettingsView {
+                cfg: Some(&live_cfg),
+                version: VERSION,
+                config_path: &live_cfg_path.display().to_string(),
+                received_dir: &received_dir_str,
+            };
+            if let Err(e) = tui::render(&mut terminal, &mut s, &theme, &glyphs, view) {
                 eprintln!("render error: {}", e);
                 break;
             }
@@ -750,6 +759,47 @@ fn start_tui(
                                 height: sz.height,
                             };
                             handle_mouse(m, &state, rect);
+                        }
+                    }
+                } else if state
+                    .lock()
+                    .unwrap()
+                    .settings
+                    .as_ref()
+                    .is_some()
+                {
+                    // Settings modal is open — every key event routes here
+                    // (including Esc, which closes the modal through
+                    // route_settings_key). The editor buffer is frozen.
+                    if let crossterm::event::Event::Key(k) = &ev {
+                        if k.kind == crossterm::event::KeyEventKind::Press {
+                            let (close_after, dirty) = {
+                                let mut s = state.lock().unwrap();
+                                route_settings_key(
+                                    k,
+                                    s.settings.as_mut().unwrap(),
+                                    &mut live_cfg,
+                                );
+                                let close = k.code == crossterm::event::KeyCode::Esc;
+                                (close, s.settings.as_ref().unwrap().dirty)
+                            };
+                            if close_after {
+                                state.lock().unwrap().close_settings();
+                                match save_ui_config(&live_cfg, &live_cfg_path) {
+                                    Ok(()) => {
+                                        let _ = bus.tx_events.send(Event::Info(
+                                            "settings saved".into(),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        let _ = bus.tx_events.send(Event::Info(format!(
+                                            "settings save failed: {}",
+                                            e
+                                        )));
+                                    }
+                                }
+                            }
+                            let _ = dirty;
                         }
                     }
                 } else {
@@ -832,6 +882,10 @@ fn start_tui(
                         let mut s = state.lock().unwrap();
                         s.show_help = !s.show_help;
                     }
+                    lanchat::tui::EditorEvent::OpenSettings => {
+                        let mut s = state.lock().unwrap();
+                        s.open_settings(&live_cfg);
+                    }
                     lanchat::tui::EditorEvent::PageUp => {
                         let mut s = state.lock().unwrap();
                         if s.focus == tui::Focus::Chat {
@@ -851,12 +905,17 @@ fn start_tui(
                     lanchat::tui::EditorEvent::ClearInput
                     | lanchat::tui::EditorEvent::Clear => {
                         // Editor already cleared its buffer. If a modal is
-                        // open, Esc also closes it.
+                        // open, Esc also closes it. The settings popup
+                        // routes Esc through `route_settings_key`, so this
+                        // branch only fires for help / discovery / logo.
                         let mut s = state.lock().unwrap();
                         if s.show_help {
                             s.show_help = false;
                         } else if s.discovery.is_some() {
                             s.close_discovery();
+                        } else {
+                            // Fresh session: dismiss the startup logo.
+                            s.dismiss_logo();
                         }
                     }
                     lanchat::tui::EditorEvent::HistoryPrev
@@ -1164,6 +1223,15 @@ fn handle_command(
                 stop,
             );
         }
+        "/map" => {
+            // Flip the /discover popup to the Canvas-based map view.
+            // Idempotent — opening the popup with /discover resets it
+            // to list view, so this is the explicit toggle.
+            let mut s = state.lock().unwrap();
+            if let Some(d) = s.discovery.as_mut() {
+                d.view_map = !d.view_map;
+            }
+        }
         "/peers" => {
             let s = state.lock().unwrap();
             for p in &s.peers {
@@ -1203,7 +1271,7 @@ fn handle_command(
                 Some(n) => n,
                 None => {
                     let _ = tx_events.send(Event::Info(format!(
-                        "current theme: {} (available: default, solarized, monochrome, neon)",
+                        "current theme: {} (available: default, solarized, monochrome, neon, amber)",
                         cfg.theme.as_str()
                     )));
                     return;
@@ -1257,8 +1325,75 @@ fn handle_command(
                 ));
             }
         }
+        "/settings" => {
+            let mut s = state.lock().unwrap();
+            s.open_settings(cfg);
+        }
         _ => {
             let _ = tx_events.send(Event::Info(format!("unknown command: {}", cmd)));
+        }
+    }
+}
+
+/// Translate a single key event into a settings-modal mutation. Caller
+/// owns the lock and persists after `close_after` is reported.
+fn route_settings_key(
+    k: &crossterm::event::KeyEvent,
+    st: &mut lanchat::tui::SettingsState,
+    cfg: &mut lanchat::tui::UiConfig,
+) {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use lanchat::tui::settings_popup::Tab;
+    let code = k.code;
+    let mods = k.modifiers;
+    // Number-row tab jump (1/2/3) — works without modifier.
+    if mods == KeyModifiers::NONE || mods == KeyModifiers::SHIFT {
+        match code {
+            KeyCode::Char('1') => st.switch_tab(Tab::Display),
+            KeyCode::Char('2') => st.switch_tab(Tab::Input),
+            KeyCode::Char('3') => st.switch_tab(Tab::About),
+            KeyCode::Left | KeyCode::Char('h') => match st.tab {
+                Tab::Display => match st.selected() {
+                    0 => {
+                        let _ = st.cycle_theme(-1);
+                        cfg.theme = lanchat::tui::settings_popup::THEME_CHOICES[st.theme_idx];
+                    }
+                    2 => st.bump_scrollback(cfg, -100),
+                    _ => {}
+                },
+                Tab::Input => st.toggle_mouse(cfg),
+                Tab::About => {}
+            },
+            KeyCode::Right | KeyCode::Char('l') => match st.tab {
+                Tab::Display => match st.selected() {
+                    0 => {
+                        let _ = st.cycle_theme(1);
+                        cfg.theme = lanchat::tui::settings_popup::THEME_CHOICES[st.theme_idx];
+                    }
+                    2 => st.bump_scrollback(cfg, 100),
+                    _ => {}
+                },
+                Tab::Input => st.toggle_mouse(cfg),
+                Tab::About => {}
+            },
+            KeyCode::Up | KeyCode::Char('k') => st.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => st.move_selection(1),
+            KeyCode::Enter | KeyCode::Char(' ') => match st.tab {
+                Tab::Display => match st.selected() {
+                    0 => {
+                        let _ = st.cycle_theme(1);
+                        cfg.theme = lanchat::tui::settings_popup::THEME_CHOICES[st.theme_idx];
+                    }
+                    1 => st.toggle_footer(cfg),
+                    2 => st.bump_scrollback(cfg, 100),
+                    _ => {}
+                },
+                Tab::Input => st.toggle_mouse(cfg),
+                Tab::About => {}
+            },
+            KeyCode::Tab => st.switch_tab(st.tab.next_tab()),
+            KeyCode::BackTab => st.switch_tab(st.tab.prev_tab()),
+            _ => {}
         }
     }
 }
