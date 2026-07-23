@@ -269,6 +269,7 @@ fn start_tui(
         let kp = Arc::clone(&static_kp);
         let stop2 = Arc::clone(&stop);
         let reg_tx2 = reg_tx.clone();
+        let inbound_tx_for_listener = bus.tx_inbound_files.clone();
         thread::spawn(move || {
             loop {
                 if stop2.load(Ordering::Relaxed) {
@@ -279,6 +280,7 @@ fn start_tui(
                         let kp2 = Arc::clone(&kp);
                         let tx2 = tx.clone();
                         let reg_tx3 = reg_tx2.clone();
+                        let inbound_tx_for_driver = inbound_tx_for_listener.clone();
                         thread::spawn(move || {
                             let mut s = stream;
                             match lanchat::net::handshake::run_responder(&mut s, &kp2) {
@@ -317,6 +319,7 @@ fn start_tui(
                                         fp,
                                         orx,
                                         tx2,
+                                        inbound_tx_for_driver,
                                         Some(reg_tx4),
                                     );
                                 }
@@ -344,6 +347,7 @@ fn start_tui(
     let act_stop = Arc::clone(&stop);
     let act_bus_tx = bus.tx_events.clone();
     let act_bus_rx = bus.rx_actions; // moved in
+    let act_inbound_rx = bus.rx_inbound_files; // moved in
     let act_state = Arc::clone(&state);
     let act_thread = {
         let kp = Arc::clone(&static_kp);
@@ -351,9 +355,14 @@ fn start_tui(
         thread::spawn(move || {
             let mut outbound: HashMap<PeerId, mpsc::Sender<FrameBody>> = HashMap::new();
             let mut peer_names: HashMap<PeerId, String> = HashMap::new();
+            let mut outbox: lanchat::net::file_xfer::OutboundMap =
+                lanchat::net::file_xfer::OutboundMap::new();
+            let mut inbox: lanchat::net::file_xfer::InboundMap =
+                lanchat::net::file_xfer::InboundMap::new();
             while !act_stop.load(Ordering::Relaxed) {
                 // Poll the action channel with a short timeout so we can
-                // also drain the registry channel between bursts.
+                // also drain the registry + inbound-file channels
+                // between bursts.
                 match act_bus_rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(Action::Connect {
                         addr,
@@ -366,6 +375,7 @@ fn start_tui(
                         // On any failure it has already posted an Info
                         // event and returns None.
                         let tx_clone = act_bus_tx.clone();
+                        let tx_inbound_clone = bus.tx_inbound_files.clone();
                         let kp_clone = Arc::clone(&kp);
                         let reg_clone = act_reg_tx.clone();
                         thread::spawn(move || {
@@ -374,6 +384,7 @@ fn start_tui(
                                 Some(name_hint.clone()),
                                 &kp_clone,
                                 tx_clone.clone(),
+                                tx_inbound_clone,
                                 reg_clone,
                             ) {
                                 let _ = tx_clone.send(Event::PeerConnected {
@@ -438,6 +449,89 @@ fn start_tui(
                             let _ = tx.send(FrameBody::Text(body));
                         }
                     }
+                    // File actions drive the state machines in
+                    // `file_xfer`. SendFile opens the file, sends the
+                    // offer, and parks until accept; AcceptFile /
+                    // RejectFile route the peer response and create
+                    // the destination file on accept.
+                    Ok(Action::SendFile { to, path }) => {
+                        let to_name = peer_names
+                            .get(&to)
+                            .cloned()
+                            .unwrap_or_else(|| hex(&to));
+                        match lanchat::net::file_xfer::OutboundTransfer::open(
+                            to, to_name, path,
+                        ) {
+                            Ok(t) => {
+                                let id = t.id();
+                                let offer = t.offer().clone();
+                                if let Some(tx) = outbound.get(&to) {
+                                    let _ = tx.send(FrameBody::FileOffer {
+                                        id,
+                                        name: offer.name.clone(),
+                                        size: offer.size,
+                                        mime: offer.mime.clone(),
+                                    });
+                                }
+                                outbox.insert(t);
+                                let _ = act_bus_tx.send(Event::Info(format!(
+                                    "offered {} ({} bytes) to {}",
+                                    offer.name,
+                                    offer.size,
+                                    peer_names
+                                        .get(&to)
+                                        .cloned()
+                                        .unwrap_or_else(|| hex(&to))
+                                )));
+                            }
+                            Err(e) => {
+                                let _ = act_bus_tx
+                                    .send(Event::Info(format!("open failed: {}", e)));
+                            }
+                        }
+                    }
+                    Ok(Action::AcceptFile { from_peer, id }) => {
+                        // Reply with FileAccept + create destination
+                        // file via the inbound map. The peer name is
+                        // patched in from the registry when the offer
+                        // was first delivered.
+                        match inbox.accept(id) {
+                            Ok(Some(offer)) => {
+                                if let Some(tx) = outbound.get(&from_peer) {
+                                    let _ = tx.send(FrameBody::FileAccept { id });
+                                }
+                                let from_name = peer_names
+                                    .get(&from_peer)
+                                    .cloned()
+                                    .unwrap_or_else(|| hex(&from_peer));
+                                let _ = act_bus_tx.send(Event::FileOffer {
+                                    from_peer,
+                                    from_name,
+                                    offer,
+                                });
+                            }
+                            Ok(None) => {
+                                let _ = act_bus_tx.send(Event::Info(format!(
+                                    "accept: no pending offer for {}",
+                                    id.to_hex()
+                                )));
+                            }
+                            Err(e) => {
+                                let _ = act_bus_tx.send(Event::Info(format!(
+                                    "accept {}: {}",
+                                    id.to_hex(),
+                                    e
+                                )));
+                            }
+                        }
+                    }
+                    Ok(Action::RejectFile { from_peer, id }) => {
+                        if inbox.reject(id).is_some() {
+                            if let Some(tx) = outbound.get(&from_peer) {
+                                let _ = tx.send(FrameBody::FileReject { id });
+                            }
+                        }
+                    }
                     Ok(Action::Quit) => {
                         act_stop.store(true, Ordering::Relaxed);
                         break;
@@ -460,6 +554,152 @@ fn start_tui(
                         RegistryMsg::Unregister { peer_id } => {
                             outbound.remove(&peer_id);
                             peer_names.remove(&peer_id);
+                            // Abort any in-flight transfers that depend
+                            // on this peer so we don't leak file
+                            // handles or leave half-finished chunks.
+                            for info in outbox.remove_for_peer(peer_id) {
+                                let _ = act_bus_tx.send(Event::FileAborted {
+                                    from_peer: info.from_peer,
+                                    from_name: info.from_name,
+                                    name: info.name,
+                                    reason: info.reason,
+                                    partial: None,
+                                });
+                            }
+                            for ab in inbox.remove_for_peer(peer_id) {
+                                let _ = act_bus_tx.send(Event::FileAborted {
+                                    from_peer: ab.peer,
+                                    from_name: ab.from_name,
+                                    name: ab.name,
+                                    reason: ab.reason,
+                                    partial: ab.partial,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Drain inbound file events: the per-connection
+                // drivers forward FileOffer / FileChunk / FileDone
+                // straight here.
+                while let Ok(ev) = act_inbound_rx.try_recv() {
+                    use lanchat::events::InboundFileEvent;
+                    match ev {
+                        InboundFileEvent::Offer { peer, offer } => {
+                            let from_name = peer_names
+                                .get(&peer)
+                                .cloned()
+                                .unwrap_or_else(|| hex(&peer));
+                            let accepted = inbox.offer(
+                                lanchat::net::file_xfer::InboundTransfer::new(
+                                    peer, from_name.clone(), offer.clone(),
+                                ),
+                            );
+                            if accepted {
+                                let _ = act_bus_tx.send(Event::FileOffer {
+                                    from_peer: peer,
+                                    from_name,
+                                    offer,
+                                });
+                            }
+                        }
+                        InboundFileEvent::Accept { peer: _, id } => {
+                            outbox.accept(id);
+                        }
+                        InboundFileEvent::Reject { peer: _, id } => {
+                            if let Some(info) = outbox.reject(id) {
+                                let _ = act_bus_tx.send(Event::FileAborted {
+                                    from_peer: info.from_peer,
+                                    from_name: info.from_name,
+                                    name: info.name,
+                                    reason: info.reason,
+                                    partial: None,
+                                });
+                            }
+                        }
+                        InboundFileEvent::Chunk { peer: _, id, offset, data } => {
+                            use lanchat::net::file_xfer::WriteOutcome;
+                            match inbox.write_chunk(id, offset, data) {
+                                WriteOutcome::Error(reason) => {
+                                    if let Some(offer) = inbox.reject(id) {
+                                        let _ = act_bus_tx.send(Event::FileAborted {
+                                            from_peer: [0u8; 16], // patched below
+                                            from_name: String::new(),
+                                            name: offer.name,
+                                            reason,
+                                            partial: None,
+                                        });
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        InboundFileEvent::Done { peer, id } => {
+                            // FileDone on the wire carries only the
+                            // FileId — we trust the offer's announced
+                            // size for the size check, and use the
+                            // peer name from the registry for the
+                            // success event.
+                            use lanchat::net::file_xfer::FinalizeOutcome;
+                            let expected_size = inbox.offer_size(&id).unwrap_or(u64::MAX);
+                            match inbox.finalize(id, expected_size) {
+                                FinalizeOutcome::Done(info) => {
+                                    let _ = act_bus_tx.send(Event::FileReceived {
+                                        from_peer: info.peer,
+                                        from_name: info.from_name,
+                                        name: info.name,
+                                        bytes: info.bytes,
+                                        saved_to: info.path,
+                                    });
+                                }
+                                FinalizeOutcome::Failed(_e) => {
+                                    // Surface as Info — the partial
+                                    // file was renamed to `.partial`
+                                    // by `InboundTransfer::abort`,
+                                    // which `finalize` calls on the
+                                    // size mismatch path internally.
+                                    let _ = act_bus_tx.send(Event::Info(format!(
+                                        "inbound transfer failed for peer {} (size mismatch?)",
+                                        hex(&peer)
+                                    )));
+                                }
+                                FinalizeOutcome::Unknown => {}
+                            }
+                        }
+                    }
+                }
+
+                // Tick outbound transfers: timeouts + one chunk
+                // forward per peer. Bounded to one chunk per tick
+                // so the action thread stays responsive even with
+                // many active transfers.
+                for info in outbox.tick_timeouts() {
+                    let _ = act_bus_tx.send(Event::FileAborted {
+                        from_peer: info.from_peer,
+                        from_name: info.from_name,
+                        name: info.name,
+                        reason: info.reason,
+                        partial: None,
+                    });
+                }
+                for result in outbox.step_all(|peer| outbound.get(&peer).cloned()) {
+                    use lanchat::net::file_xfer::StepResult;
+                    match result {
+                        StepResult::Completed { peer, to_name, name, bytes } => {
+                            let _ = act_bus_tx.send(Event::Info(format!(
+                                "sent {} ({} bytes) to {}",
+                                name, bytes, to_name
+                            )));
+                            let _ = peer;
+                        }
+                        StepResult::Aborted(info) => {
+                            let _ = act_bus_tx.send(Event::FileAborted {
+                                from_peer: info.from_peer,
+                                from_name: info.from_name,
+                                name: info.name,
+                                reason: info.reason,
+                                partial: None,
+                            });
                         }
                     }
                 }
@@ -468,8 +708,8 @@ fn start_tui(
     };
 
     // TUI loop.
-    let _guard = tui::TuiGuard::new().unwrap();
-    let mut terminal = tui::enter_terminal().unwrap();
+    let _guard = tui::TuiGuard::new(ui_cfg.mouse).unwrap();
+    let mut terminal = tui::enter_terminal(ui_cfg.mouse).unwrap();
     let mut editor = lanchat::tui::LineEditor::new();
     // Active mutable copy of the config — `/theme` updates it, so we can
     // persist on change without re-reading from disk.

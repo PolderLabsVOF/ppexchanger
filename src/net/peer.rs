@@ -15,7 +15,7 @@
 //! `Sender<FrameBody>` that the action thread uses for outbound messages.
 
 use crate::crypto::Keypair;
-use crate::events::{DiscoveredPeer, Event, PeerId, RegistryMsg};
+use crate::events::{DiscoveredPeer, Event, FileOffer, InboundFileEvent, PeerId, RegistryMsg};
 use crate::net::handshake::run_initiator;
 use crate::net::listener::peer_id_from_pubkey;
 use crate::net::session::Session;
@@ -49,6 +49,7 @@ pub fn connect(
     name_hint: Option<String>,
     static_kp: &Keypair,
     tx: mpsc::Sender<Event>,
+    tx_inbound: mpsc::Sender<InboundFileEvent>,
     reg_tx: mpsc::Sender<RegistryMsg>,
 ) -> Option<(PeerId, DiscoveredPeer)> {
     let sess = match dial(addr, static_kp) {
@@ -73,12 +74,14 @@ pub fn connect(
         sender: outbound_tx,
     });
     let reg_tx_for_driver = reg_tx.clone();
+    let tx_inbound_for_driver = tx_inbound.clone();
     spawn_session_driver_with_reg(
         sess,
         peer_id,
         fingerprint,
         outbound_rx,
         tx,
+        tx_inbound_for_driver,
         Some(reg_tx_for_driver),
     );
     let _ = reg_tx; // keep alive until end of fn (for clarity)
@@ -94,8 +97,17 @@ pub fn spawn_session_driver(
     fingerprint: String,
     outbound_rx: mpsc::Receiver<FrameBody>,
     tx: mpsc::Sender<Event>,
+    tx_inbound: mpsc::Sender<InboundFileEvent>,
 ) {
-    spawn_session_driver_with_reg(sess, peer_id, fingerprint, outbound_rx, tx, None);
+    spawn_session_driver_with_reg(
+        sess,
+        peer_id,
+        fingerprint,
+        outbound_rx,
+        tx,
+        tx_inbound,
+        None,
+    )
 }
 
 /// Variant of `spawn_session_driver` that also accepts a registry channel.
@@ -107,6 +119,7 @@ pub fn spawn_session_driver_with_reg(
     fingerprint: String,
     outbound_rx: mpsc::Receiver<FrameBody>,
     tx: mpsc::Sender<Event>,
+    tx_inbound: mpsc::Sender<InboundFileEvent>,
     reg_tx: Option<mpsc::Sender<RegistryMsg>>,
 ) {
     std::thread::spawn(move || {
@@ -152,6 +165,42 @@ pub fn spawn_session_driver_with_reg(
                         FrameBody::Bye => {
                             exit(&tx, &reg_tx);
                             return;
+                        }
+                        // File-* frames are routed over the inbound-file
+                        // channel so the action thread owns the per-peer
+                        // transfer state. The driver only decodes and
+                        // forwards — no state lives here.
+                        FrameBody::FileOffer { id, name, size, mime } => {
+                            let _ = tx_inbound.send(InboundFileEvent::Offer {
+                                peer: peer_id,
+                                offer: FileOffer { id, name, size, mime },
+                            });
+                        }
+                        FrameBody::FileAccept { id } => {
+                            let _ = tx_inbound.send(InboundFileEvent::Accept {
+                                peer: peer_id,
+                                id,
+                            });
+                        }
+                        FrameBody::FileReject { id } => {
+                            let _ = tx_inbound.send(InboundFileEvent::Reject {
+                                peer: peer_id,
+                                id,
+                            });
+                        }
+                        FrameBody::FileChunk { id, offset, data } => {
+                            let _ = tx_inbound.send(InboundFileEvent::Chunk {
+                                peer: peer_id,
+                                id,
+                                offset,
+                                data,
+                            });
+                        }
+                        FrameBody::FileDone { id } => {
+                            let _ = tx_inbound.send(InboundFileEvent::Done {
+                                peer: peer_id,
+                                id,
+                            });
                         }
                     }
                 }

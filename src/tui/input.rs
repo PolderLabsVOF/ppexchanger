@@ -62,6 +62,13 @@ use std::collections::VecDeque;
 
 const HISTORY_CAP: usize = 64;
 
+/// Hard cap on a single pasted payload, in bytes. 1 MiB is well above
+/// any sane paste (a screenshot's worth of text, a config file dump)
+/// but small enough that a "I pasted an entire log file by accident"
+/// doesn't OOM the UI thread. If the cap is hit, the paste is dropped
+/// entirely — the editor stays usable.
+const PASTE_MAX: usize = 1024 * 1024;
+
 impl LineEditor {
     pub fn new() -> Self {
         Self::default()
@@ -74,6 +81,19 @@ impl LineEditor {
     pub fn clear(&mut self) {
         self.buffer.clear();
         self.history_idx = None;
+    }
+
+    /// Append a pasted string to the buffer. Called by the main loop on
+    /// `Event::Paste(String)`. Returns `EditorEvent::Edited` so the
+    /// status line redraws. If the paste would overflow `PASTE_MAX`,
+    /// the entire paste is dropped and the existing buffer is left
+    /// untouched — the editor never blocks on user input.
+    pub fn on_paste(&mut self, text: &str) -> EditorEvent {
+        if text.len() > PASTE_MAX || self.buffer.len() + text.len() > PASTE_MAX {
+            return EditorEvent::None;
+        }
+        self.buffer.push_str(text);
+        EditorEvent::Edited
     }
 
     /// Handle one key event. Returns the editor event describing what
@@ -203,6 +223,10 @@ mod tests {
     use super::*;
     use crossterm::event::KeyEventKind;
 
+    fn paste_event(text: &str) -> Event {
+        Event::Paste(text.to_string())
+    }
+
     fn press(code: KeyCode, modifiers: KeyModifiers) -> Event {
         Event::Key(KeyEvent {
             code,
@@ -285,5 +309,35 @@ mod tests {
             ed.on_key(&press(KeyCode::Char('t'), KeyModifiers::CONTROL)),
             EditorEvent::ToggleTrust
         );
+    }
+
+    #[test]
+    fn paste_appends_to_buffer() {
+        let mut ed = LineEditor::new();
+        ed.on_key(&press(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert_eq!(ed.on_paste("ello world"), EditorEvent::Edited);
+        assert_eq!(ed.as_str(), "hello world");
+    }
+
+    #[test]
+    fn paste_drops_over_cap() {
+        let mut ed = LineEditor::new();
+        // A paste >1 MiB is dropped without disturbing existing buffer.
+        let huge = "x".repeat(PASTE_MAX + 1);
+        let ev = ed.on_paste(&huge);
+        assert_eq!(ev, EditorEvent::None);
+        assert!(ed.as_str().is_empty());
+    }
+
+    #[test]
+    fn paste_drops_when_buffer_would_overflow() {
+        let mut ed = LineEditor::new();
+        // Pre-fill close to the cap, then paste something that pushes over.
+        let prefix = "a".repeat(PASTE_MAX - 10);
+        ed.buffer.push_str(&prefix);
+        let ev = ed.on_paste("bbbbbbbbbbbbb"); // +13 bytes, overflows
+        assert_eq!(ev, EditorEvent::None);
+        // Buffer is untouched (no partial state).
+        assert_eq!(ed.buffer.len(), PASTE_MAX - 10);
     }
 }

@@ -38,7 +38,11 @@ impl Default for UiConfig {
         Self {
             theme: ThemeName::Default,
             show_footer: true,
-            mouse: true,
+            // Mouse capture is opt-in. With capture on, the terminal
+            // loses native drag-select (in tmux, in many browsers-of-
+            // -buffers, etc.). Set `mouse = true` in config.toml or pass
+            // no flag explicitly to enable.
+            mouse: false,
             scrollback: DEFAULT_SCROLLBACK,
         }
     }
@@ -146,7 +150,8 @@ mod tests {
         let c = UiConfig::parse("").unwrap();
         assert_eq!(c.theme, ThemeName::Default);
         assert!(c.show_footer);
-        assert!(c.mouse);
+        // Mouse capture is opt-in — see Default impl.
+        assert!(!c.mouse);
         assert_eq!(c.scrollback, DEFAULT_SCROLLBACK);
     }
 

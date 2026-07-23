@@ -17,7 +17,7 @@
 //! which the action thread forwards to the registered sender handle.
 
 use crate::crypto::{derive_nonce, Aead, ChaCha20Poly1305, Key, KeyInit, Nonce, Payload};
-use crate::protocol::{decode_plain_frame, encode_plain_frame, FrameBody, PlainFrame};
+use crate::protocol::{decode_plain_frame, encode_plain_frame, DecodeError, FrameBody, PlainFrame};
 use std::io::{Read, Write};
 use x25519_dalek::PublicKey;
 
@@ -94,8 +94,18 @@ impl<S: Read + Write> Session<S> {
             .map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, "AEAD decrypt failed")
             })?;
-        let frame = decode_plain_frame(&plaintext).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "frame decode failed")
+        let frame = decode_plain_frame(&plaintext).map_err(|e| match e {
+            DecodeError::Overflow => std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "frame length out of bounds",
+            ),
+            // Malformed is a hard error — tear the session down.
+            // UnknownTag is recoverable; today we also tear down (since
+            // there are no unknown tags yet), but the variant gives
+            // callers a hook to keep the session alive in future.
+            DecodeError::Malformed | DecodeError::UnknownTag(_) => {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "frame decode failed")
+            }
         })?;
         if frame.seq != expected_seq {
             return Err(std::io::Error::new(

@@ -37,6 +37,44 @@ use std::collections::VecDeque;
 use std::io::{stdout, Stdout};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Layout constants shared between `render()` and `hit_test()`. The
+/// sidebar column is 24 cells wide; the body row is at least 3 cells
+/// tall. Changing these constants in one place is enough.
+const SIDEBAR_WIDTH: u16 = 24;
+const FOOTER_HEIGHT: u16 = 3;
+const BODY_MIN_HEIGHT: u16 = 3;
+
+/// Three rectangles produced by the single `Layout` pass. Hit-test and
+/// render both build on this so the click map matches what the user
+/// sees on screen.
+pub struct LayoutAreas {
+    pub sidebar: Rect,
+    pub chat: Rect,
+    pub footer: Rect,
+}
+
+/// Hit-test result for one mouse event. `Sidebar(i)` is the index into
+/// the sorted `state.peers` slice (the same order the sidebar renders
+/// in); `Chat` covers the chat pane; `Footer` is the input line area;
+/// `Modal` means the click landed inside a modal popup (show_help or
+/// discovery) and the main loop should consume it without further
+/// dispatch.
+#[derive(Debug)]
+pub enum Hit {
+    Sidebar(usize),
+    Chat,
+    Footer,
+    Modal,
+}
+
+/// Decide whether `(col, row)` falls inside `rect`.
+fn point_in_rect(rect: Rect, col: u16, row: u16) -> bool {
+    col >= rect.x
+        && col < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
+}
+
 /// Which pane has keyboard focus. Tab cycles between them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -239,6 +277,65 @@ impl UiState {
                     d.running = false;
                 }
             }
+            // File-transfer events. The full file-offer modal lives in
+            // Slice 8 (`tui::file_offer_popup`); for now we surface a
+            // brief status-line note so the apply is non-exhaustive
+            // and the action thread can drive accept/reject through
+            // separate `Action::AcceptFile` / `Action::RejectFile`
+            // paths without the UI blocking on a modal.
+            Event::FileOffer {
+                from_name,
+                offer,
+                ..
+            } => {
+                self.push_message(UiMessage {
+                    from_name: "[file]".into(),
+                    body: format!(
+                        "{} offers file: {} ({} bytes)",
+                        from_name,
+                        offer.name,
+                        offer.size
+                    ),
+                    outgoing: false,
+                    ts_unix: now_unix(),
+                });
+            }
+            Event::FileReceived {
+                from_name,
+                name,
+                bytes,
+                saved_to,
+                ..
+            } => {
+                self.push_message(UiMessage {
+                    from_name: "[file]".into(),
+                    body: format!(
+                        "{} sent {} ({} bytes) → {}",
+                        from_name,
+                        name,
+                        bytes,
+                        saved_to.display()
+                    ),
+                    outgoing: false,
+                    ts_unix: now_unix(),
+                });
+            }
+            Event::FileAborted {
+                from_name,
+                name,
+                reason,
+                ..
+            } => {
+                self.push_message(UiMessage {
+                    from_name: "[file]".into(),
+                    body: format!(
+                        "{}: transfer of {} aborted ({})",
+                        from_name, name, reason
+                    ),
+                    outgoing: false,
+                    ts_unix: now_unix(),
+                });
+            }
         }
     }
 
@@ -351,24 +448,127 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Initialize the terminal: enter raw mode + alt-screen + hide cursor.
-/// Returns the `Terminal` plus a guard struct that restores state on drop.
-pub fn enter_terminal() -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
+/// Compute the three rectangles that the TUI is split into. Used by
+/// `render()` (to lay out widgets) and `hit_test()` (to map clicks
+/// back to panes). Returns the same shape regardless of caller, so a
+/// click on a peer name in the sidebar always corresponds to the row
+/// the user can see.
+pub fn compute_layout(area: Rect) -> LayoutAreas {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(BODY_MIN_HEIGHT), Constraint::Length(FOOTER_HEIGHT)])
+        .split(area);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(10)])
+        .split(outer[0]);
+    LayoutAreas {
+        sidebar: cols[0],
+        chat: cols[1],
+        footer: outer[1],
+    }
+}
+
+/// Centred popup rectangle, mirroring `discovery_popup::centered` so
+/// the click region matches what the modal draws over. Help uses the
+/// same dimensions; the file-offer modal will too.
+pub fn modal_rect(area: Rect) -> Rect {
+    let w = 64u16.min(area.width);
+    let h = 20u16.min(area.height);
+    let vert = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(area.height.saturating_sub(h) / 2),
+            Constraint::Length(h),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(area.width.saturating_sub(w) / 2),
+            Constraint::Length(w),
+            Constraint::Min(0),
+        ])
+        .split(vert[1])[1]
+}
+
+/// Map a `MouseEvent` to a `Hit`. Caller has already computed
+/// `areas` from the same `f.area()` it last rendered against, so the
+/// rectangles are identical to what's on screen.
+///
+/// `peers_len` is the count of `state.peers` AFTER sorting — this
+/// must match the order `draw_sidebar` iterates in, or click-to-select
+/// will pick the wrong peer.
+pub fn hit_test(
+    screen: Rect,
+    col: u16,
+    row: u16,
+    areas: &LayoutAreas,
+    modal_open: bool,
+    peers_len: usize,
+) -> Hit {
+    // Modals always win — they draw over the centre, so any click in
+    // that rect must NOT fall through to the chat pane.
+    if modal_open && point_in_rect(modal_rect(screen), col, row) {
+        return Hit::Modal;
+    }
+    if point_in_rect(areas.sidebar, col, row) {
+        // Sidebar: header (Peers (n)) takes 1 line, border takes the
+        // top, so the first peer sits at sidebar.y + 2. Each peer is
+        // one ListItem row. Indices are clamped so a click in the
+        // empty area below the last peer is a no-op rather than
+        // a panic.
+        if peers_len == 0 {
+            return Hit::Sidebar(0);
+        }
+        let first_peer_y = areas.sidebar.y.saturating_add(2);
+        if row < first_peer_y {
+            return Hit::Sidebar(0);
+        }
+        let idx = (row - first_peer_y) as usize;
+        let idx = idx.min(peers_len.saturating_sub(1));
+        return Hit::Sidebar(idx);
+    }
+    if point_in_rect(areas.chat, col, row) {
+        return Hit::Chat;
+    }
+    Hit::Footer
+}
+
+/// Initialize the terminal: raw mode + alt-screen + bracketed paste +
+/// (optionally) mouse capture. Bracketed paste is always on; mouse
+/// capture is gated by `mouse_enabled` because enabling capture on
+/// tmux breaks native drag-select.
+pub fn enter_terminal(
+    mouse_enabled: bool,
+) -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
+    use crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
     use crossterm::terminal::{EnterAlternateScreen, SetTitle};
     crossterm::terminal::enable_raw_mode()?;
     let mut out = stdout();
+    crossterm::execute!(out, EnableBracketedPaste)?;
+    if mouse_enabled {
+        crossterm::execute!(out, EnableMouseCapture)?;
+    }
     crossterm::execute!(out, EnterAlternateScreen, SetTitle("lanchat"))?;
     let backend = CrosstermBackend::new(out);
     Ok(Terminal::new(backend)?)
 }
 
-/// Restore the terminal to its previous state. Safe to call multiple times.
+/// Restore the terminal to its previous state. The teardown mirrors
+/// `enter_terminal` exactly so we don't leak raw mode, alt-screen, or
+/// mouse-capture into the parent shell.
 pub struct TuiGuard {
     active: bool,
+    mouse_enabled: bool,
 }
 impl TuiGuard {
-    pub fn new() -> std::io::Result<Self> {
-        Ok(Self { active: true })
+    pub fn new(mouse_enabled: bool) -> std::io::Result<Self> {
+        Ok(Self {
+            active: true,
+            mouse_enabled,
+        })
     }
 }
 impl Drop for TuiGuard {
@@ -376,10 +576,14 @@ impl Drop for TuiGuard {
         if !self.active {
             return;
         }
+        use crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
         use crossterm::terminal::LeaveAlternateScreen;
-        // crossterm 0.28 dropped the typed `ShowCursor` command; emit the raw
-        // escape sequence instead. DCS show-cursor = ESC [ ? 25 h.
-        let _ = crossterm::execute!(stdout(), LeaveAlternateScreen);
+        if self.mouse_enabled {
+            let _ = crossterm::execute!(stdout(), DisableMouseCapture);
+        }
+        let _ = crossterm::execute!(stdout(), DisableBracketedPaste, LeaveAlternateScreen);
+        // crossterm 0.28 dropped the typed `ShowCursor` command; emit
+        // the raw escape sequence instead. DCS show-cursor = ESC [ ? 25 h.
         let _ = std::io::Write::write_all(&mut stdout(), b"\x1B[?25h");
         let _ = crossterm::terminal::disable_raw_mode();
         self.active = false;
@@ -395,26 +599,12 @@ pub fn render(
 ) -> std::io::Result<()> {
     terminal.draw(|f| {
         let area = f.area();
+        // Single source of truth for the layout — hit_test reuses it.
+        let areas = compute_layout(area);
 
-        // Outer root: take the full area. Two vertical bands — body + footer.
-        let outer = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3)])
-            .split(area);
-        let body = outer[0];
-        let footer = outer[1];
-
-        // Body: sidebar | chat.
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(24), Constraint::Min(10)])
-            .split(body);
-        let sidebar_area = cols[0];
-        let chat_area = cols[1];
-
-        draw_sidebar(f, sidebar_area, state, theme, glyphs);
-        draw_chat(f, chat_area, state, theme, glyphs);
-        draw_footer(f, footer, state, theme, glyphs);
+        draw_sidebar(f, areas.sidebar, state, theme, glyphs);
+        draw_chat(f, areas.chat, state, theme, glyphs);
+        draw_footer(f, areas.footer, state, theme, glyphs);
 
         if state.show_help {
             help::render(f, theme, glyphs);
@@ -843,5 +1033,78 @@ mod tests {
         s.peers.remove(2);
         s.sort_peers();
         assert_eq!(s.selected_peer, 1);
+    }
+
+    // Layout / hit-test coverage.
+
+    fn synthetic_layout() -> (Rect, LayoutAreas) {
+        let screen = Rect::new(0, 0, 80, 24);
+        let areas = compute_layout(screen);
+        (screen, areas)
+    }
+
+    #[test]
+    fn compute_layout_produces_three_rects() {
+        let (screen, areas) = synthetic_layout();
+        // Outer is body + 3-tall footer; sidebar is 24 wide.
+        assert_eq!(areas.sidebar.width, SIDEBAR_WIDTH);
+        assert_eq!(areas.footer.height, FOOTER_HEIGHT);
+        assert_eq!(areas.chat.x, areas.sidebar.x + SIDEBAR_WIDTH);
+        assert_eq!(areas.footer.y, screen.height - FOOTER_HEIGHT);
+    }
+
+    #[test]
+    fn hit_test_sidebar_row_picks_peer_index() {
+        let (screen, areas) = synthetic_layout();
+        // First peer sits at sidebar.y + 2 (1 border + 1 header line).
+        let first_y = areas.sidebar.y + 2;
+        assert!(matches!(
+            hit_test(screen, areas.sidebar.x + 1, first_y, &areas, false, 3),
+            Hit::Sidebar(0)
+        ));
+        assert!(matches!(
+            hit_test(screen, areas.sidebar.x + 1, first_y + 1, &areas, false, 3),
+            Hit::Sidebar(1)
+        ));
+        // Click below last peer but still inside the sidebar — should
+        // clamp to the last index rather than fall through to Footer.
+        let below_last = areas.sidebar
+            .y
+            .saturating_add(areas.sidebar.height)
+            .saturating_sub(2);
+        assert!(matches!(
+            hit_test(screen, areas.sidebar.x + 1, below_last, &areas, false, 3),
+            Hit::Sidebar(2)
+        ));
+    }
+
+    #[test]
+    fn hit_test_chat_click_returns_chat() {
+        let (screen, areas) = synthetic_layout();
+        let col = areas.chat.x + 1;
+        let row = areas.chat.y + 1;
+        assert!(matches!(
+            hit_test(screen, col, row, &areas, false, 0),
+            Hit::Chat
+        ));
+    }
+
+    #[test]
+    fn hit_test_modal_consumes_clicks_inside_modal_rect() {
+        let (screen, areas) = synthetic_layout();
+        let modal = modal_rect(screen);
+        let col = modal.x + modal.width / 2;
+        let row = modal.y + modal.height / 2;
+        // Without a modal open, a click inside the modal rect falls
+        // through to the chat pane (since the modal sits over it).
+        assert!(matches!(
+            hit_test(screen, col, row, &areas, false, 0),
+            Hit::Chat
+        ));
+        // With a modal open, that same click is consumed as Modal.
+        assert!(matches!(
+            hit_test(screen, col, row, &areas, true, 0),
+            Hit::Modal
+        ));
     }
 }
