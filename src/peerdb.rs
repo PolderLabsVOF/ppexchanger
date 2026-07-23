@@ -1,7 +1,8 @@
 //! Contact list: persistent record of every peer we have ever seen, with
 //! name, public key, last-seen address, and a trust flag.
 //!
-//! File format at `~/.config/lanchat/contacts`:
+//! File format at `<config_dir>/contacts` (XDG `~/.config/lanchat/contacts`
+//! on Linux/macOS, `%APPDATA%\lanchat\contacts` on Windows):
 //!   [4 magic "LCDB"] [u8 version=1] [u32 count]
 //!   for each contact:
 //!     [16 peer_id] [u16 name_len] [name UTF-8] [32 pubkey]

@@ -126,7 +126,8 @@ fn print_help() {
          \n\
          USAGE:\n  lanchat [--name <name>] [--port <port>] [--theme <name>] [--config <path>] [--no-mouse]\n  lanchat --gen-identity\n  lanchat --help | --version\n\
          \n\
-         OPTIONS:\n  --name <name>     display name (overrides stored)\n  --port <port>     TCP listen port (0 = ephemeral)\n  --theme <name>    default|solarized|monochrome|neon\n  --config <path>   path to config.toml (default ~/.config/lanchat/config.toml)\n  --no-mouse        disable mouse capture\n  --gen-identity    generate a new identity and exit\n  --help, -h        print this help\n  --version, -V     print version",
+         OPTIONS:\n  --name <name>     display name (overrides stored)\n  --port <port>     TCP listen port (0 = ephemeral)\n  --theme <name>    default|solarized|monochrome|neon\n  --config <path>   path to config.toml (default: $XDG_CONFIG_HOME/lanchat/config.toml on
+                    Linux/macOS, %APPDATA%\\lanchat\\config.toml on Windows)\n  --no-mouse        disable mouse capture\n  --gen-identity    generate a new identity and exit\n  --help, -h        print this help\n  --version, -V     print version",
         version = VERSION
     );
 }

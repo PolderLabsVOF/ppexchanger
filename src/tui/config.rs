@@ -1,8 +1,10 @@
 //! UI configuration loader.
 //!
-//! Reads a tiny subset of TOML from `~/.config/lanchat/config.toml`. We
-//! intentionally hand-roll the parser instead of pulling in a TOML crate:
-//! the supported grammar is a single `[ui]` table with a few keys, all of
+//! Reads a tiny subset of TOML from `<config_dir>/config.toml` (XDG
+//! `~/.config/lanchat/config.toml` on Linux/macOS,
+//! `%APPDATA%\lanchat\config.toml` on Windows). We intentionally
+//! hand-roll the parser instead of pulling in a TOML crate: the
+//! supported grammar is a single `[ui]` table with a few keys, all of
 //! which we can parse with a handful of lines.
 //!
 //! Supported keys under `[ui]`:
