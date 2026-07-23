@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
-# install.sh — install or update the `lanchat` release binary.
+# install.sh — install or update `lanchat`.
 #
 # Usage:
 #   curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh | bash
 #   curl -fsSL ... | bash -s -- --tag v0.3.1
 #   bash install.sh --uninstall
+#   bash install.sh --method source           # build from source instead of fetching the binary
 #
 # Environment overrides:
 #   LANCHAT_INSTALL_DIR   target directory (default: $HOME/.local/bin)
 #   LANCHAT_VERSION       specific version tag (default: latest release)
 #   LANCHAT_REPO          "owner/name"                  (default: PolderLabsVOF/ppexchanger)
 #   LANCHAT_SKIP_VERIFY   set to 1 to skip checksum verification
+#   LANCHAT_METHOD        "binary" | "source" | "auto" (default: auto = prompt when TTY, binary when piped)
 #
-# The script fetches a single-binary tarball (`lanchat-<tag>-<target>.tar.gz`),
+# By default the script fetches a single-binary tarball (`lanchat-<tag>-<target>.tar.gz`),
 # verifies it against `SHA256SUMS`, extracts the `lanchat` binary into the
-# install dir, and on update replaces the previous binary in place. Re-running
-# the script is the supported update path — it always fetches and verifies
-# the latest release (or the pinned tag).
+# install dir, and on update replaces the previous binary in place. With
+# `--method source` (or by answering "source" at the interactive prompt when
+# stdin is a TTY) the script instead clones the repo at the chosen tag and
+# runs `cargo install --path . --locked` into the same install dir.
+# Re-running the script is the supported update path.
 
 set -euo pipefail
 
@@ -47,8 +51,13 @@ USAGE:
 OPTIONS:
     --tag <tag>         Install a specific release tag (e.g. v0.3.1). Default: latest.
     --dir <path>        Install directory. Default: \$HOME/.local/bin.
-    --yes               Skip the "replacing existing binary" prompt-style warning
-                        (the install is non-interactive anyway; useful for log scraping).
+    --method <mode>     Install method: "binary" (download release tarball, the default),
+                        "source" (git clone + cargo install --path . --locked), or
+                        "auto" (prompt when stdin is a TTY, else "binary").
+                        Equivalent env var: LANCHAT_METHOD.
+    --yes               Skip the "replacing existing binary" prompt-style warning and
+                        auto-pick the binary method when --method auto is in effect.
+                        (The install is non-interactive anyway; useful for log scraping.)
     --uninstall         Remove the installed binary.
     --print-target      Print the detected target triple for this host and exit.
     --print-tag         Resolve the latest (or pinned) tag and print it, then exit.
@@ -60,6 +69,7 @@ ENV:
     LANCHAT_INSTALL_DIR     Same as --dir
     LANCHAT_VERSION         Same as --tag
     LANCHAT_SKIP_VERIFY     Set to 1 to skip SHA256SUMS verification (not recommended)
+    LANCHAT_METHOD          "binary" | "source" | "auto" (default: auto)
     LANCHAT_YES             Set to 1 to behave as if --yes was passed
 
 EXAMPLES:
@@ -86,11 +96,13 @@ uninstall() {
 ASSUME_YES="${LANCHAT_YES:-0}"
 PRINT_TARGET=0
 PRINT_TAG=0
+METHOD="${LANCHAT_METHOD:-auto}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --tag)          [ $# -ge 2 ] || die "--tag requires an argument"; VERSION="$2"; shift 2 ;;
         --dir)          [ $# -ge 2 ] || die "--dir requires an argument"; INSTALL_DIR="$2"; shift 2 ;;
+        --method)       [ $# -ge 2 ] || die "--method requires an argument"; METHOD="$2"; shift 2 ;;
         --yes)          ASSUME_YES=1; shift ;;
         --uninstall)    uninstall ;;
         --print-target) PRINT_TARGET=1; shift ;;
@@ -99,6 +111,12 @@ while [ $# -gt 0 ]; do
         *)              die "unknown argument: $1 (try --help)" ;;
     esac
 done
+
+# Validate the method early so a typo fails before we touch the network.
+case "$METHOD" in
+    binary|source|auto) ;;
+    *) die "invalid --method value: '$METHOD' (expected: binary, source, or auto)" ;;
+esac
 
 # Normalise the install dir. The binary basename is decided below, once
 # `TARGET_TRIPLE` has been resolved.
@@ -165,12 +183,65 @@ if [ "$PRINT_TARGET" = "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Method resolution
+# ---------------------------------------------------------------------------
+# In auto mode we ask the user when stdin is a TTY (so an interactive
+# `./install.sh` run gets the choice), and default to binary otherwise so
+# `curl ... | bash` keeps the fast, hermetic path it always had. The
+# chosen method then short-circuits the rest of the script.
+choose_method() {
+    # Probe flags (--print-target / --print-tag) exit before this block
+    # in CI; if either fires after we've been entered, leave METHOD alone.
+    if [ "$METHOD" != "auto" ] || [ "$PRINT_TAG" = "1" ]; then
+        return
+    fi
+    if [ ! -t 0 ] || [ "$ASSUME_YES" = "1" ]; then
+        METHOD="binary"
+        return
+    fi
+    printf '%s\n' "install method:" >&2
+    printf '%s\n' "  1) binary  — download the release tarball (~5 MB, fast)" >&2
+    printf '%s\n' "  2) source  — git clone + cargo install (needs git + rustc; minutes)" >&2
+    local reply
+    # Read with a 30s timeout so a hung terminal doesn't trap the install
+    # forever. `read -t` returns >128 on timeout; we treat that as "binary"
+    # so unattended terminals still get a working install.
+    if ! reply="$(read -r -t 30 -p "choose [1/2, default 1]: " choice; printf '%s' "${choice:-1}")" 2>/dev/null; then
+        warn "no prompt reply within 30s — defaulting to binary"
+        METHOD="binary"
+        return
+    fi
+    case "$reply" in
+        2|source) METHOD="source" ;;
+        *)        METHOD="binary" ;;
+    esac
+}
+choose_method
+
+# Skip the log when we're in a probe path — CI captures the tag and
+# we don't want extra noise in `$()`.
+if [ "$PRINT_TAG" != "1" ]; then
+    log "install method: $METHOD"
+fi
+
+# ---------------------------------------------------------------------------
 # Dependency checks
 # ---------------------------------------------------------------------------
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v tar  >/dev/null 2>&1 || die "tar is required"
-command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 \
-    || die "sha256sum (or shasum) is required"
+
+# Checksum tooling is only needed for the binary path; source builds are
+# validated by cargo's lockfile.
+if [ "$METHOD" = "binary" ]; then
+    command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 \
+        || die "sha256sum (or shasum) is required for binary installs"
+fi
+
+# Source installs require git (for the clone) and cargo (for the build).
+if [ "$METHOD" = "source" ]; then
+    command -v git   >/dev/null 2>&1 || die "git is required for --method source"
+    command -v cargo >/dev/null 2>&1 || die "cargo is required for --method source (install rustup: https://rustup.rs)"
+fi
 
 # ---------------------------------------------------------------------------
 # Resolve the version + the asset name
@@ -197,17 +268,120 @@ TAG_BARE="${TAG#v}"
 
 # `--print-tag` resolves the version and exits without touching the
 # filesystem. Used by CI to pin a release: TAG=$(curl -fsSL .../install.sh | bash -s -- --print-tag)
+# Must run before the method-resolution block so CI captures don't pick up
+# the "install method: …" log line.
 if [ "$PRINT_TAG" = "1" ]; then
     printf '%s\n' "$TAG"
     exit 0
 fi
 
-# ---------------------------------------------------------------------------
-# Download
-# ---------------------------------------------------------------------------
+# Both paths need a scratch dir for downloads / clones / staged
+# cargo-install output. Declared once, cleaned via EXIT trap.
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+# ---------------------------------------------------------------------------
+# Source build path
+# ---------------------------------------------------------------------------
+# Clones the repo at the resolved tag into a scratch dir and runs
+# `cargo install --path . --locked` so the output lands in
+# `$INSTALL_DIR/lanchat(.exe)` — same target as the binary path. Uses
+# `--locked` so a Cargo.lock mismatch fails loudly instead of silently
+# picking up newer dep versions.
+install_from_source() {
+    local repo_url="https://github.com/$REPO"
+    local src_dir="$TMPDIR/src"
+    log "cloning $repo_url at $TAG into $src_dir..."
+    git clone --depth 1 --branch "$TAG" "$repo_url" "$src_dir" \
+        || die "git clone failed — check that tag $TAG exists in $REPO"
+
+    # The source's `Cargo.toml` package name drives the installed binary
+    # name; fall back to "lanchat" if we can't introspect.
+    local pkg_name
+    pkg_name="$(grep -E '^name *= *"' "$src_dir/Cargo.toml" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')"
+    [ -n "$pkg_name" ] || pkg_name="lanchat"
+
+    log "running \`cargo install --path . --locked --root $TMPDIR/stage\`..."
+    (
+        cd "$src_dir"
+        cargo install --path . --locked --root "$TMPDIR/stage" --quiet \
+            || die "cargo install failed — see compiler output above"
+    )
+
+    local built="$TMPDIR/stage/bin/$BIN_BASENAME"
+    [ -f "$built" ] || built="$TMPDIR/stage/bin/$pkg_name"
+    [ -f "$built" ] || built="$TMPDIR/stage/bin/$pkg_name.exe"
+    [ -f "$built" ] || die "cargo install did not produce a binary at $TMPDIR/stage/bin/"
+
+    install_binary_file "$built"
+}
+
+# Shared by both paths: stage-source → BIN_PATH move + permission fix +
+# upgrade detection + smoke test. Defined before either caller so the
+# branch at the bottom of the script can call into it cleanly.
+install_binary_file() {
+    local src="$1"
+    if [ -e "$BIN_PATH" ] || [ -L "$BIN_PATH" ]; then
+        PREV_VERSION=""
+        if [ -x "$BIN_PATH" ]; then
+            PREV_VERSION="$("$BIN_PATH" --version 2>/dev/null | head -1 | awk '{print $NF}')" \
+                || PREV_VERSION="${LANCHAT_PREV_VERSION:-}" \
+                || PREV_VERSION=""
+        fi
+        if [ "$ASSUME_YES" = "1" ]; then
+            log "replacing existing $BIN_PATH (was: ${PREV_VERSION:-unknown})"
+        else
+            warn "replacing existing $BIN_PATH (was: ${PREV_VERSION:-unknown})"
+        fi
+        UPDATE=1
+    else
+        UPDATE=0
+    fi
+
+    if mv -f "$src" "$BIN_PATH" 2>/dev/null; then
+        :
+    else
+        cp -f "$src" "$BIN_PATH"
+    fi
+    case "$TARGET_TRIPLE" in
+        *-pc-windows-*) ;;
+        *) chmod +x "$BIN_PATH" ;;
+    esac
+
+    ok "installed lanchat $TAG_BARE → $BIN_PATH"
+
+    case ":$PATH:" in
+        *":$INSTALL_DIR:"*) ;;
+        *)
+            warn "$INSTALL_DIR is not on your PATH."
+            warn "add this to your shell rc:  export PATH=\"$INSTALL_DIR:\$PATH\""
+            ;;
+    esac
+
+    if "$BIN_PATH" --version >/dev/null 2>&1; then
+        INSTALLED_VER="$("$BIN_PATH" --version | head -1)"
+        ok "smoke test: $INSTALLED_VER"
+    else
+        warn "installed binary did not respond to --version — check $BIN_PATH"
+    fi
+
+    if [ "$UPDATE" = "1" ]; then
+        ok "update complete (was ${PREV_VERSION:-unknown} → $TAG_BARE)"
+    else
+        ok "install complete — run \$ $BIN_BASENAME to start"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+if [ "$METHOD" = "source" ]; then
+    install_from_source
+    exit 0
+fi
+
+# Binary path: download the tarball, verify, extract, then hand off to
+# the shared installer.
 ASSET="lanchat-${TAG_BARE}-${TARGET_TRIPLE}.tar.gz"
 BASE_URL="https://github.com/$REPO/releases/download/$TAG"
 TARBALL="$TMPDIR/$ASSET"
@@ -260,64 +434,6 @@ case "$TARGET_TRIPLE" in
     *) chmod +x "$SRC_BIN" || true ;;
 esac
 
-# Detect upgrade vs fresh install.
-if [ -e "$BIN_PATH" ] || [ -L "$BIN_PATH" ]; then
-    PREV_VERSION=""
-    if [ -x "$BIN_PATH" ]; then
-        # `lanchat --version` emits a single line "lanchat 0.3.0". The last
-        # whitespace-delimited token is the bare version. Fall back to
-        # $LANCHAT_PREV_VERSION when the binary can't be executed (e.g.
-        # the wrong arch was previously installed).
-        PREV_VERSION="$("$BIN_PATH" --version 2>/dev/null | head -1 | awk '{print $NF}')" \
-            || PREV_VERSION="${LANCHAT_PREV_VERSION:-}" \
-            || PREV_VERSION=""
-    fi
-    if [ "$ASSUME_YES" = "1" ]; then
-        log "replacing existing $BIN_PATH (was: ${PREV_VERSION:-unknown})"
-    else
-        warn "replacing existing $BIN_PATH (was: ${PREV_VERSION:-unknown})"
-    fi
-    UPDATE=1
-else
-    UPDATE=0
-fi
-
-# Atomic-ish install: move into place, fall back to copy if cross-device.
-if mv -f "$SRC_BIN" "$BIN_PATH" 2>/dev/null; then
-    :
-else
-    cp -f "$SRC_BIN" "$BIN_PATH"
-fi
-# PE binaries already carry executable permission via NTFS ACLs.
-case "$TARGET_TRIPLE" in
-    *-pc-windows-*) ;;
-    *) chmod +x "$BIN_PATH" ;;
-esac
-
-# ---------------------------------------------------------------------------
-# Post-install: PATH hint + smoke test
-# ---------------------------------------------------------------------------
-ok "installed lanchat $TAG_BARE → $BIN_PATH"
-
-# Check that the install dir is on PATH — if not, nudge the user.
-case ":$PATH:" in
-    *":$INSTALL_DIR:"*) ;;
-    *)
-        warn "$INSTALL_DIR is not on your PATH."
-        warn "add this to your shell rc:  export PATH=\"$INSTALL_DIR:\$PATH\""
-        ;;
-esac
-
-# Smoke test — the binary should at least print its version.
-if "$BIN_PATH" --version >/dev/null 2>&1; then
-    INSTALLED_VER="$("$BIN_PATH" --version | head -1)"
-    ok "smoke test: $INSTALLED_VER"
-else
-    warn "installed binary did not respond to --version — check $BIN_PATH"
-fi
-
-if [ "$UPDATE" = "1" ]; then
-    ok "update complete (was ${PREV_VERSION:-unknown} → $TAG_BARE)"
-else
-    ok "install complete — run \$ $BIN_BASENAME to start"
-fi
+# Detect upgrade vs fresh install + move into place + smoke test.
+# Hand off to the shared installer so binary and source paths converge.
+install_binary_file "$SRC_BIN"
