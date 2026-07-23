@@ -20,12 +20,31 @@ handshake, all traffic is encrypted peer-to-peer.
 
 ## Install
 
-The one-line installer fetches the latest release from GitHub, verifies it
-against a SHA256SUMS manifest, and installs `lanchat` into `~/.local/bin`:
+Pre-built binaries ship for Linux (x86_64 + aarch64), macOS (x86_64 +
+Apple silicon), and Windows (x86_64 MSVC). The installer fetches the
+asset that matches your host, verifies it against a SHA256SUMS manifest
+published alongside the release, and drops the binary into
+`~/.local/bin` by default.
+
+**Pick your platform:**
+
+- [Linux](#linux)
+- [macOS](#macos)
+- [Windows](#windows)
+- [From source](#from-source) — git + cargo, with or without the installer
+
+### Linux
+
+Requires `curl`, `tar`, and `sha256sum` (all pre-installed on every
+mainstream distro):
 
 ```sh
 curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh | bash
 ```
+
+The installer drops `lanchat` into `~/.local/bin`. If that directory is
+not already on your `PATH`, the installer prints the export line to
+add; most distros pick up `~/.local/bin` automatically.
 
 Pin a specific version:
 
@@ -33,44 +52,124 @@ Pin a specific version:
 curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh | bash -s -- --tag v0.3.1
 ```
 
-Install system-wide (needs sudo):
+Install system-wide (`/usr/local/bin`) — needs `sudo`:
 
 ```sh
 curl -fsSL ... | bash -s -- --dir /usr/local/bin
 ```
 
-Update later by re-running the same command — the installer detects the
-existing binary, prints its version, and swaps it in place.
+Update later by re-running the same command. The installer detects the
+existing binary, prints its previous version, and replaces it in place.
 
-Verify a download manually:
+**Verify a download manually** — both files end up in `$TMPDIR`; the
+manifest lists every asset:
 
 ```sh
+curl -fsSL -O https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/SHA256SUMS
+curl -fsSL -O https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/lanchat-<version>-x86_64-unknown-linux-gnu.tar.gz
 sha256sum -c SHA256SUMS
 ```
 
+**Architectures published:**
+
+| Arch      | Triple                              |
+| --------- | ----------------------------------- |
+| x86_64    | `x86_64-unknown-linux-gnu`          |
+| aarch64   | `aarch64-unknown-linux-gnu`         |
+
+On Alpine / musl-based distros the gnu tarball runs in practice but
+isn't an officially published asset — [build from source](#from-source)
+if you hit a glibc symbol error.
+
+Config + identity live under `$XDG_CONFIG_HOME/lanchat/` (typically
+`~/.config/lanchat/`).
+
+### macOS
+
+The same installer detects Apple targets via `uname -s` and downloads
+the matching tarball. Universal binary support: the `x86_64-apple-darwin`
+asset runs natively on Apple silicon via Rosetta, and the
+`aarch64-apple-darwin` asset runs natively on M-series chips. Modern
+macOS users on Apple silicon get the native asset.
+
+```sh
+curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh | bash
+```
+
+The installer drops `lanchat` into `~/.local/bin`. macOS does **not**
+put `~/.local/bin` on `PATH` by default — once is enough:
+
+```sh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # or ~/.bash_profile
+. ~/.zshrc
+```
+
+**Note on macOS Firewall**: the first launch prompts for incoming
+network connections. Click **Allow** when prompted so UDP multicast
+discovery (`/discover`) works. If you denied earlier, open
+*System Settings → Network → Firewall → Options…* and remove the
+deny rule for `lanchat`.
+
+**Architectures published:**
+
+| Arch              | Triple                      |
+| ----------------- | --------------------------- |
+| x86_64 (Intel)    | `x86_64-apple-darwin`       |
+| aarch64 (Apple)   | `aarch64-apple-darwin`      |
+
+The installer does not currently codesign or notarize the binary; on
+first launch Gatekeeper may surface a "cannot be opened because the
+developer cannot be verified" dialog. Either right-click → Open the
+first time, or strip the quarantine attribute:
+
+```sh
+xattr -dr com.apple.quarantine ~/.local/bin/lanchat
+```
+
+Config + identity live under `~/Library/Application Support/lanchat/`
+(equivalent to `$XDG_CONFIG_HOME/lanchat`).
+
 ### Windows
 
-A native Windows binary (`lanchat.exe`, MSVC) is shipped alongside the
-Linux and macOS assets. Two install paths:
+A native Windows binary (`lanchat.exe`, x86_64 MSVC) ships alongside
+the Linux and macOS assets.
 
-**Via the bash installer** (Git Bash / MSYS2 / Cygwin on Windows):
-the same one-line command as above. The installer detects `MINGW*`,
-`MSYS*`, `CYGWIN*` from `uname -s` and downloads the Windows tarball;
-`chmod +x` is skipped (PE binaries don't carry the bit).
+**Recommended — via the bash installer** (Git Bash / MSYS2 / Cygwin on
+Windows):
 
-**Manual** — if you don't have a bash shell handy, grab the zip from
-the release page:
+```sh
+curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh | bash
+```
+
+The installer detects `MINGW*`, `MSYS*`, `CYGWIN*` from `uname -s` and
+downloads the Windows tarball. `chmod +x` is skipped (PE binaries don't
+carry the bit).
+
+**Manual download** — if you don't have a bash shell handy, grab the
+zip from the release page:
 
 ```
 https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/lanchat-<version>-x86_64-pc-windows-msvc.zip
 ```
 
 Extract it (Windows Explorer's "Extract All…" works) and put
-`lanchat.exe` somewhere on your `%PATH%`.
+`lanchat.exe` somewhere on your `%PATH%` — typically
+`C:\Users\<you>\AppData\Local\Microsoft\WindowsApps` (no admin needed)
+or `C:\Program Files\lanchat\` (admin needed).
 
-Config / identity / contacts on Windows live under
-`%APPDATA%\lanchat\` (typically
-`C:\Users\<you>\AppData\Roaming\lanchat\`), created on first run.
+**Architectures published:**
+
+| Arch   | Triple                       |
+| ------ | ---------------------------- |
+| x86_64 | `x86_64-pc-windows-msvc`     |
+
+aarch64 Windows is **not yet published**. If you're on ARM64,
+[build from source](#from-source) with
+`rustup target add aarch64-pc-windows-msvc`.
+
+Config + identity + contacts live under `%APPDATA%\lanchat\`
+(typically `C:\Users\<you>\AppData\Roaming\lanchat\`), created on
+first run.
 
 **Windows Firewall** will prompt on first launch when `lanchat` binds
 the listening port (default `0.0.0.0:7777`). Allow access when asked,
@@ -80,7 +179,30 @@ TCP subnet scan.
 
 ### From source
 
-Requires Rust 1.75+ (only audited dependencies, no native libraries):
+Requires Rust 1.75+ (only audited dependencies, no native libraries).
+Two routes:
+
+**Through the installer** — interactive prompt or explicit flag. The
+installer asks whether to download the binary or build from source
+when stdin is a TTY; otherwise it defaults to the binary path. Force
+source builds explicitly:
+
+```sh
+curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh \
+  | bash -s -- --method source
+```
+
+The source path needs `git` and `cargo install` (i.e. `rustup`). It
+clones the repo at the resolved tag, runs `cargo install --path . --locked`
+into the same `$INSTALL_DIR`, then runs the same smoke test the
+binary path uses. Pin a tag the same way as the binary path:
+
+```sh
+curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh \
+  | bash -s -- --method source --tag v0.3.1
+```
+
+**Manual** — clone + build, no installer:
 
 ```sh
 cargo install --git https://github.com/PolderLabsVOF/ppexchanger --locked
