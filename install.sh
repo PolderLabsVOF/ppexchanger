@@ -36,6 +36,19 @@ ok()   { printf '%b[lanchat]%b %b%s%b\n' "$BOLD" "$RESET" "$GREEN" "$*" "$RESET"
 warn() { printf '%b[lanchat]%b %b%s%b\n' "$BOLD" "$RESET" "$YELLOW" "$*" "$RESET"; }
 die()  { printf '%b[lanchat]%b %b%s%b\n' "$BOLD" "$RESET" "$RED" "$*" "$RESET" >&2; exit 1; }
 
+# ---------------------------------------------------------------------------
+# Windows guard
+# ---------------------------------------------------------------------------
+# lanchat doesn't ship Windows binaries yet (no rustup target / no .exe in
+# the release matrix). Detect Windows in any of its common bash flavours
+# and bail with a clear pointer to a future build instead of letting the
+# script later fail with confusing 'uname: not found' / 'chmod: not found'
+# cascades.
+if [ "${OS:-}" = "Windows_NT" ] || \
+   uname -s 2>/dev/null | grep -Eq '^(MINGW|MSYS|CYGWIN)'; then
+    die "Windows is not supported in this release. A native Windows build is on the roadmap — see https://github.com/PolderLabsVOF/ppexchanger/releases for the latest assets."
+fi
+
 usage() {
     cat <<EOF
 install.sh — install or update lanchat
