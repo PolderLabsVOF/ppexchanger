@@ -758,7 +758,38 @@ fn start_tui(
                                 width: sz.width,
                                 height: sz.height,
                             };
-                            handle_mouse(m, &state, rect);
+                            // Menu clicks come back as EditorEvents so
+                            // the dispatch arm below can run them
+                            // through the same path as Ctrl-, / ? /
+                            // Esc — keeping state mutation in one
+                            // place.
+                            if let Some(editor_ev) = handle_mouse(m, &state, rect) {
+                                if let lanchat::tui::EditorEvent::MenuAction(act) = editor_ev {
+                                    match act {
+                                        lanchat::tui::MenuAction::Peers => {
+                                            state.lock().unwrap().focus = tui::Focus::Sidebar;
+                                        }
+                                        lanchat::tui::MenuAction::Discover => {
+                                            state.lock().unwrap().start_discovery();
+                                            do_discover(
+                                                announce_beacon.clone(),
+                                                self_peer_id,
+                                                bus.tx_events.clone(),
+                                                Arc::clone(&stop),
+                                            );
+                                        }
+                                        lanchat::tui::MenuAction::Settings => {
+                                            state.lock().unwrap().open_settings(&live_cfg);
+                                        }
+                                        lanchat::tui::MenuAction::Help => {
+                                            state.lock().unwrap().show_help = true;
+                                        }
+                                        lanchat::tui::MenuAction::Quit => {
+                                            stop.store(true, Ordering::SeqCst);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 } else if state
@@ -921,6 +952,7 @@ fn start_tui(
                     lanchat::tui::EditorEvent::HistoryPrev
                     | lanchat::tui::EditorEvent::HistoryNext
                     | lanchat::tui::EditorEvent::Edited
+                    | lanchat::tui::EditorEvent::MenuAction(_)
                     | lanchat::tui::EditorEvent::None => {}
                     }
                     // File-offer modal: Enter accepts, Esc rejects.
@@ -1088,7 +1120,7 @@ fn handle_mouse(
     m: crossterm::event::MouseEvent,
     state: &Arc<Mutex<UiState>>,
     size: ratatui::layout::Rect,
-) {
+) -> Option<lanchat::tui::EditorEvent> {
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut s = state.lock().unwrap();
     let areas = tui::compute_layout(size);
@@ -1120,6 +1152,14 @@ fn handle_mouse(
                 // Modal handles its own dispatch (Enter/Esc) — clicks
                 // are absorbed for v1.
             }
+            tui::Hit::Menu(action) => {
+                // Surface the click as an EditorEvent so the main loop
+                // can route it through the same arm that handles
+                // Ctrl-, / /. Clicks need access to `live_cfg`, `bus`,
+                // and `running` — only the event loop has those.
+                drop(s);
+                return Some(lanchat::tui::EditorEvent::MenuAction(action));
+            }
         },
         MouseEventKind::ScrollUp => {
             if s.focus == tui::Focus::Chat {
@@ -1133,6 +1173,7 @@ fn handle_mouse(
         }
         _ => {}
     }
+    None
 }
 
 /// If `body` is the path of an existing regular file, return its path.

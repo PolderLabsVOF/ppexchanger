@@ -47,6 +47,11 @@ pub enum EditorEvent {
     ToggleHelp,
     /// `Ctrl-,` — open the settings popup.
     OpenSettings,
+    /// A click landed on one of the top menu buttons. The menu is the
+    /// only entry point that needs the closure payload (so the handler
+    /// in main.rs can route Settings → open_settings, Quit → quit,
+    /// etc.) without growing the variant enum.
+    MenuAction(crate::tui::MenuAction),
     /// A printable character was added (or backspace).
     Edited,
 }
