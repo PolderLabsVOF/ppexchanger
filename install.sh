@@ -36,18 +36,6 @@ ok()   { printf '%b[lanchat]%b %b%s%b\n' "$BOLD" "$RESET" "$GREEN" "$*" "$RESET"
 warn() { printf '%b[lanchat]%b %b%s%b\n' "$BOLD" "$RESET" "$YELLOW" "$*" "$RESET"; }
 die()  { printf '%b[lanchat]%b %b%s%b\n' "$BOLD" "$RESET" "$RED" "$*" "$RESET" >&2; exit 1; }
 
-# ---------------------------------------------------------------------------
-# Windows guard
-# ---------------------------------------------------------------------------
-# lanchat doesn't ship Windows binaries yet (no rustup target / no .exe in
-# the release matrix). Detect Windows in any of its common bash flavours
-# and bail with a clear pointer to a future build instead of letting the
-# script later fail with confusing 'uname: not found' / 'chmod: not found'
-# cascades.
-if [ "${OS:-}" = "Windows_NT" ] || \
-   uname -s 2>/dev/null | grep -Eq '^(MINGW|MSYS|CYGWIN)'; then
-    die "Windows is not supported in this release. A native Windows build is on the roadmap — see https://github.com/PolderLabsVOF/ppexchanger/releases for the latest assets."
-fi
 
 usage() {
     cat <<EOF
@@ -112,10 +100,10 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Normalise the install dir and the binary target.
+# Normalise the install dir. The binary basename is decided below, once
+# `TARGET_TRIPLE` has been resolved.
 INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"
 mkdir -p "$INSTALL_DIR" || die "cannot create install dir: $INSTALL_DIR"
-BIN_PATH="$INSTALL_DIR/lanchat"
 
 # ---------------------------------------------------------------------------
 # Host target detection
@@ -123,26 +111,51 @@ BIN_PATH="$INSTALL_DIR/lanchat"
 # Returns the Rust target triple that matches the current host, or exits
 # non-zero with a message on stderr. Centralised so `--print-target` and
 # the install path can share it.
+#
+# Windows hosts are detected via `uname -s` returning one of
+# `MINGW*_NT-*`, `MSYS_NT-*`, or `CYGWIN_NT-*` (all uppercase on real
+# Git Bash / MSYS2 / Cygwin; lowered here for matching).
 detect_target_triple() {
     local host_os host_arch triple
-    host_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    host_os="$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')"
     host_arch="$(uname -m)"
     case "$host_os" in
-        linux|darwin) ;;
-        *) die "unsupported OS: $host_os (only linux + macOS are published)" ;;
+        linux|darwin|mingw*|msys*|cygwin*) ;;
+        *) die "unsupported OS: $host_os (only linux + macOS + windows are published)" ;;
     esac
     case "$host_arch" in
-        x86_64|amd64)   triple="x86_64-unknown-linux-gnu"   ;;
-        aarch64|arm64)  triple="aarch64-unknown-linux-gnu"  ;;
+        x86_64|amd64)   triple="x86_64"   ;;
+        aarch64|arm64)  triple="aarch64"  ;;
         *)              die "unsupported architecture: $host_arch (only x86_64 + aarch64 are published)" ;;
     esac
-    if [ "$host_os" = "darwin" ]; then
-        triple="${triple/-linux-/-apple-}"
-    fi
+    # Pick the vendor + os suffix for the host OS. Linux is the default
+    # carrier triple from `$rustc -vV` style; macOS + Windows get their
+    # own triples. A future aarch64-pc-windows-msvc asset would only
+    # need a new case branch here.
+    case "$host_os" in
+        linux)                          triple="${triple}-unknown-linux-gnu" ;;
+        darwin)                         triple="${triple}-apple-darwin"      ;;
+        mingw*|msys*|cygwin*)
+            case "$host_arch" in
+                x86_64|amd64)   triple="${triple}-pc-windows-msvc" ;;
+                aarch64|arm64)
+                    die "aarch64 Windows is not yet published (only x86_64-pc-windows-msvc is built)" ;;
+                *)              die "unsupported architecture: $host_arch (only x86_64 is published on Windows)" ;;
+            esac
+            ;;
+    esac
     printf '%s\n' "$triple"
 }
 
 TARGET_TRIPLE="$(detect_target_triple)"
+
+# Windows PE binaries carry the `.exe` suffix; ELF/Mach-O use bare
+# `lanchat`. Computed once so the rest of the script can reference it.
+case "$TARGET_TRIPLE" in
+    *-pc-windows-*) BIN_BASENAME="lanchat.exe" ;;
+    *)             BIN_BASENAME="lanchat"    ;;
+esac
+BIN_PATH="$INSTALL_DIR/$BIN_BASENAME"
 
 # `--print-target` is a debug-friendly probe: emit the resolved triple and
 # exit before any network or filesystem side effects.
@@ -236,10 +249,16 @@ fi
 # ---------------------------------------------------------------------------
 log "extracting..."
 tar -xzf "$TARBALL" -C "$TMPDIR"
-SRC_BIN="$TMPDIR/lanchat"
-[ -f "$SRC_BIN" ] || SRC_BIN="$TMPDIR/bin/lanchat"
-[ -f "$SRC_BIN" ] || die "expected binary 'lanchat' not found in the tarball"
-chmod +x "$SRC_BIN" || true
+# Tarball layout is `bin/<binary-name>`; the leaf name depends on the
+# target triple (lanchat.exe on Windows, lanchat elsewhere).
+SRC_BIN="$TMPDIR/$BIN_BASENAME"
+[ -f "$SRC_BIN" ] || SRC_BIN="$TMPDIR/bin/$BIN_BASENAME"
+[ -f "$SRC_BIN" ] || die "expected binary '$BIN_BASENAME' not found in the tarball"
+# PE binaries carry their executable bit via NTFS ACLs, not the +x bit.
+case "$TARGET_TRIPLE" in
+    *-pc-windows-*) ;;
+    *) chmod +x "$SRC_BIN" || true ;;
+esac
 
 # Detect upgrade vs fresh install.
 if [ -e "$BIN_PATH" ] || [ -L "$BIN_PATH" ]; then
@@ -269,7 +288,11 @@ if mv -f "$SRC_BIN" "$BIN_PATH" 2>/dev/null; then
 else
     cp -f "$SRC_BIN" "$BIN_PATH"
 fi
-chmod +x "$BIN_PATH"
+# PE binaries already carry executable permission via NTFS ACLs.
+case "$TARGET_TRIPLE" in
+    *-pc-windows-*) ;;
+    *) chmod +x "$BIN_PATH" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Post-install: PATH hint + smoke test
@@ -296,5 +319,5 @@ fi
 if [ "$UPDATE" = "1" ]; then
     ok "update complete (was ${PREV_VERSION:-unknown} → $TAG_BARE)"
 else
-    ok "install complete — run '\$ lanchat' to start"
+    ok "install complete — run \$ $BIN_BASENAME to start"
 fi
