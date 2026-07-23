@@ -296,6 +296,18 @@ selected, the first connected peer receives it.
 | `Ctrl-C` / `Ctrl-Q` | quit                                              |
 | `?`           | toggle the help overlay                                |
 
+### Menu bar
+
+A single-row menu sits above the sidebar / chat panes:
+
+```
+[ Peers ]  [ Discover ]  [ Settings ]  [ Help ]  [ Quit ]
+```
+
+Each button is clickable. They map to the same actions as the
+matching slash commands (`/discover`, `/settings`, `/help`, `/quit`)
+plus a `Peers` shortcut that focuses the sidebar.
+
 ### Mouse
 
 Mouse capture is **on by default** — the sidebar, chat pane, scroll
@@ -376,9 +388,6 @@ The TUI ships a retro amber-phosphor CRT vibe out of the box:
   medium shade `▒`/`░`, heavy block `█`/`▌`) so logos read as varied
   weight instead of fixed-width ASCII. Visible as the startup banner
   in the chat pane and as the settings popup header.
-* **Background gradient overlay** — every pane paints a 3-color
-  horizontal sweep (bg → status_bg → accent) that drifts one cell per
-  render. Reads as a soft scan effect without per-pixel blending.
 * **CRT scanlines** — the chat pane alternates `Modifier::DIM` on
   every other row each frame, so messages appear to scan downward
   like an old terminal. Toggle-able by setting `theme` to anything
