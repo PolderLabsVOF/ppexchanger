@@ -32,7 +32,7 @@ use crate::events::{Event, PeerId};
 use crate::identity::Identity;
 use crate::peerdb::{Contact, PeerDb};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, BorderType, List, ListItem, Paragraph, Wrap};
@@ -47,11 +47,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SIDEBAR_WIDTH: u16 = 24;
 const FOOTER_HEIGHT: u16 = 3;
 const BODY_MIN_HEIGHT: u16 = 3;
+/// Menu bar height. One row holding clickable buttons (Peers / Discover /
+/// Settings / Help / Quit). Pinned — never grows.
+const MENU_HEIGHT: u16 = 1;
+
+/// Menu buttons, top to bottom-left order. Used as the click target for
+/// the menu bar; `Hit::Menu(MenuAction)` returns the variant under the
+/// cursor, and `handle_mouse` routes it to the corresponding slash
+/// command or `EditorEvent` in the main loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuAction {
+    Peers,
+    Discover,
+    Settings,
+    Help,
+    Quit,
+}
 
 /// Three rectangles produced by the single `Layout` pass. Hit-test and
 /// render both build on this so the click map matches what the user
 /// sees on screen.
 pub struct LayoutAreas {
+    pub menu: Rect,
     pub sidebar: Rect,
     pub chat: Rect,
     pub footer: Rect,
@@ -62,13 +79,14 @@ pub struct LayoutAreas {
 /// in); `Chat` covers the chat pane; `Footer` is the input line area;
 /// `Modal` means the click landed inside a modal popup (show_help or
 /// discovery) and the main loop should consume it without further
-/// dispatch.
+/// dispatch; `Menu(action)` is a click on one of the top menu buttons.
 #[derive(Debug)]
 pub enum Hit {
     Sidebar(usize),
     Chat,
     Footer,
     Modal,
+    Menu(MenuAction),
 }
 
 /// Decide whether `(col, row)` falls inside `rect`.
@@ -514,18 +532,26 @@ fn now_unix() -> u64 {
 /// click on a peer name in the sidebar always corresponds to the row
 /// the user can see.
 pub fn compute_layout(area: Rect) -> LayoutAreas {
+    // Vertical: pinned menu on top, body absorbs the middle, footer on the
+    // bottom. The menu row is opt-out of the body budget so the chat pane
+    // can never be squeezed below BODY_MIN_HEIGHT by a tall menu.
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(BODY_MIN_HEIGHT), Constraint::Length(FOOTER_HEIGHT)])
+        .constraints([
+            Constraint::Length(MENU_HEIGHT),
+            Constraint::Min(BODY_MIN_HEIGHT),
+            Constraint::Length(FOOTER_HEIGHT),
+        ])
         .split(area);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(10)])
-        .split(outer[0]);
+        .split(outer[1]);
     LayoutAreas {
+        menu: outer[0],
         sidebar: cols[0],
         chat: cols[1],
-        footer: outer[1],
+        footer: outer[2],
     }
 }
 
@@ -568,6 +594,28 @@ pub fn hit_test(
     modal_open: bool,
     peers_len: usize,
 ) -> Hit {
+    // Menu row: checked first so menu clicks don't fall through to the
+    // sidebar or chat pane underneath. Mirrors draw_menu: 5 buttons of
+    // width BUTTON_W = 12 with a 1-cell gap. Clicks past the last
+    // button fall through to the regular pane hit-test.
+    if point_in_rect(areas.menu, col, row) {
+        const BUTTON_W: u16 = 12;
+        const GAP: u16 = 1;
+        const STRIDE: u16 = BUTTON_W + GAP;
+        let local_col = col.saturating_sub(areas.menu.x);
+        let idx = (local_col / STRIDE) as usize;
+        if let Some(action) = match idx {
+            0 => Some(MenuAction::Peers),
+            1 => Some(MenuAction::Discover),
+            2 => Some(MenuAction::Settings),
+            3 => Some(MenuAction::Help),
+            4 => Some(MenuAction::Quit),
+            _ => None,
+        } {
+            return Hit::Menu(action);
+        }
+        // Past the last button — fall through to sidebar/chat.
+    }
     // Modals always win — they draw over the centre, so any click in
     // that rect must NOT fall through to the chat pane.
     if modal_open && point_in_rect(modal_rect(screen), col, row) {
@@ -676,6 +724,7 @@ pub fn render(
         // Single source of truth for the layout — hit_test reuses it.
         let areas = compute_layout(area);
 
+        draw_menu(f, areas.menu, state, theme, glyphs);
         draw_sidebar(f, areas.sidebar, state, theme, glyphs);
         draw_chat(f, areas.chat, state, theme, glyphs);
         draw_footer(f, areas.footer, state, theme, glyphs);
@@ -693,17 +742,17 @@ pub fn render(
         if let Some(p) = &state.file_offer {
             file_offer_popup::render(f, theme, glyphs, p);
         }
-        // Startup logo: only on a fresh session and only when the chat
-        // pane is empty. Dismissed by sending a message or hitting Esc.
-        if state.show_logo && state.messages.is_empty() {
+        // Startup logo: only on a fresh session, only when the chat
+        // pane is empty, AND no modal is open. Without the modal
+        // guard the logo paints over the help / discovery popup,
+        // interleaving art with popup content.
+        let any_modal = state.show_help
+            || state.discovery.is_some()
+            || state.file_offer.is_some()
+            || state.settings.is_some();
+        if state.show_logo && state.messages.is_empty() && !any_modal {
             art::render(f, areas.chat, art::LogoKind::Large, theme);
         }
-        // Per-pane background gradient. Cheap overlay: an empty row
-        // painted with alternating accent / status_bg colors that
-        // shifts each frame via `scanline_tick`. Reads as a soft
-        // scan / gradient without the CPU cost of per-pixel blending.
-        draw_gradient_overlay(f, areas.sidebar, theme, state.scanline_tick);
-        draw_gradient_overlay(f, areas.chat, theme, state.scanline_tick);
         // Settings popup renders last so it sits on top of every other
         // modal. Caller passes the live UiConfig; the popup mutates it
         // (and the caller persists on close).
@@ -722,6 +771,50 @@ pub fn render(
         }
     })?;
     Ok(())
+}
+
+/// Render the top menu bar as five bordered Paragraph blocks side by
+/// side. Each block is the click target for the corresponding
+/// `MenuAction`; `hit_test` re-uses the same horizontal split to map a
+/// mouse column back to an action. Buttons render as `[ Label ]` with
+/// brackets in `border_inactive` and label in `accent` so the menu
+/// reads at a glance against the CRT palette.
+fn draw_menu(f: &mut Frame, area: Rect, _state: &UiState, theme: &Theme, _glyphs: &Glyphs) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let labels = [
+        (MenuAction::Peers, "Peers"),
+        (MenuAction::Discover, "Discover"),
+        (MenuAction::Settings, "Settings"),
+        (MenuAction::Help, "Help"),
+        (MenuAction::Quit, "Quit"),
+    ];
+    // One fixed-width button per action, with a 1-cell gap. Sized so
+    // the row fits on an 80-col terminal with room to spare; on wider
+    // terminals the trailing space fills with bg.
+    let button_w: u16 = 12;
+    let total_w = button_w * labels.len() as u16 + (labels.len() as u16 - 1);
+    let x_offset = area.x;
+    let y = area.y;
+    for (i, (action, label)) in labels.iter().enumerate() {
+        let x = x_offset + i as u16 * (button_w + 1);
+        if x + button_w > area.x + area.width {
+            break;
+        }
+        let _ = action; // hit_test re-derives from column
+        let rect = Rect::new(x, y, button_w, 1);
+        let bg = theme.bg;
+        let text = Line::from(Span::styled(
+            format!("[ {} ]", label),
+            Style::default()
+                .fg(theme.accent)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        f.render_widget(Paragraph::new(text).alignment(Alignment::Center), rect);
+        let _ = total_w; // reserved for future spacer
+    }
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
@@ -779,52 +872,6 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
         .collect();
 
     f.render_widget(List::new(items).block(block), area);
-}
-
-/// Paint a soft horizontal sweep across the pane interior. The sweep
-/// shifts one column per render (toggled by `tick`) so it reads as a
-/// gentle gradient rather than a static stripe. We render an empty
-/// `Paragraph` row over the bg-colored Block; ratatui composites the
-/// row's `bg` over whatever was below, giving the moving-band effect.
-///
-/// Implementation is cheap: a single-line Paragraph of `width` spans,
-/// each painted with one of three palette tones (bg → status_bg → accent).
-fn draw_gradient_overlay(f: &mut Frame, area: Rect, theme: &Theme, tick: bool) {
-    if area.width < 3 || area.height < 3 {
-        return;
-    }
-    // Only apply inside the borders (shrink by 1 row top + bottom, 1 col
-    // left + right). The bands shift on tick.
-    let inner = Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-    let mut spans: Vec<Span> = Vec::with_capacity(inner.width as usize);
-    for col in 0..inner.width {
-        // Phase cycle is 4 cells wide; tick adds 1 cell offset so the
-        // band appears to drift horizontally.
-        let phase = ((col + (if tick { 1 } else { 0 })) % 4) as u8;
-        let color = match phase {
-            0 => theme.bg,
-            1 => theme.status_bg,
-            2 => theme.status_bg,
-            _ => theme.accent, // single accent column reads as a moving "highlight"
-        };
-        spans.push(Span::styled(" ", Style::default().bg(color).fg(color)));
-    }
-    // Limit to one row per overlay call so the cost is bounded. We pick
-    // the middle row of the pane — at the bottom of the title strip and
-    // above the content — so the band is visible without obscuring text.
-    let row = inner.y + inner.height / 2;
-    f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg)),
-        Rect::new(inner.x, row, inner.width, 1),
-    );
 }
 
 fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
@@ -1068,6 +1115,38 @@ mod tests {
     }
 
     #[test]
+    fn logo_suppression_when_modal_open() {
+        // Replicates the any_modal guard from render(). If show_logo
+        // is true and any modal is open, the logo must NOT draw over
+        // the popup. We don't actually call render() here — we assert
+        // the same boolean expression the render() branch uses.
+        let id = Identity {
+            peer_id: [0u8; 16],
+            keypair: crate::crypto::Keypair::generate(),
+            name: "alice".into(),
+        };
+        let mut s = UiState::from_identity(&id);
+        assert!(s.show_logo);
+        assert!(s.messages.is_empty());
+
+        let any_modal = |s: &UiState| {
+            s.show_help || s.discovery.is_some() || s.file_offer.is_some() || s.settings.is_some()
+        };
+        assert!(!any_modal(&s));
+
+        s.show_help = true;
+        assert!(any_modal(&s));
+        s.show_help = false;
+
+        s.start_discovery();
+        assert!(any_modal(&s));
+        s.close_discovery();
+
+        s.open_settings(&crate::tui::UiConfig::default());
+        assert!(any_modal(&s));
+    }
+
+    #[test]
     fn cycle_focus_toggles() {
         let id = Identity {
             peer_id: [0u8; 16],
@@ -1234,13 +1313,55 @@ mod tests {
     }
 
     #[test]
-    fn compute_layout_produces_three_rects() {
+    fn compute_layout_produces_four_rects() {
         let (screen, areas) = synthetic_layout();
-        // Outer is body + 3-tall footer; sidebar is 24 wide.
+        // Outer is menu + body + 3-tall footer; sidebar is 24 wide.
         assert_eq!(areas.sidebar.width, SIDEBAR_WIDTH);
         assert_eq!(areas.footer.height, FOOTER_HEIGHT);
         assert_eq!(areas.chat.x, areas.sidebar.x + SIDEBAR_WIDTH);
         assert_eq!(areas.footer.y, screen.height - FOOTER_HEIGHT);
+        // Menu row sits at the very top, one row tall, full width.
+        assert_eq!(areas.menu.y, 0);
+        assert_eq!(areas.menu.height, 1);
+        assert_eq!(areas.menu.width, screen.width);
+        // Body sits below the menu.
+        assert_eq!(areas.chat.y, MENU_HEIGHT);
+    }
+
+    #[test]
+    fn hit_test_menu_clicks_resolve_to_action() {
+        let (screen, areas) = synthetic_layout();
+        // Five buttons of width 12 with a 1-cell gap. Click in the
+        // middle of each button.
+        let stride = 12 + 1;
+        for (col_target, expected) in [
+            (5usize, MenuAction::Peers),
+            (18, MenuAction::Discover),
+            (31, MenuAction::Settings),
+            (44, MenuAction::Help),
+            (57, MenuAction::Quit),
+        ] {
+            let hit = hit_test(screen, col_target as u16, 0, &areas, false, 0);
+            assert!(
+                matches!(hit, Hit::Menu(a) if a == expected),
+                "col {} expected {:?}, got {:?}",
+                col_target,
+                expected,
+                hit
+            );
+        }
+        // Click past the last button falls through to one of the
+        // body / footer / sidebar panes. On an 80×24 screen the only
+        // options at y=0 are Sidebar (if x < 24) or Footer (default).
+        let past = stride * 5 + 2;
+        if (past as u16) < screen.width {
+            let hit = hit_test(screen, past as u16, 0, &areas, false, 0);
+            assert!(
+                !matches!(hit, Hit::Menu(_)),
+                "past-end should not be a Menu hit, got {:?}",
+                hit
+            );
+        }
     }
 
     #[test]
