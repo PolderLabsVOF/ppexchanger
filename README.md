@@ -185,11 +185,12 @@ Two routes:
 **Through the installer** — interactive prompt or explicit flag. The
 installer asks whether to download the binary or build from source
 when stdin is a TTY; otherwise it defaults to the binary path. Force
-source builds explicitly:
+source builds explicitly (use the `=` form to survive any quoting the
+shell applies around `curl … | bash -s --`):
 
 ```sh
 curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh \
-  | bash -s -- --method source
+  | bash -s -- --method=source
 ```
 
 The source path needs `git` and `cargo install` (i.e. `rustup`). It
@@ -219,9 +220,9 @@ cargo build --release
 lanchat                      # start the TUI
 lanchat --name alice         # override display name
 lanchat --port 7777          # bind a specific TCP port
-lanchat --theme neon         # solarized | monochrome | neon
+lanchat --theme amber        # default | solarized | monochrome | neon | amber
 lanchat --config /tmp/c.toml # alternate config path
-lanchat --no-mouse           # disable mouse capture
+lanchat --no-mouse           # disable mouse capture (default is ON)
 lanchat --gen-identity       # print fingerprint + peer_id and exit
 lanchat --version
 lanchat --help
@@ -243,7 +244,10 @@ Slash-commands are entered in the input line and start with `/`:
 | `/peers`               | list every known peer with trust + state + fingerprint        |
 | `/trust <name>`        | mark a peer as trusted; persists to peerdb                    |
 | `/revoke <name>`       | remove a peer from peerdb                                     |
-| `/theme <name>`        | switch theme (`default` / `solarized` / `monochrome` / `neon`); saved to config.toml |
+| `/theme <name>`        | switch theme (`default` / `solarized` / `monochrome` / `neon` / `amber`); saved to config.toml |
+| `/settings`            | open the settings popup (theme, mouse, footer, scrollback)    |
+| `/discover`            | run a UDP + TCP subnet scan and open the discovery popup      |
+| `/map`                 | toggle the discovery popup between list view and Canvas map  |
 | `/send <path>`         | send a file at `<path>` to the selected peer (binary; max 32 KiB per chunk) |
 | `/quit`                | exit cleanly                                                  |
 
@@ -284,21 +288,42 @@ selected, the first connected peer receives it.
 | `Ctrl-T`      | trust the selected peer                                |
 | `Ctrl-R`      | revoke the selected peer                               |
 | `Ctrl-L`      | clear input                                            |
+| `Ctrl-,`      | open the settings popup                                |
+| `1` / `2` / `3` | in settings popup: jump to Display / Input / About   |
+| `←` / `→`     | in settings popup: cycle theme / scrollback / toggle mouse |
+| `Enter` / `Space` | in settings popup: apply / toggle the selected row    |
 | `Esc`         | cancel / clear input / close modal                     |
 | `Ctrl-C` / `Ctrl-Q` | quit                                              |
 | `?`           | toggle the help overlay                                |
 
 ### Mouse
 
-Mouse capture is **off by default** — start lanchat with no flags for
-keyboard-only mode. To enable click-to-select and scroll-wheel chat
-scrolling, drop `mouse = true` into the `[ui]` section of your
-`config.toml` (or run with the default — the field flips per session).
-With capture on:
+Mouse capture is **on by default** — the sidebar, chat pane, scroll
+wheel, and the settings popup are all clickable out of the box. If you
+need native drag-select (e.g. inside tmux), disable capture with
+`--no-mouse` or `mouse = false` in your `config.toml`. With capture on:
 
 * Left-click a row in the sidebar to select that peer and focus the sidebar.
 * Left-click the chat pane to focus the chat.
+* Left-click a value cell in the settings popup (theme / footer / mouse
+  / scrollback) to toggle it.
 * Scroll wheel in the chat pane scrolls the message history.
+
+### Settings popup
+
+`Ctrl-,` (or `/settings`) opens a live settings modal grouped into
+three tabs (`1`/`2`/`3` to jump):
+
+* **Display** — Theme (cycles through the five built-in palettes),
+  Show footer (on / off), Scrollback (±100, clamped 16..50,000).
+* **Input** — Mouse capture (on / off; effective next launch).
+* **About** — read-only: version, fingerprint, config path, received
+  files directory.
+
+Every change is `dirty` until you press `Esc`, which persists the live
+config back to `config.toml`. Click the right half of any row to apply
+the same as `Enter`. The popup renders a `Tabs` widget for sub-nav and
+a `Table` for the rows — both with the active theme's accent color.
 
 Capture breaks tmux / native drag-select inside the TUI; run with
 `--no-mouse` to recover native selection.
@@ -326,13 +351,46 @@ Results appear in a modal popup with one section per method. Press `Esc`
 to dismiss. Identified peers are added to the sidebar as `Seen`; once
 you (or they) send a message, the connection upgrades to `Connected`.
 
+### Peer-map (Canvas) view
+
+The discovery popup also has a second view — invoke `/map` (while the
+popup is open) to flip to a Canvas-based peer map:
+
+* x axis = last IPv4 octet (0..=255)
+* y axis = 16-row hash of the /24 prefix
+* marker = `Marker::Braille` for sub-cell dots so a single peer reads
+  clearly even on a long LAN
+
+Multicast-finds plot in green accent (trusted discovery); TCP-subnet
+finds in amber. Press `/map` again to flip back to the list.
+
+## Look & feel
+
+The TUI ships a retro amber-phosphor CRT vibe out of the box:
+
+* **Theme** — `amber` is the new default: dark brownish bg
+  (`#1a0f00`), amber phosphor fg (`#ffb000`), green accent
+  (`#66ff66`). Run `/theme default | solarized | monochrome | neon` for
+  alternatives.
+* **ASCII banners** — three layered glyph weights (light dots `·`,
+  medium shade `▒`/`░`, heavy block `█`/`▌`) so logos read as varied
+  weight instead of fixed-width ASCII. Visible as the startup banner
+  in the chat pane and as the settings popup header.
+* **Background gradient overlay** — every pane paints a 3-color
+  horizontal sweep (bg → status_bg → accent) that drifts one cell per
+  render. Reads as a soft scan effect without per-pixel blending.
+* **CRT scanlines** — the chat pane alternates `Modifier::DIM` on
+  every other row each frame, so messages appear to scan downward
+  like an old terminal. Toggle-able by setting `theme` to anything
+  non-amber if you need a clean look.
+
 ## Configuration
 
 `~/.config/lanchat/config.toml`:
 
 ```toml
 [ui]
-theme = "default"        # default | solarized | monochrome | neon
+theme = "default"        # default | solarized | monochrome | neon | amber
 show_footer = true
 mouse = true
 scrollback = 500          # max chat history lines; clamped to 16..50_000
@@ -373,11 +431,14 @@ src/
 ├── config.rs      XDG-aware paths
 ├── tui/           ratatui frontend
 │   ├── mod.rs     UiState, render, focus, scroll, modals
-│   ├── input.rs   Line editor + EditorEvent dispatch
-│   ├── theme.rs   Theme palettes + Unicode/ASCII glyph detection
+│   ├── input.rs   Line editor + EditorEvent dispatch (Ctrl-, → OpenSettings)
+│   ├── theme.rs   Five built-in palettes + Unicode/ASCII glyph detection
 │   ├── config.rs  Hand-rolled TOML-subset parser
+│   ├── art.rs     ASCII banners (logo_large / logo_small / logo_settings)
 │   ├── help.rs    `?` overlay
-│   └── discovery_popup.rs  `/discover` results modal
+│   ├── discovery_popup.rs  `/discover` results modal
+│   ├── file_offer_popup.rs Inbound file-offer modal
+│   └── settings_popup.rs   `/settings` / `Ctrl-,` modal (Tabs + Table)
 └── main.rs        CLI parsing, threading, action handling
 ```
 
