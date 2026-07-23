@@ -150,7 +150,12 @@ command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 \
 # Resolve the version + the asset name
 # ---------------------------------------------------------------------------
 if [ "$VERSION" = "latest" ]; then
-    log "fetching latest release metadata from $REPO..."
+    # For `--print-tag` we suppress the log line so the output is a clean
+    # single token suitable for `TAG=$(...)` capture. For the install
+    # path itself we keep the user-visible status line.
+    if [ "$PRINT_TAG" != "1" ]; then
+        log "fetching latest release metadata from $REPO..."
+    fi
     LATEST_URL="https://api.github.com/repos/$REPO/releases/latest"
     RELEASE_JSON="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$LATEST_URL")" \
         || die "could not fetch release metadata — check your network or REPO setting"
