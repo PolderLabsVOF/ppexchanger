@@ -732,31 +732,65 @@ fn start_tui(
         }
         if crossterm::event::poll(Duration::from_millis(150)).unwrap_or(false) {
             if let Ok(ev) = crossterm::event::read() {
-                match editor.on_key(&ev) {
-                    lanchat::tui::EditorEvent::Submit(text) => {
-                        if text.starts_with('/') {
-                            handle_command(
-                                &text,
-                                &bus.tx_events,
-                                &bus.tx_actions,
-                                &state,
-                                &mut live_cfg,
-                                &live_cfg_path,
-                                &announce_beacon,
-                                self_peer_id,
-                                Arc::clone(&stop),
-                            );
-                        } else if let Some(target) = resolve_target(&state, &text) {
-                            let _ = bus.tx_actions.send(Action::SendText {
-                                to: target,
-                                body: strip_routing(&text),
-                            });
-                        } else {
-                            let _ = bus.tx_events.send(Event::Info(
-                                "no peer selected or matched".into(),
-                            ));
+                // Mouse + paste never reach on_key: crossterm's on_key
+                // returns None for non-Key events, which would silently
+                // drop a bracketed paste. Peel them apart here.
+                if matches!(ev, crossterm::event::Event::Paste(_)) {
+                    if let crossterm::event::Event::Paste(s) = &ev {
+                        let _ = editor.on_paste(s);
+                    }
+                } else if matches!(ev, crossterm::event::Event::Mouse(_)) {
+                    if live_cfg.mouse {
+                        if let crossterm::event::Event::Mouse(m) = ev {
+                            let sz = terminal.size().unwrap_or_default();
+                            let rect = ratatui::layout::Rect {
+                                x: 0,
+                                y: 0,
+                                width: sz.width,
+                                height: sz.height,
+                            };
+                            handle_mouse(m, &state, rect);
                         }
                     }
+                } else {
+                    match editor.on_key(&ev) {
+                        lanchat::tui::EditorEvent::Submit(text) => {
+                            if text.starts_with('/') {
+                                handle_command(
+                                    &text,
+                                    &bus.tx_events,
+                                    &bus.tx_actions,
+                                    &state,
+                                    &mut live_cfg,
+                                    &live_cfg_path,
+                                    &announce_beacon,
+                                    self_peer_id,
+                                    Arc::clone(&stop),
+                                );
+                            } else if let Some(target) = resolve_target(&state, &text) {
+                                // Auto-detect: if the body (after stripping
+                                // any `@<name>` routing prefix) is the
+                                // path of an existing regular file, send
+                                // it as a FileOffer. Otherwise fall
+                                // through to plain text.
+                                let body = strip_routing(&text);
+                                if let Some(path) = looks_like_existing_file(&body) {
+                                    let _ = bus.tx_actions.send(Action::SendFile {
+                                        to: target,
+                                        path,
+                                    });
+                                } else {
+                                    let _ = bus.tx_actions.send(Action::SendText {
+                                        to: target,
+                                        body,
+                                    });
+                                }
+                            } else {
+                                let _ = bus.tx_events.send(Event::Info(
+                                    "no peer selected or matched".into(),
+                                ));
+                            }
+                        }
                     lanchat::tui::EditorEvent::Cancel => {
                         let _ = bus.tx_actions.send(Action::Quit);
                         break;
@@ -829,6 +863,39 @@ fn start_tui(
                     | lanchat::tui::EditorEvent::HistoryNext
                     | lanchat::tui::EditorEvent::Edited
                     | lanchat::tui::EditorEvent::None => {}
+                    }
+                    // File-offer modal: Enter accepts, Esc rejects.
+                    // Closed by either choice; the FileReceived /
+                    // FileAborted event clears `state.file_offer`
+                    // independently as a safety net.
+                    if let crossterm::event::Event::Key(k) = &ev {
+                        if k.kind == crossterm::event::KeyEventKind::Press {
+                            let pending = state
+                                .lock()
+                                .unwrap()
+                                .file_offer
+                                .as_ref()
+                                .map(|p| (p.from_peer, p.offer.id));
+                            if let Some((peer, id)) = pending {
+                                match k.code {
+                                    crossterm::event::KeyCode::Enter => {
+                                        let _ = bus.tx_actions.send(Action::AcceptFile {
+                                            from_peer: peer,
+                                            id,
+                                        });
+                                    }
+                                    crossterm::event::KeyCode::Esc => {
+                                        let _ = bus.tx_actions.send(Action::RejectFile {
+                                            from_peer: peer,
+                                            id,
+                                        });
+                                        state.lock().unwrap().file_offer = None;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
                 }
                 let mut s = state.lock().unwrap();
                 let prefix = match s.focus {
@@ -952,6 +1019,93 @@ fn multicast_scan(
 /// Resolve a `@<name> ...` routing prefix. Returns the peer_id targeted by
 /// the message. Bare text resolves to the currently-selected peer (first
 /// connected peer if none selected).
+///
+/// Translate one mouse event into a UI mutation. Reads the current state
+/// under the lock and writes it back in one short critical section. Scroll
+/// wheels in the chat pane use the same `scroll_back` / `scroll_forward`
+/// increments as PageUp/PageDown (5 lines per notch) so the two input
+/// modes feel identical.
+fn handle_mouse(
+    m: crossterm::event::MouseEvent,
+    state: &Arc<Mutex<UiState>>,
+    size: ratatui::layout::Rect,
+) {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut s = state.lock().unwrap();
+    let areas = tui::compute_layout(size);
+    let modal_open = s.file_offer.is_some() || s.show_help || s.discovery.is_some();
+    let hit = tui::hit_test(
+        size,
+        m.column,
+        m.row,
+        &areas,
+        modal_open,
+        s.peers.len(),
+    );
+    match m.kind {
+        MouseEventKind::Down(MouseButton::Left) => match hit {
+            tui::Hit::Sidebar(idx) => {
+                s.selected_peer = idx;
+                s.focus = tui::Focus::Sidebar;
+            }
+            tui::Hit::Chat => {
+                s.focus = tui::Focus::Chat;
+            }
+            tui::Hit::Footer => {
+                // Clicks in the footer (input line) intentionally
+                // focus the chat pane so typing works without
+                // re-clicking.
+                s.focus = tui::Focus::Chat;
+            }
+            tui::Hit::Modal => {
+                // Modal handles its own dispatch (Enter/Esc) — clicks
+                // are absorbed for v1.
+            }
+        },
+        MouseEventKind::ScrollUp => {
+            if s.focus == tui::Focus::Chat {
+                s.scroll_back(5);
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            if s.focus == tui::Focus::Chat {
+                s.scroll_forward(5);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// If `body` is the path of an existing regular file, return its path.
+/// Called only on Submit — never per keystroke — so the syscall cost is
+/// negligible. The shape test (separator, leading `./`, extension) keeps a
+/// stray word like `pdf` from being treated as a filename.
+fn looks_like_existing_file(body: &str) -> Option<PathBuf> {
+    use std::path::{Component, Path};
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let p = Path::new(trimmed);
+    let looks_like_path = p.components().count() > 1
+        || trimmed.starts_with('~')
+        || trimmed.starts_with("./")
+        || trimmed.starts_with(".\\")
+        || p.extension().is_some_and(|e| !e.is_empty() && e.len() <= 5);
+    if !looks_like_path {
+        return None;
+    }
+    if p.components().any(|c| matches!(c, Component::ParentDir)) {
+        return None;
+    }
+    let meta = std::fs::metadata(p).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    Some(p.to_path_buf())
+}
+
+
 fn resolve_target(state: &Arc<Mutex<UiState>>, text: &str) -> Option<PeerId> {
     let s = state.lock().unwrap();
     let trimmed = text.trim_start();
@@ -1082,8 +1236,83 @@ fn handle_command(
         "/quit" => {
             let _ = tx_actions.send(Action::Quit);
         }
+        "/send" => {
+            // Explicit file transfer — bypass auto-detect. Useful when
+            // the path has no extension or the user wants unambiguous
+            // behaviour.
+            let rest: String = it.collect::<Vec<_>>().join(" ");
+            let path = PathBuf::from(rest.trim());
+            let pid = {
+                let s = state.lock().unwrap();
+                s.peers
+                    .iter()
+                    .find(|p| p.state == tui::PeerState::Connected)
+                    .map(|p| p.peer_id)
+            };
+            if let Some(to) = pid {
+                let _ = tx_actions.send(Action::SendFile { to, path });
+            } else {
+                let _ = tx_events.send(Event::Info(
+                    "/send: no connected peer selected".into(),
+                ));
+            }
+        }
         _ => {
             let _ = tx_events.send(Event::Info(format!("unknown command: {}", cmd)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn looks_like_existing_file_accepts_real_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "lanchat-llf-accept-{}-{}",
+            std::process::id(),
+            rand_u64()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("foo.txt");
+        std::fs::write(&p, b"hi").unwrap();
+        let s = p.to_str().unwrap();
+        assert_eq!(looks_like_existing_file(s), Some(p.clone()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn looks_like_existing_file_rejects_missing() {
+        assert_eq!(looks_like_existing_file("/no/such/path/abc.bin"), None);
+    }
+
+    #[test]
+    fn looks_like_existing_file_rejects_bare_word_without_extension() {
+        // "pdf" alone — no separator, no leading dot, no extension —
+        // must not trigger a metadata() syscall.
+        assert_eq!(looks_like_existing_file("pdf"), None);
+        assert_eq!(looks_like_existing_file("hello"), None);
+    }
+
+    #[test]
+    fn looks_like_existing_file_rejects_parent_traversal() {
+        assert_eq!(looks_like_existing_file("../etc/passwd"), None);
+        assert_eq!(looks_like_existing_file("foo/../../bar"), None);
+    }
+
+    #[test]
+    fn looks_like_existing_file_rejects_directory() {
+        let dir = std::env::temp_dir();
+        let s = dir.to_str().unwrap();
+        // An existing directory must not be accepted; only regular files.
+        assert_eq!(looks_like_existing_file(s), None);
+    }
+
+    fn rand_u64() -> u64 {
+        use rand_core::{OsRng, RngCore};
+        let mut b = [0u8; 8];
+        OsRng.fill_bytes(&mut b);
+        u64::from_le_bytes(b)
     }
 }

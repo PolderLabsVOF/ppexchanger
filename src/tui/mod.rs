@@ -69,7 +69,7 @@ pub enum Hit {
 }
 
 /// Decide whether `(col, row)` falls inside `rect`.
-fn point_in_rect(rect: Rect, col: u16, row: u16) -> bool {
+pub fn point_in_rect(rect: Rect, col: u16, row: u16) -> bool {
     col >= rect.x
         && col < rect.x.saturating_add(rect.width)
         && row >= rect.y
