@@ -48,6 +48,36 @@ Verify a download manually:
 sha256sum -c SHA256SUMS
 ```
 
+### Windows
+
+A native Windows binary (`lanchat.exe`, MSVC) is shipped alongside the
+Linux and macOS assets. Two install paths:
+
+**Via the bash installer** (Git Bash / MSYS2 / Cygwin on Windows):
+the same one-line command as above. The installer detects `MINGW*`,
+`MSYS*`, `CYGWIN*` from `uname -s` and downloads the Windows tarball;
+`chmod +x` is skipped (PE binaries don't carry the bit).
+
+**Manual** — if you don't have a bash shell handy, grab the zip from
+the release page:
+
+```
+https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/lanchat-<version>-x86_64-pc-windows-msvc.zip
+```
+
+Extract it (Windows Explorer's "Extract All…" works) and put
+`lanchat.exe` somewhere on your `%PATH%`.
+
+Config / identity / contacts on Windows live under
+`%APPDATA%\lanchat\` (typically
+`C:\Users\<you>\AppData\Roaming\lanchat\`), created on first run.
+
+**Windows Firewall** will prompt on first launch when `lanchat` binds
+the listening port (default `0.0.0.0:7777`). Allow access when asked,
+or open the port manually. UDP multicast discovery may be silently
+dropped by Windows Firewall; the `/discover` command falls back to a
+TCP subnet scan.
+
 ### From source
 
 Requires Rust 1.75+ (only audited dependencies, no native libraries):
@@ -159,7 +189,8 @@ above the `[ui]` header in a non-overwritten file.
 - **Transport** — ChaCha20-Poly1305 AEAD with per-direction sequence
   counters; no plaintext on the wire after the handshake completes.
 - **Static keys** — X25519, generated from the kernel CSPRNG; the secret
-  half is stored with 0600 permissions in `~/.config/lanchat/identity`.
+  half is stored with 0600 permissions in `~/.config/lanchat/identity`
+  on Linux/macOS (Windows uses NTFS ACL inheritance instead).
 - **Trust model** — every peer is `untrusted` by default. Use `/trust
   <name>` to mark a peer as verified (typically after checking their
   fingerprint out-of-band). The trusted/untrusted flag persists in
