@@ -16,6 +16,7 @@
 
 pub mod config;
 pub mod discovery_popup;
+pub mod file_offer_popup;
 pub mod help;
 pub mod input;
 pub mod theme;
@@ -95,6 +96,10 @@ pub struct UiState {
     pub selected_peer: usize,
     pub focus: Focus,
     pub show_help: bool,
+    /// Modal state for an inbound file offer. `None` means no pending
+    /// offer; otherwise the modal is shown over the chat and the user
+    /// can accept or reject via Enter / Esc.
+    pub file_offer: Option<file_offer_popup::FileOfferPrompt>,
     /// Modal state for `/discover`. `None` means the modal is closed; the
     /// popup renders the in-progress scan results when present.
     pub discovery: Option<DiscoveryState>,
@@ -164,6 +169,7 @@ impl UiState {
             selected_peer: 0,
             focus: Focus::Chat,
             show_help: false,
+            file_offer: None,
             discovery: None,
             scroll: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
@@ -284,21 +290,32 @@ impl UiState {
             // separate `Action::AcceptFile` / `Action::RejectFile`
             // paths without the UI blocking on a modal.
             Event::FileOffer {
+                from_peer,
                 from_name,
                 offer,
-                ..
             } => {
-                self.push_message(UiMessage {
-                    from_name: "[file]".into(),
-                    body: format!(
-                        "{} offers file: {} ({} bytes)",
-                        from_name,
-                        offer.name,
-                        offer.size
-                    ),
-                    outgoing: false,
-                    ts_unix: now_unix(),
-                });
+                // Open the modal unless one is already up — the first
+                // offer wins; subsequent ones get logged to the chat.
+                if self.file_offer.is_none() {
+                    self.file_offer = Some(file_offer_popup::FileOfferPrompt {
+                        from_peer: *from_peer,
+                        from_name: from_name.clone(),
+                        offer: offer.clone(),
+                        decision: file_offer_popup::Decision::Pending,
+                    });
+                } else {
+                    self.push_message(UiMessage {
+                        from_name: "[file]".into(),
+                        body: format!(
+                            "{} offers file: {} ({} bytes) — busy with another",
+                            from_name,
+                            offer.name,
+                            offer.size
+                        ),
+                        outgoing: false,
+                        ts_unix: now_unix(),
+                    });
+                }
             }
             Event::FileReceived {
                 from_name,
@@ -307,6 +324,7 @@ impl UiState {
                 saved_to,
                 ..
             } => {
+                self.file_offer = None;
                 self.push_message(UiMessage {
                     from_name: "[file]".into(),
                     body: format!(
@@ -326,6 +344,7 @@ impl UiState {
                 reason,
                 ..
             } => {
+                self.file_offer = None;
                 self.push_message(UiMessage {
                     from_name: "[file]".into(),
                     body: format!(
@@ -611,6 +630,9 @@ pub fn render(
         }
         if let Some(d) = &state.discovery {
             discovery_popup::render(f, theme, glyphs, d);
+        }
+        if let Some(p) = &state.file_offer {
+            file_offer_popup::render(f, theme, glyphs, p);
         }
     })?;
     Ok(())
