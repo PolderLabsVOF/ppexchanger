@@ -40,7 +40,7 @@ fn main() {
     // machines running the TUI with no flags can find each other via
     // the TCP subnet scan fallback. `0` is still accepted for ephemeral
     // binding (mostly useful for tests).
-    let mut port: u16 = 7777;
+    let mut port: u16 = ppexchanger::net::discovery::MULTICAST_PORT;
     let mut mode = Mode::Tui;
     let mut theme_override: Option<ppexchanger::tui::ThemeName> = None;
     let mut config_override: Option<PathBuf> = None;
