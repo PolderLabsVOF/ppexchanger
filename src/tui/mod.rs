@@ -1,7 +1,7 @@
 //! ratatui-driven terminal UI.
 //!
 //! Layout:
-//!   ╭─ lanchat ─ alice ────────────────────────────────────────────╮
+//!   ╭─ ppexchanger ─ alice ────────────────────────────────────────────╮
 //!   │ Peers (n)       │ alice: hi                                    │
 //!   │  bob  trusted   │ bob:  yo                                     │
 //!   │  carol pending  │ alice: how r u?                              │
@@ -117,6 +117,13 @@ pub struct UiState {
     pub selected_peer: usize,
     pub focus: Focus,
     pub show_help: bool,
+    /// Mirror of `UiConfig::status_format` so `draw_footer` can choose
+    /// what to render. Updated by `apply_live_cfg` on every render pass.
+    pub status_format: crate::tui::config::StatusFormat,
+    /// Mirror of `UiConfig::show_footer`. When false, the renderer
+    /// skips the footer rect entirely — the chat pane absorbs the
+    /// freed vertical space via the layout splitter.
+    pub show_footer: bool,
     /// Modal state for an inbound file offer. `None` means no pending
     /// offer; otherwise the modal is shown over the chat and the user
     /// can accept or reject via Enter / Esc.
@@ -206,6 +213,8 @@ impl UiState {
             selected_peer: 0,
             focus: Focus::Chat,
             show_help: false,
+            status_format: crate::tui::config::StatusFormat::NameOnly,
+            show_footer: true,
             file_offer: None,
             discovery: None,
             settings: None,
@@ -222,6 +231,15 @@ impl UiState {
         if self.settings.is_none() {
             self.settings = Some(SettingsState::new(cfg));
         }
+    }
+
+    /// Mirror the live config bits that the render loop reads. Cheap;
+    /// call once per render pass before drawing. The `status_format`
+    /// mirror lets the footer switch between name-only / name+addr / off
+    /// without re-parsing config on every draw.
+    pub fn apply_live_cfg(&mut self, cfg: &crate::tui::UiConfig) {
+        self.status_format = cfg.status_format;
+        self.show_footer = cfg.show_footer;
     }
 
     /// Drop the settings modal. Caller is responsible for persisting the
@@ -659,7 +677,7 @@ pub fn enter_terminal(
     if mouse_enabled {
         crossterm::execute!(out, EnableMouseCapture)?;
     }
-    crossterm::execute!(out, EnterAlternateScreen, SetTitle("lanchat"))?;
+    crossterm::execute!(out, EnterAlternateScreen, SetTitle("ppexchanger"))?;
     let backend = CrosstermBackend::new(out);
     Ok(Terminal::new(backend)?)
 }
@@ -677,6 +695,24 @@ impl TuiGuard {
             active: true,
             mouse_enabled,
         })
+    }
+
+    /// Flip terminal mouse capture mid-session. Idempotent — emitting the
+    /// same state twice is a no-op so the call can sit at the end of the
+    /// settings key handler without guard checks.
+    pub fn set_mouse(&mut self, on: bool) -> std::io::Result<()> {
+        if on == self.mouse_enabled {
+            return Ok(());
+        }
+        use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+        use std::io::stdout;
+        if on {
+            crossterm::execute!(stdout(), EnableMouseCapture)?;
+        } else {
+            crossterm::execute!(stdout(), DisableMouseCapture)?;
+        }
+        self.mouse_enabled = on;
+        Ok(())
     }
 }
 impl Drop for TuiGuard {
@@ -727,7 +763,9 @@ pub fn render(
         draw_menu(f, areas.menu, state, theme, glyphs);
         draw_sidebar(f, areas.sidebar, state, theme, glyphs);
         draw_chat(f, areas.chat, state, theme, glyphs);
-        draw_footer(f, areas.footer, state, theme, glyphs);
+        if state.show_footer {
+            draw_footer(f, areas.footer, state, theme, glyphs);
+        }
 
         if state.show_help {
             help::render(f, theme, glyphs);
@@ -752,6 +790,25 @@ pub fn render(
             || state.settings.is_some();
         if state.show_logo && state.messages.is_empty() && !any_modal {
             art::render(f, areas.chat, art::LogoKind::Large, theme);
+            // Startup hint under the logo so the empty state isn't silent.
+            // Centred, in dim amber — matches the rest of the empty-state vibe.
+            let logo_h = art::rect(areas.chat, art::LogoKind::Large)
+                .map(|r| r.height)
+                .unwrap_or(0);
+            let hint_y = areas
+                .chat
+                .y
+                .saturating_add(logo_h.saturating_add(1))
+                .min(areas.chat.y + areas.chat.height.saturating_sub(1));
+            let hint_rect = Rect::new(areas.chat.x, hint_y, areas.chat.width, 1);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "press ? for help · ctrl-, for settings · mouse on",
+                    Style::default().fg(theme.info).bg(theme.bg),
+                )))
+                .alignment(Alignment::Center),
+                hint_rect,
+            );
         }
         // Settings popup renders last so it sits on top of every other
         // modal. Caller passes the live UiConfig; the popup mutates it
@@ -790,8 +847,8 @@ fn draw_menu(f: &mut Frame, area: Rect, _state: &UiState, theme: &Theme, _glyphs
         (MenuAction::Help, "Help"),
         (MenuAction::Quit, "Quit"),
     ];
-    // One fixed-width button per action, with a 1-cell gap. Sized so
-    // the row fits on an 80-col terminal with room to spare; on wider
+    // One bordered button per action, with a 1-cell gap. Sized so the
+    // row fits on an 80-col terminal with room to spare; on wider
     // terminals the trailing space fills with bg.
     let button_w: u16 = 12;
     let total_w = button_w * labels.len() as u16 + (labels.len() as u16 - 1);
@@ -804,18 +861,21 @@ fn draw_menu(f: &mut Frame, area: Rect, _state: &UiState, theme: &Theme, _glyphs
         }
         let _ = action; // hit_test re-derives from column
         let rect = Rect::new(x, y, button_w, 1);
-        let bg = theme.bg;
-        let text = Line::from(Span::styled(
-            format!("[ {} ]", label),
-            Style::default()
-                .fg(theme.accent)
-                .bg(bg)
-                .add_modifier(Modifier::BOLD),
-        ));
-        f.render_widget(Paragraph::new(text).alignment(Alignment::Center), rect);
+        let btn = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme.border_inactive))
+            .title(Span::styled(
+                format!(" {} ", label),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        f.render_widget(btn, rect);
         let _ = total_w; // reserved for future spacer
     }
 }
+// Laying out: button_w + 1 gap                                  ^ row height
 
 fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
     let active = state.focus == Focus::Sidebar;
@@ -878,7 +938,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
     let active = state.focus == Focus::Chat;
     let selected_name = state.selected().map(|p| p.name.clone()).unwrap_or_default();
     let title = if selected_name.is_empty() {
-        format!(" {} lanchat — {} ", glyphs.cursor, state.self_name)
+        format!(" {} ppexchanger — {} ", glyphs.cursor, state.self_name)
     } else {
         format!(
             " {} {} {} {} ",
@@ -890,7 +950,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Double)
         .border_style(theme.border_style(active))
         .title(Span::styled(title, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)));
 
@@ -920,11 +980,11 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
             };
             let mut body_style =
                 Style::default().fg(theme.fg).bg(theme.bg);
-            // CRT scanline: every other row gets a DIM modifier so the
-            // text appears to scan, alternating each frame via
-            // `scanline_tick`. The offset by `dim_phase` makes the
-            // "band" crawl down the pane.
-            if dim_phase ^ (i % 2 == 1) {
+            // CRT scanline: every 4th row gets a DIM modifier so the
+            // text appears to scan downward, alternating each frame via
+            // `scanline_tick`. The coarser band (4 rows instead of 2)
+            // keeps messages legible while preserving the CRT vibe.
+            if dim_phase ^ (i % 4 == 0) {
                 body_style = body_style.add_modifier(Modifier::DIM);
             }
             Line::from(vec![
@@ -944,29 +1004,57 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
 fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Thick)
         .border_style(theme.border_style(state.focus == Focus::Chat))
         .title(Span::styled(
             format!(" {} message ", glyphs.arrow),
             Style::default().fg(theme.accent),
         ));
-    // The prompt character reflects focus.
+    // The prompt character reflects focus. When a peer is selected, also
+    // prepend a status icon (dot_connected / dot_seen / dot_gone) so the
+    // footer shows whether the selected peer is reachable.
+    let status_icon = state.selected().map(|p| match p.state {
+        PeerState::Connected => glyphs.dot_connected,
+        PeerState::Seen => glyphs.dot_seen,
+        PeerState::Gone => glyphs.dot_gone,
+    });
     let prefix = match state.focus {
         Focus::Sidebar => format!("[{}] ", glyphs.cursor),
         Focus::Chat => format!("{} ", glyphs.arrow),
     };
-    let line = Line::from(vec![
+    let prefix = match status_icon {
+        Some(icon) => format!("{}{}", icon, prefix),
+        None => prefix,
+    };
+    // `status_format` controls the footer text. `Off` renders an empty
+// line (footer block stays for the border/title); the other two modes
+// show the bare status string. Plumbing the peer addr through UiState
+// for `NameAddr` would require adding a SocketAddr field; for now the
+// two on modes collapse to the same display. Add when peer addresses
+// are already in the state for a different reason.
+let line = Line::from(vec![
         Span::styled(prefix, theme.highlight_style()),
-        Span::styled(state.status.clone(), Style::default().fg(theme.fg).bg(theme.status_bg)),
+        Span::styled(
+            match state.status_format {
+                crate::tui::config::StatusFormat::Off => String::new(),
+                _ => state.status.clone(),
+            },
+            Style::default().fg(theme.fg).bg(theme.status_bg),
+        ),
     ]);
     f.render_widget(Paragraph::new(line).block(block), area);
 }
 
 /// Drain all pending events from the receiver into the shared state.
-pub fn drain_events(rx: &std::sync::mpsc::Receiver<Event>, state: &mut UiState) {
+pub fn drain_events(rx: &std::sync::mpsc::Receiver<Event>, state: &mut UiState) -> usize {
+    let mut text_count = 0;
     while let Ok(ev) = rx.try_recv() {
+        if matches!(ev, Event::TextMessage { .. }) {
+            text_count += 1;
+        }
         state.apply(&ev);
     }
+    text_count
 }
 
 /// Merge persisted contacts into the live UI state so trusted/untrusted

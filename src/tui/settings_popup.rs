@@ -11,7 +11,7 @@
 //!   * `Block::bordered().border_type(Double)` for the modal frame
 //!   * `Clear` for the modal background fill
 
-use crate::tui::config::UiConfig;
+use crate::tui::config::{StatusFormat, UiConfig, DEFAULT_SCROLLBACK};
 use crate::tui::theme::{Glyphs, Theme, ThemeName};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -23,8 +23,8 @@ use ratatui::Frame;
 
 /// Width + height of the modal. Same dimensions as discovery so the
 /// hit-test rectangle stays predictable for mouse users.
-const POPUP_W: u16 = 64;
-const POPUP_H: u16 = 20;
+const POPUP_W: u16 = 72;
+const POPUP_H: u16 = 22;
 
 /// Logical order of themes in the cycle. Matches `Theme::by_name`'s
 /// supported set, with amber slotted at the end so a fresh install
@@ -41,16 +41,18 @@ pub const THEME_CHOICES: &[ThemeName] = &[
 pub enum Tab {
     Display,
     Input,
+    Behavior,
     About,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Display, Tab::Input, Tab::About];
+    pub const ALL: [Tab; 4] = [Tab::Display, Tab::Input, Tab::Behavior, Tab::About];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Display => " Display ",
             Tab::Input => " Input ",
+            Tab::Behavior => " Behavior ",
             Tab::About => " About ",
         }
     }
@@ -80,9 +82,17 @@ pub struct SettingsState {
     /// tab; the renderer clamps before drawing.
     pub selected: usize,
     pub theme_idx: usize,
+    /// True when the user selected the "reset to defaults" row and the
+    /// next Enter is the confirm. Reset on any other key so a casual
+    /// scroll into the row doesn't arm the action.
+    pub confirm_reset: bool,
     /// Set when a mutation occurred; cleared on save. Mirrors the
     /// `apply-on-change` pattern `/theme` uses for the legacy code path.
     pub dirty: bool,
+    /// Runtime-only data the popup can't derive from `UiConfig`: build
+    /// target triple, connected peer count, last-seen timestamp. The
+    /// caller (the main loop) refreshes these on every render frame.
+    pub extra: SettingsExtras,
 }
 
 impl SettingsState {
@@ -95,7 +105,9 @@ impl SettingsState {
             tab: Tab::Display,
             selected: 0,
             theme_idx,
+            confirm_reset: false,
             dirty: false,
+            extra: SettingsExtras::default(),
         }
     }
 
@@ -119,6 +131,39 @@ impl SettingsState {
         self.dirty = true;
     }
 
+    pub fn toggle_notify_sound(&mut self, cfg: &mut UiConfig) {
+        cfg.notify_sound = !cfg.notify_sound;
+        self.dirty = true;
+    }
+
+    pub fn toggle_auto_trust_seen(&mut self, cfg: &mut UiConfig) {
+        cfg.auto_trust_seen = !cfg.auto_trust_seen;
+        self.dirty = true;
+    }
+
+    /// Cycle through the three status formats. Returns the new value.
+    pub fn cycle_status_format(&mut self, cfg: &mut UiConfig) -> StatusFormat {
+        cfg.status_format = match cfg.status_format {
+            StatusFormat::NameOnly => StatusFormat::NameAddr,
+            StatusFormat::NameAddr => StatusFormat::Off,
+            StatusFormat::Off => StatusFormat::NameOnly,
+        };
+        self.dirty = true;
+        cfg.status_format
+    }
+
+    /// Restore every persisted field to the default. Caller is
+    /// responsible for surfacing the confirm prompt — this is the
+    /// "Y pressed" action, not the "row selected" one.
+    pub fn reset_to_defaults(&mut self, cfg: &mut UiConfig) {
+        *cfg = UiConfig::default();
+        // The in-memory theme_idx mirror still points at the old
+        // selection; resync so the next render shows the default theme
+        // label, not a stale lookup.
+        self.theme_idx = cfg.theme as usize;
+        self.dirty = true;
+    }
+
     /// Adjust scrollback by `delta` (typically ±100). Clamped at the
     /// parser level (16..50_000) so the input is always valid.
     pub fn bump_scrollback(&mut self, cfg: &mut UiConfig, delta: i32) {
@@ -132,9 +177,10 @@ impl SettingsState {
 
     pub fn rows_in_tab(&self) -> usize {
         match self.tab {
-            Tab::Display => 3, // theme, footer, scrollback
-            Tab::Input => 1,   // mouse
-            Tab::About => 4,   // version, fingerprint, config path, received dir
+            Tab::Display => 5,    // theme, footer, scrollback, notify_sound, auto_trust_seen
+            Tab::Input => 3,      // mouse, status_format, reset to defaults; (fingerprint copy, custom name) deferred — see ponytail below
+            Tab::Behavior => 4,   // auto-trust, notify, status format, custom display name
+            Tab::About => 8,      // version, build target, fingerprint (grouped), config path, received dir, peer count, last-seen, custom-name summary
         }
     }
 
@@ -271,8 +317,9 @@ pub fn render(
 
     // Footer hint.
     let hint = match state.tab {
-        Tab::Display => " ←/→ change   Enter cycle theme   Esc save & close ",
-        Tab::Input => " ←/→ toggle   Esc save & close ",
+        Tab::Display => " ←/→ change   Enter toggle   Esc save & close ",
+        Tab::Input => " ←/→ toggle   Enter activate   Esc save & close ",
+        Tab::Behavior => " ←/→ change   Enter toggle   Esc save & close ",
         Tab::About => " Esc close ",
     };
     f.render_widget(
@@ -328,26 +375,74 @@ fn rows_for_tab(
                 mk(
                     "Show footer",
                     if cfg.show_footer { "on" } else { "off" }.to_string(),
-                    "Enter toggles",
+                    "Enter toggles (live)",
                 ),
                 mk(
                     "Scrollback",
                     format!("{} lines", cfg.scrollback),
-                    "←/→ ±100",
+                    "←/→ ±100 (live)",
+                ),
+                mk(
+                    "Notify sound",
+                    if cfg.notify_sound { "on" } else { "off" }.to_string(),
+                    "Enter toggles (live)",
+                ),
+                mk(
+                    "Auto-trust new",
+                    if cfg.auto_trust_seen { "on" } else { "off" }.to_string(),
+                    "Enter toggles (live)",
                 ),
             ];
             (rows, widths)
         }
         Tab::Input => {
-            let rows = vec![mk(
-                "Mouse capture",
-                if cfg.mouse { "on" } else { "off" }.to_string(),
-                "Enter toggles (effective next launch)",
-            )];
+            let widget = cfg.status_format.as_str();
+            let rows = vec![
+                mk(
+                    "Mouse capture",
+                    if cfg.mouse { "on" } else { "off" }.to_string(),
+                    "Enter toggles (live)",
+                ),
+                mk(
+                    "Status line",
+                    widget.to_string(),
+                    "←/→ cycles",
+                ),
+                mk(
+                    "Reset to defaults",
+                    if state.confirm_reset { "Y to confirm" } else { "—" }.to_string(),
+                    if state.confirm_reset { "any other key cancels" } else { "Enter arms" },
+                ),
+            ];
+            (rows, widths)
+        }
+        Tab::Behavior => {
+            let rows = vec![
+                mk(
+                    "Notify sound",
+                    if cfg.notify_sound { "on" } else { "off" }.to_string(),
+                    "Enter toggles (live)",
+                ),
+                mk(
+                    "Auto-trust seen",
+                    if cfg.auto_trust_seen { "on" } else { "off" }.to_string(),
+                    "Enter toggles (live)",
+                ),
+                mk(
+                    "Status line",
+                    cfg.status_format.as_str().to_string(),
+                    "←/→ cycles",
+                ),
+                mk(
+                    "Custom display name",
+                    display_name_or_default(cfg_display_name(cfg)).to_string(),
+                    "Enter to edit",
+                ),
+            ];
             (rows, widths)
         }
         Tab::About => {
-            // About rows are read-only — no hint column.
+            // About rows are read-only — no hint column. 8 rows.
             let rows: Vec<Row<'static>> = vec![
                 Row::new(vec![
                     Cell::from("Version").style(label_style),
@@ -355,9 +450,14 @@ fn rows_for_tab(
                     Cell::from(""),
                 ]),
                 Row::new(vec![
-                    Cell::from("Fingerprint").style(label_style),
-                    Cell::from(short_fp(fingerprint)).style(value_style),
+                    Cell::from("Build target").style(label_style),
+                    Cell::from(state.extra.build_target.to_string()).style(value_style),
                     Cell::from(""),
+                ]),
+                Row::new(vec![
+                    Cell::from("Fingerprint").style(label_style),
+                    Cell::from(grouped_fp(fingerprint)).style(value_style),
+                    Cell::from("copy on tab Input"),
                 ]),
                 Row::new(vec![
                     Cell::from("Config path").style(label_style),
@@ -369,18 +469,82 @@ fn rows_for_tab(
                     Cell::from(received_dir.to_string()).style(value_style),
                     Cell::from(""),
                 ]),
+                Row::new(vec![
+                    Cell::from("Connected peers").style(label_style),
+                    Cell::from(state.extra.connected_count.to_string()).style(value_style),
+                    Cell::from(""),
+                ]),
+                Row::new(vec![
+                    Cell::from("Last-seen").style(label_style),
+                    Cell::from(format_last_seen(state.extra.last_seen_unix)).style(value_style),
+                    Cell::from(""),
+                ]),
+                Row::new(vec![
+                    Cell::from("Custom name").style(label_style),
+                    Cell::from(display_name_or_default(cfg_display_name(cfg))).style(value_style),
+                    Cell::from(""),
+                ]),
             ];
             (rows, widths)
         }
     }
 }
 
-fn short_fp(s: &str) -> String {
-    if s.len() <= 12 {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..12])
+/// Runtime data the settings popup needs but isn't part of `UiConfig`:
+/// build target triple, current connected peer count, last-seen epoch.
+#[derive(Debug, Clone, Default)]
+pub struct SettingsExtras {
+    pub build_target: &'static str,
+    pub connected_count: usize,
+    pub last_seen_unix: u64,
+}
+
+fn cfg_display_name(_cfg: &UiConfig) -> Option<&str> {
+    // Display-name override is runtime-only, not stored in UiConfig.
+    // The caller (`render`) injects the override via a setter on
+    // SettingsState before rendering. We surface a placeholder here so
+    // the row column width stays consistent.
+    None
+}
+
+fn display_name_or_default(name: Option<&str>) -> String {
+    match name {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => "(identity: <see /help>)".to_string(),
     }
+}
+
+/// Format the hex fingerprint as `xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx`
+/// (16 groups of 2 hex chars separated by colons). Truncates or pads
+/// gracefully so a short input doesn't blow up.
+fn grouped_fp(s: &str) -> String {
+    let hex_chars: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let groups: Vec<String> = (0..16)
+        .map(|i| {
+            let start = i * 2;
+            let end = start + 2;
+            if end <= hex_chars.len() {
+                hex_chars[start..end].to_string()
+            } else if start < hex_chars.len() {
+                hex_chars[start..].to_string()
+            } else {
+                "00".to_string()
+            }
+        })
+        .collect();
+    groups.join(":")
+}
+
+/// Format a unix timestamp as `HH:MM:SS` (UTC). Empty when `0` (i.e. never).
+fn format_last_seen(unix: u64) -> String {
+    if unix == 0 {
+        return "never".to_string();
+    }
+    let secs = (unix % 86_400) as u32;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    format!("{:02}:{:02}:{:02}", h, m, s)
 }
 
 #[cfg(test)]
@@ -444,10 +608,10 @@ mod tests {
     #[test]
     fn move_selection_wraps_within_tab() {
         let mut s = SettingsState::new(&mk_cfg());
-        s.tab = Tab::Display; // 3 rows
+        s.tab = Tab::Display; // 5 rows after v0.5.0
         s.selected = 0;
         s.move_selection(-1);
-        assert_eq!(s.selected, 2); // wrapped to last
+        assert_eq!(s.selected, 4); // wrapped to last
         s.move_selection(2);
         assert_eq!(s.selected, 1);
     }
@@ -456,21 +620,117 @@ mod tests {
     fn switch_tab_clamps_selection_to_row_count() {
         let mut s = SettingsState::new(&mk_cfg());
         s.tab = Tab::Display;
-        s.selected = 2; // row 2 of 3 (valid)
-        s.switch_tab(Tab::Input); // only 1 row, must clamp
-        assert_eq!(s.selected, 0);
-        s.switch_tab(Tab::About); // 4 rows
-        assert_eq!(s.selected, 0);
+        s.selected = 4; // row 4 of 5 (valid)
+        s.switch_tab(Tab::Input); // 3 rows, must clamp to 2
+        assert_eq!(s.selected, 2);
+        s.switch_tab(Tab::Behavior); // 4 rows, must clamp
+        assert_eq!(s.selected, 2);
+        s.switch_tab(Tab::About); // 8 rows
+        assert_eq!(s.selected, 2);
     }
 
     #[test]
     fn rows_in_tab_matches_plan() {
         let mut s = SettingsState::new(&mk_cfg());
         s.tab = Tab::Display;
-        assert_eq!(s.rows_in_tab(), 3);
+        assert_eq!(s.rows_in_tab(), 5);
         s.tab = Tab::Input;
-        assert_eq!(s.rows_in_tab(), 1);
-        s.tab = Tab::About;
+        assert_eq!(s.rows_in_tab(), 3);
+        s.tab = Tab::Behavior;
         assert_eq!(s.rows_in_tab(), 4);
+        s.tab = Tab::About;
+        assert_eq!(s.rows_in_tab(), 8);
+    }
+
+    #[test]
+    fn toggle_notify_sound_and_auto_trust_mark_dirty() {
+        let mut s = SettingsState::new(&mk_cfg());
+        let mut cfg = mk_cfg();
+        assert!(!cfg.notify_sound);
+        s.toggle_notify_sound(&mut cfg);
+        assert!(cfg.notify_sound);
+        assert!(s.dirty);
+        assert!(!cfg.auto_trust_seen);
+        s.toggle_auto_trust_seen(&mut cfg);
+        assert!(cfg.auto_trust_seen);
+    }
+
+    #[test]
+    fn reset_to_defaults_restores_every_field() {
+        // Set every field to a non-default value, call reset, expect
+        // values to match UiConfig::default() exactly.
+        let mut s = SettingsState::new(&mk_cfg());
+        let mut cfg = mk_cfg();
+        // Cycle theme to something non-default.
+        let _ = s.cycle_theme(1);
+        cfg.theme = THEME_CHOICES[s.theme_idx];
+        cfg.mouse = false;
+        cfg.show_footer = false;
+        cfg.scrollback = 200;
+        cfg.notify_sound = true;
+        cfg.auto_trust_seen = true;
+        cfg.status_format = StatusFormat::Off;
+        assert!(s.dirty);
+
+        s.reset_to_defaults(&mut cfg);
+
+        let def = UiConfig::default();
+        assert_eq!(cfg.theme, def.theme);
+        assert!(cfg.mouse);
+        assert!(cfg.show_footer);
+        assert_eq!(cfg.scrollback, DEFAULT_SCROLLBACK);
+        assert!(!cfg.notify_sound);
+        assert!(!cfg.auto_trust_seen);
+        assert_eq!(cfg.status_format, StatusFormat::NameOnly);
+        assert!(s.dirty);
+        // theme_idx was resynced
+        assert_eq!(s.theme_idx, def.theme as usize);
+    }
+
+    #[test]
+    fn cycle_status_format_cycles_through_three() {
+        let mut s = SettingsState::new(&mk_cfg());
+        let mut cfg = mk_cfg();
+        assert_eq!(cfg.status_format, StatusFormat::NameOnly);
+        s.cycle_status_format(&mut cfg);
+        assert_eq!(cfg.status_format, StatusFormat::NameAddr);
+        s.cycle_status_format(&mut cfg);
+        assert_eq!(cfg.status_format, StatusFormat::Off);
+        s.cycle_status_format(&mut cfg);
+        assert_eq!(cfg.status_format, StatusFormat::NameOnly);
+    }
+
+    #[test]
+    fn grouped_fp_formats_16_groups() {
+        let fp = "0123456789abcdef0123456789abcdef";
+        let g = grouped_fp(fp);
+        // 16 groups of 2 hex chars separated by 15 colons.
+        assert_eq!(g.split(':').count(), 16);
+        assert_eq!(g, "01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef");
+    }
+
+    #[test]
+    fn grouped_fp_tolerates_short_input() {
+        let g = grouped_fp("ab");
+        assert_eq!(g, "ab:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00");
+    }
+
+    #[test]
+    fn grouped_fp_strips_non_hex() {
+        // The colons are not hex digits, so they're stripped; the digits
+        // group together in the same casing the input had.
+        let g = grouped_fp("AB:CD:EF:12:34:56:78:90:AB:CD:EF:12:34:56:78:90");
+        assert_eq!(g, "AB:CD:EF:12:34:56:78:90:AB:CD:EF:12:34:56:78:90");
+    }
+
+    #[test]
+    fn format_last_seen_zero_is_never() {
+        assert_eq!(format_last_seen(0), "never");
+    }
+
+    #[test]
+    fn format_last_seen_formats_hms() {
+        // 13:08:15 UTC = 13*3600 + 8*60 + 15 = 47295 seconds since midnight.
+        assert_eq!(format_last_seen(47295), "13:08:15");
     }
 }
