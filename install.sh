@@ -26,6 +26,10 @@
 # honoured as fallbacks; new code should use PPX_*.
 
 set -euo pipefail
+IFS=$' \t\n'
+
+# Bound downloads so a stuck TLS handshake can't trap the installer forever.
+CURL_COMMON=(--retry 3 --retry-delay 1 --max-time 120)
 
 REPO="${PPX_REPO:-${LANCHAT_REPO:-PolderLabsVOF/ppexchanger}}"
 INSTALL_DIR="${PPX_INSTALL_DIR:-${LANCHAT_INSTALL_DIR:-$HOME/.local/bin}}"
@@ -120,13 +124,42 @@ done
 # Validate the method early so a typo fails before we touch the network.
 case "$METHOD" in
     binary|source|auto) ;;
-    *) die "invalid --method value: '$METHOD' (expected: binary, source, or auto)" ;;
+    "") die "--method requires a non-empty value (expected: binary, source, or auto)" ;;
+    *)  die "invalid --method value: '$METHOD' (expected: binary, source, or auto)" ;;
+esac
+
+# Reject path-traversal or shell-meta characters in REPO before we
+# touch the network. GitHub won't accept anything that doesn't look
+# like owner/name, but failing fast gives a clearer error. Enforce
+# exactly one slash (owner + name, no trailing path segments).
+case "$REPO" in
+    *[!a-zA-Z0-9._/-]*) die "PPX_REPO contains invalid characters: '$REPO'" ;;
+    */*/*)                die "PPX_REPO must be in 'owner/name' form (no extra slashes): '$REPO'" ;;
+    */*) ;;
+    *) die "PPX_REPO must be in 'owner/name' form, got: '$REPO'" ;;
 esac
 
 # Normalise the install dir. The binary basename is decided below, once
 # `TARGET_TRIPLE` has been resolved.
 INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"
+
+# Reject obviously-dangerous install locations up front. The
+# `case` here is intentional — a typo could otherwise point at the
+# filesystem root or the user's home. `/tmp` itself is volatile on
+# some distros (cleared on reboot), but a subdir created by this
+# run is fine because mktemp-bounded work happens in a different
+# TMPDIR anyway.
+case "$INSTALL_DIR" in
+    ""|"/"|"~"|"~/$USER"|"$HOME") die "refusing to install into '$INSTALL_DIR' (too broad)" ;;
+    "/tmp")                       die "refusing to install into '$INSTALL_DIR' (volatile)" ;;
+esac
+
+# Create + verify writability up front so a permission error surfaces
+# here instead of as a cryptic `mv: cannot move` later. `mkdir -p`
+# alone succeeds silently even when the parent dir is unwritable.
 mkdir -p "$INSTALL_DIR" || die "cannot create install dir: $INSTALL_DIR"
+[ -d "$INSTALL_DIR" ] || die "install dir '$INSTALL_DIR' is not a directory"
+[ -w "$INSTALL_DIR" ] || die "install dir '$INSTALL_DIR' is not writable — try with sudo or a different --dir"
 
 # ---------------------------------------------------------------------------
 # Host target detection
@@ -207,16 +240,17 @@ choose_method() {
     printf '%s\n' "install method:" >&2
     printf '%s\n' "  1) binary  — download the release tarball (~5 MB, fast)" >&2
     printf '%s\n' "  2) source  — git clone + cargo install (needs git + rustc; minutes)" >&2
-    local reply
+    local choice
     # Read with a 30s timeout so a hung terminal doesn't trap the install
     # forever. `read -t` returns >128 on timeout; we treat that as "binary"
     # so unattended terminals still get a working install.
-    if ! reply="$(read -r -t 30 -p "choose [1/2, default 1]: " choice; printf '%s' "${choice:-1}")" 2>/dev/null; then
+    if ! read -r -t 30 -p "choose [1/2, default 1]: " choice; then
         warn "no prompt reply within 30s — defaulting to binary"
         METHOD="binary"
         return
     fi
-    case "$reply" in
+    choice="${choice:-1}"
+    case "$choice" in
         2|source) METHOD="source" ;;
         *)        METHOD="binary" ;;
     esac
@@ -259,7 +293,7 @@ if [ "$VERSION" = "latest" ]; then
         log "fetching latest release metadata from $REPO..."
     fi
     LATEST_URL="https://api.github.com/repos/$REPO/releases/latest"
-    RELEASE_JSON="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$LATEST_URL")" \
+    RELEASE_JSON="$(curl -fsSL "${CURL_COMMON[@]}" -H 'Accept: application/vnd.github+json' "$LATEST_URL")" \
         || die "could not fetch release metadata — check your network or REPO setting"
     TAG="$(printf '%s' "$RELEASE_JSON" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
     [ -n "$TAG" ] || die "could not parse tag from release metadata"
@@ -267,9 +301,22 @@ else
     TAG="$VERSION"
 fi
 
+# Reject obviously-malformed tags before they reach a URL or a `git
+# checkout`. We don't try to whitelist a regex (semver + variants
+# like `nightly-2024-01-01` would lock us out); we just forbid the
+# characters that would either URL-inject or be a shell hazard.
+case "$TAG" in
+    *"/"*|*".."*|*"$"*|*"|"*|*";"*|*"&"*|*"'"*|*"\\"*|*"<"*|*">"*|*" "*|*$'\t'*)
+        die "tag '$TAG' contains forbidden characters (no /, .., $, |, ;, &, ', \\, <, >, or whitespace)"
+        ;;
+esac
+
 # Strip a leading "v" if present — assets are named `ppexchanger-<tag>.tar.gz`
 # where `<tag>` is the bare version string ("0.5.0", not "v0.5.0").
 TAG_BARE="${TAG#v}"
+# TAG_BARE inherits TAG's safety — but verify it's non-empty after
+# the strip in case someone passed literally "v".
+[ -n "$TAG_BARE" ] || die "tag '$TAG' resolved to empty string after stripping leading 'v'"
 
 # `--print-tag` resolves the version and exits without touching the
 # filesystem. Used by CI to pin a release: TAG=$(curl -fsSL .../install.sh | bash -s -- --print-tag)
@@ -343,10 +390,14 @@ install_binary_file() {
         UPDATE=0
     fi
 
-    if mv -f "$src" "$BIN_PATH" 2>/dev/null; then
-        :
-    else
-        cp -f "$src" "$BIN_PATH"
+    # mv is atomic on the same filesystem; if TMPDIR lives on a
+    # different FS (e.g. tmpfs), mv silently falls back to copy+delete.
+    # Capture the actual error so we don't lose it to `2>/dev/null`.
+    if ! mv_out="$(mv -f "$src" "$BIN_PATH" 2>&1)"; then
+        warn "mv failed ($mv_out) — falling back to cp"
+        if ! cp_out="$(cp -f "$src" "$BIN_PATH" 2>&1)"; then
+            die "failed to install binary: $cp_out"
+        fi
     fi
     case "$TARGET_TRIPLE" in
         *-pc-windows-*) ;;
@@ -393,12 +444,17 @@ TARBALL="$TMPDIR/$ASSET"
 SUMS="$TMPDIR/SHA256SUMS"
 
 log "downloading $ASSET from tag $TAG..."
-curl -fSL --retry 3 -o "$TARBALL" "$BASE_URL/$ASSET" \
+curl -fSL "${CURL_COMMON[@]}" -o "$TARBALL" "$BASE_URL/$ASSET" \
     || die "download failed — check that release $TAG exists with asset $ASSET"
+# Sanity-check the file landed on disk and isn't a GitHub HTML error
+# page (HTTP 404 inside a 200 wrapper). tar -tzf would catch that
+# later, but failing here gives a cleaner message.
+[ -s "$TARBALL" ] || die "downloaded tarball is empty: $TARBALL"
 
 log "downloading SHA256SUMS..."
-curl -fsSL -o "$SUMS" "$BASE_URL/SHA256SUMS" \
+curl -fsSL "${CURL_COMMON[@]}" -o "$SUMS" "$BASE_URL/SHA256SUMS" \
     || die "SHA256SUMS not found at $BASE_URL/SHA256SUMS"
+[ -s "$SUMS" ] || die "SHA256SUMS is empty — release $TAG may not have been published correctly"
 
 # ---------------------------------------------------------------------------
 # Verify
@@ -410,9 +466,16 @@ else
     (
         cd "$TMPDIR"
         if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum --check --strict --ignore-missing < SHA256SUMS || exit 1
+            # Pass the file by path (not via stdin redirect) so any
+            # quoting / permission issue surfaces cleanly. `--strict`
+            # rejects any non-OK line in the sums file; `--ignore-missing`
+            # skips entries that don't match a local file (we have only
+            # the tarball, so the install.sh line would otherwise fail).
+            sha256sum --check --strict --ignore-missing SHA256SUMS || exit 1
         else
-            # macOS ships `shasum -a 256` instead. Re-derive the expected hash.
+            # macOS ships `shasum -a 256` instead. Re-derive the expected
+            # hash from the sums file rather than reimplementing the
+            # whole `--check` semantics by hand.
             EXPECTED="$(grep -E "  $ASSET\$" SHA256SUMS | awk '{print $1}')"
             [ -n "$EXPECTED" ] || { echo "expected hash missing for $ASSET" >&2; exit 1; }
             ACTUAL="$(shasum -a 256 "$ASSET" | awk '{print $1}')"
