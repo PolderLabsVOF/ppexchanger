@@ -1,9 +1,14 @@
 [package]
-name = "lanchat"
-version = "0.3.1"
+name = "ppexchanger"
+version = "0.5.0"
 edition = "2021"
 description = "Fully-local, fully-encrypted LAN P2P terminal messenger (Rust)"
 license = "MIT"
+
+# The library is `ppexchanger`; the binary the user invokes is `ppx`.
+[[bin]]
+name = "ppx"
+path = "src/main.rs"
 
 # Allowed dependencies (the ONLY external crates used by this project):
 #   ratatui          — TUI rendering (explicitly permitted)

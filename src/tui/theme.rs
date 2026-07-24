@@ -7,7 +7,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-/// Built-in color themes. Selectable via `lanchat --theme <name>` or the
+/// Built-in color themes. Selectable via `ppexchanger --theme <name>` or the
 /// in-TUI `/theme <name>` command. Persisted to `config.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeName {

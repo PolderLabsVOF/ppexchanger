@@ -46,7 +46,7 @@
 //!        MixKey(se = DH(e, rs))
 //!        read MAC, verify
 //!
-//!   transport keys = HKDF(ck, h, "lanchat-session", 64) → (send, recv)
+//!   transport keys = HKDF(ck, h, "ppexchanger-session", 64) → (send, recv)
 
 use crate::crypto::{
     derive_session_keys, hkdf_sha256, Aead, ChaCha20Poly1305, Key, KeyInit, Keypair, Nonce,
@@ -57,7 +57,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use x25519_dalek::PublicKey as X25519Public;
 
-const PROTOCOL_NAME: &[u8] = b"Noise_XX_lanchat_25519_ChaChaPoly_SHA256";
+const PROTOCOL_NAME: &[u8] = b"Noise_XX_ppexchanger_25519_ChaChaPoly_SHA256";
 const HANDSHAKE_VERSION: u32 = 1;
 const AEAD_TAG: usize = 16;
 const STATIC_LEN: usize = 32;

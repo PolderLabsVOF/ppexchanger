@@ -16,7 +16,7 @@ use ratatui::Frame;
 /// from three layered groups with different glyph weights:
 ///   * the top three rows use light accents (·, ─, ░) so the chrome
 ///     stays out of the way;
-///   * the middle two rows are the heavy lanchat wordmark using block
+///   * the middle two rows are the heavy wordmark using block
 ///     glyphs (▌, ▍, █) for body + bare pipes (|, _) for outlines;
 ///   * the bottom rows are the tagline with a medium weight (─, ▒).
 pub const LOGO_LARGE: &[&str] = &[

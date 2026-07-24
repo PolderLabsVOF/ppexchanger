@@ -1,4 +1,4 @@
-//! `lanchat` library crate.
+//! `ppexchanger` library crate.
 
 pub mod config;
 pub mod crypto;

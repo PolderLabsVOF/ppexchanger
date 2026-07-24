@@ -582,7 +582,7 @@ mod tests {
 
     fn tmp() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "lanchat-fxfer-test-{}-{}",
+            "ppx-fxfer-test-{}-{}",
             std::process::id(),
             rand_u64()
         ));

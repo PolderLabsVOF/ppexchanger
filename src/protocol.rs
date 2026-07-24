@@ -1,4 +1,4 @@
-//! Wire format for `lanchat`.
+//! Wire format for `ppexchanger`.
 //!
 //! Two distinct formats:
 //!   1. UDP **beacon** — short announcement on the multicast group.
@@ -205,7 +205,7 @@ pub struct PlainFrame {
 }
 
 /// Reason a cleartext frame could not be decoded. `UnknownTag` is
-/// recoverable (the peer is running a newer/different lanchat that
+/// recoverable (the peer is running a newer/different ppexchanger that
 /// uses tags we don't know); `Malformed` and `Overflow` are hard
 /// errors — the frame is junk and the session should be torn down.
 #[derive(Debug, PartialEq, Eq)]

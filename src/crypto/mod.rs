@@ -50,10 +50,10 @@ pub fn hkdf_sha256(secret: &[u8], salt: &[u8], info: &[u8], out: &mut [u8]) {
 }
 
 /// Derive a 12-byte ChaCha20-Poly1305 nonce from a base key + 8-byte seq counter.
-/// `HKDF-Expand(key, "lanchat-nonce" || seq_be, 12)`.
+/// `HKDF-Expand(key, "ppexchanger-nonce" || seq_be, 12)`.
 pub fn derive_nonce(base_key: &[u8; 32], seq: u64) -> [u8; 12] {
-    let mut info = Vec::with_capacity(8 + 13);
-    info.extend_from_slice(b"lanchat-nonce");
+    let mut info = Vec::with_capacity(8 + 17);
+    info.extend_from_slice(b"ppexchanger-nonce");
     info.extend_from_slice(&seq.to_be_bytes());
     let mut nonce = [0u8; 12];
     hkdf_sha256(base_key, &[], &info, &mut nonce);
@@ -63,14 +63,14 @@ pub fn derive_nonce(base_key: &[u8; 32], seq: u64) -> [u8; 12] {
 /// 16-byte Poly1305 key derived from `key`.
 pub fn derive_poly_key(key: &[u8; 32]) -> [u8; 32] {
     let mut out = [0u8; 32];
-    hkdf_sha256(key, &[], b"lanchat-poly1305", &mut out);
+    hkdf_sha256(key, &[], b"ppexchanger-poly1305", &mut out);
     out
 }
 
 /// 32-byte session send/recv key.
 pub fn derive_session_keys(secret: &[u8], salt: &[u8]) -> (Key, Key) {
     let mut buf = [0u8; 64];
-    hkdf_sha256(secret, salt, b"lanchat-session", &mut buf);
+    hkdf_sha256(secret, salt, b"ppexchanger-session", &mut buf);
     let (send, recv) = buf.split_at(32);
     (*Key::from_slice(send), *Key::from_slice(recv))
 }

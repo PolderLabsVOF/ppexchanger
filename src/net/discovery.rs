@@ -1,6 +1,6 @@
 //! UDP multicast peer discovery.
 //!
-//! Every `lanchat` instance joins the multicast group `239.255.42.99` on
+//! Every `ppexchanger` instance joins the multicast group `239.255.42.99` on
 //! port `7777` and announces itself by periodically broadcasting a
 //! `protocol::Beacon`. Received beacons (from other peers) are yielded to
 //! callers via `recv_beacons`.
@@ -15,7 +15,7 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::{Duration, Instant};
 
-/// Multicast group used by every `lanchat` instance.
+/// Multicast group used by every `ppexchanger` instance.
 pub const MULTICAST_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 42, 99);
 pub const MULTICAST_PORT: u16 = 7777;
 

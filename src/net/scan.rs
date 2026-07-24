@@ -4,7 +4,7 @@
 //! For our single outbound IPv4 interface, we walk a configurable number of
 //! host addresses on either side of our own IP and try a TCP connect on the
 //! target port. A successful connect (or refused connection) means the host
-//! is reachable; a successful TCP handshake means it speaks lanchat.
+//! is reachable; a successful TCP handshake means it speaks ppx.
 //!
 //! ponytail: A future iteration could use `libc::getifaddrs` to enumerate
 //! every interface address (multi-homed hosts). The current single-interface

@@ -5,9 +5,9 @@
 //! a few seconds. May be flaky on networks that filter multicast — marked
 //! `#[ignore]` so `cargo test` doesn't fail in CI environments that block it.
 
-use lanchat::crypto::Keypair;
-use lanchat::net::discovery::{Discovery, ANNOUNCE_INTERVAL};
-use lanchat::protocol::Beacon;
+use ppexchanger::crypto::Keypair;
+use ppexchanger::net::discovery::{Discovery, ANNOUNCE_INTERVAL};
+use ppexchanger::protocol::Beacon;
 use std::time::{Duration, Instant};
 
 #[test]

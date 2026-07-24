@@ -21,7 +21,7 @@ pub fn render(f: &mut Frame, theme: &super::theme::Theme, glyphs: &super::theme:
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .title(Span::styled(
-            format!(" {} lanchat — shortcuts ", glyphs.cursor),
+            format!(" {} ppexchanger — shortcuts ", glyphs.cursor),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),

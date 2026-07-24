@@ -8,10 +8,10 @@
 //! nonce is derived from the expected `recv_seq`, so a resend uses a stale
 //! nonce and fails authentication.
 
-use lanchat::crypto::Keypair;
-use lanchat::net::handshake::{run_initiator, run_responder};
-use lanchat::net::session::Session;
-use lanchat::protocol::FrameBody;
+use ppexchanger::crypto::Keypair;
+use ppexchanger::net::handshake::{run_initiator, run_responder};
+use ppexchanger::net::session::Session;
+use ppexchanger::protocol::FrameBody;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
@@ -138,7 +138,7 @@ fn tampered_ciphertext_rejected() {
 #[test]
 fn file_offer_accept_chunk_done_roundtrip() {
     let (mut alice, mut bob) = make_session_pair();
-    let id = lanchat::protocol::FileId::random();
+    let id = ppexchanger::protocol::FileId::random();
     let offer_name = "report.pdf".to_string();
 
     // Bob is the sender (Alice is the receiver). The sender's first
@@ -197,8 +197,8 @@ fn file_offer_accept_chunk_done_roundtrip() {
 #[test]
 fn file_chunk_max_size_roundtrips() {
     let (mut alice, mut bob) = make_session_pair();
-    let id = lanchat::protocol::FileId::random();
-    let payload = vec![0xABu8; lanchat::protocol::FILE_CHUNK_MAX_DATA];
+    let id = ppexchanger::protocol::FileId::random();
+    let payload = vec![0xABu8; ppexchanger::protocol::FILE_CHUNK_MAX_DATA];
 
     bob.send(&FrameBody::FileChunk {
         id,
@@ -208,7 +208,7 @@ fn file_chunk_max_size_roundtrips() {
     .unwrap();
     let f = alice.recv().unwrap();
     if let FrameBody::FileChunk { data, .. } = f.body {
-        assert_eq!(data.len(), lanchat::protocol::FILE_CHUNK_MAX_DATA);
+        assert_eq!(data.len(), ppexchanger::protocol::FILE_CHUNK_MAX_DATA);
         assert_eq!(data, payload);
     } else {
         panic!("expected FileChunk, got {:?}", f.body);
