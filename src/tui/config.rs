@@ -30,8 +30,9 @@ pub const MAX_SCROLLBACK: usize = 50_000;
 
 /// What the footer status line shows. `Off` hides it entirely; the other
 /// two modes are obvious from the name. Persisted as a string in TOML.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum StatusFormat {
+    #[default]
     NameOnly,
     NameAddr,
     Off,
@@ -53,12 +54,6 @@ impl StatusFormat {
             "off" => Some(StatusFormat::Off),
             _ => None,
         }
-    }
-}
-
-impl Default for StatusFormat {
-    fn default() -> Self {
-        StatusFormat::NameOnly
     }
 }
 
@@ -146,7 +141,7 @@ impl UiConfig {
                     }
                 }
                 "scrollback" => {
-                    if let Some(n) = value.parse::<usize>().ok() {
+                    if let Ok(n) = value.parse::<usize>() {
                         out.scrollback = n.clamp(16, MAX_SCROLLBACK);
                     }
                 }

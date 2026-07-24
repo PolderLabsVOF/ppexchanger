@@ -625,19 +625,16 @@ fn start_tui(
                         }
                         InboundFileEvent::Chunk { peer: _, id, offset, data } => {
                             use ppexchanger::net::file_xfer::WriteOutcome;
-                            match inbox.write_chunk(id, offset, data) {
-                                WriteOutcome::Error(reason) => {
-                                    if let Some(offer) = inbox.reject(id) {
-                                        let _ = act_bus_tx.send(Event::FileAborted {
-                                            from_peer: [0u8; 16], // patched below
-                                            from_name: String::new(),
-                                            name: offer.name,
-                                            reason,
-                                            partial: None,
-                                        });
-                                    }
+                            if let WriteOutcome::Error(reason) = inbox.write_chunk(id, offset, data) {
+                                if let Some(offer) = inbox.reject(id) {
+                                    let _ = act_bus_tx.send(Event::FileAborted {
+                                        from_peer: [0u8; 16], // patched below
+                                        from_name: String::new(),
+                                        name: offer.name,
+                                        reason,
+                                        partial: None,
+                                    });
                                 }
-                                _ => {}
                             }
                         }
                         InboundFileEvent::Done { peer, id } => {
@@ -794,9 +791,8 @@ fn start_tui(
                             // through the same path as Ctrl-, / ? /
                             // Esc — keeping state mutation in one
                             // place.
-                            if let Some(editor_ev) = handle_mouse(m, &state, rect) {
-                                if let ppexchanger::tui::EditorEvent::MenuAction(act) = editor_ev {
-                                    match act {
+                            if let Some(ppexchanger::tui::EditorEvent::MenuAction(act)) = handle_mouse(m, &state, rect) {
+                                match act {
                                         ppexchanger::tui::MenuAction::Peers => {
                                             state.lock().unwrap().focus = tui::Focus::Sidebar;
                                         }
@@ -820,7 +816,6 @@ fn start_tui(
                                         }
                                     }
                                 }
-                            }
                         }
                     }
                 } else if state
@@ -1193,16 +1188,8 @@ fn handle_mouse(
                 return Some(ppexchanger::tui::EditorEvent::MenuAction(action));
             }
         },
-        MouseEventKind::ScrollUp => {
-            if s.focus == tui::Focus::Chat {
-                s.scroll_back(5);
-            }
-        }
-        MouseEventKind::ScrollDown => {
-            if s.focus == tui::Focus::Chat {
-                s.scroll_forward(5);
-            }
-        }
+        MouseEventKind::ScrollUp if s.focus == tui::Focus::Chat => s.scroll_back(5),
+        MouseEventKind::ScrollDown if s.focus == tui::Focus::Chat => s.scroll_forward(5),
         _ => {}
     }
     None
@@ -1270,6 +1257,7 @@ fn strip_routing(text: &str) -> String {
 /// `/trust <name>`, `/revoke <name>`, `/discover`, `/quit` are passthrough
 /// commands. `/discover` opens the modal and spawns a UDP multicast scan +
 /// a TCP subnet scan; results stream into the modal via `Event::DiscoveryUpdate`.
+#[allow(clippy::too_many_arguments)]
 fn handle_command(
     line: &str,
     tx_events: &std::sync::mpsc::Sender<Event>,
@@ -1456,19 +1444,16 @@ fn route_settings_key(
                     }
                                         _ => { st.toggle_mouse(cfg); let _ = guard.set_mouse(cfg.mouse); }
                 },
-                Tab::Behavior => match st.selected() {
-                    2 => {
-                        // Cycle backwards through status formats.
-                        let cur = cfg.status_format;
-                        let prev = match cur {
-                            StatusFormat::NameOnly => StatusFormat::Off,
-                            StatusFormat::NameAddr => StatusFormat::NameOnly,
-                            StatusFormat::Off => StatusFormat::NameAddr,
-                        };
-                        cfg.status_format = prev;
-                        st.dirty = true;
-                    }
-                    _ => {}
+                Tab::Behavior => if st.selected() == 2 {
+                    // Cycle backwards through status formats.
+                    let cur = cfg.status_format;
+                    let prev = match cur {
+                        StatusFormat::NameOnly => StatusFormat::Off,
+                        StatusFormat::NameAddr => StatusFormat::NameOnly,
+                        StatusFormat::Off => StatusFormat::NameAddr,
+                    };
+                    cfg.status_format = prev;
+                    st.dirty = true;
                 },
                 Tab::About => {}
             },
@@ -1487,11 +1472,8 @@ fn route_settings_key(
                     }
                                         _ => { st.toggle_mouse(cfg); let _ = guard.set_mouse(cfg.mouse); }
                 },
-                Tab::Behavior => match st.selected() {
-                    2 => {
-                        let _ = st.cycle_status_format(cfg);
-                    }
-                    _ => {}
+                Tab::Behavior => if st.selected() == 2 {
+                    let _ = st.cycle_status_format(cfg);
                 },
                 Tab::About => {}
             },
@@ -1532,9 +1514,7 @@ fn route_settings_key(
                 Tab::Behavior => match st.selected() {
                     0 => st.toggle_notify_sound(cfg),
                     1 => st.toggle_auto_trust_seen(cfg),
-                    2 => {
-                        let _ = st.cycle_status_format(cfg);
-                    }
+                    2 => { let _ = st.cycle_status_format(cfg); }
                     _ => {} // custom name edit happens in the input row
                 },
                 Tab::About => {}

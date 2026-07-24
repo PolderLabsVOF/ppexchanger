@@ -150,9 +150,7 @@ impl LineEditor {
                 KeyCode::BackTab => return EditorEvent::FocusNext,
                 KeyCode::PageUp => return EditorEvent::PageUp,
                 KeyCode::PageDown => return EditorEvent::PageDown,
-                KeyCode::Char('?')
-                    if self.buffer.is_empty() && !self.history_idx.is_some() =>
-                {
+                KeyCode::Char('?') if self.buffer.is_empty() && self.history_idx.is_none() => {
                     return EditorEvent::ToggleHelp;
                 }
                 _ => {}
@@ -231,6 +229,7 @@ mod tests {
     use super::*;
     use crossterm::event::KeyEventKind;
 
+    #[allow(dead_code)] // helper used by future paste-handling tests
     fn paste_event(text: &str) -> Event {
         Event::Paste(text.to_string())
     }

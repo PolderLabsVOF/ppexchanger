@@ -56,27 +56,27 @@ pub fn render(
     let body = format!("{} wants to send:", state.from_name);
     let file_line = format!("  {}  ({})", state.offer.name, size);
 
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        body,
-        Style::default().fg(theme.fg).bg(theme.bg),
-    )));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        file_line,
-        Style::default().fg(theme.peer_text).bg(theme.bg),
-    )));
-    lines.push(Line::from(""));
-
     let hint = match state.decision {
         Decision::Pending => "[Enter] accept   [Esc] reject",
         Decision::Accepted => "accepted — receiving…",
         Decision::Rejected => "rejected",
     };
-    lines.push(Line::from(Span::styled(
-        hint,
-        Style::default().fg(theme.info).bg(theme.bg),
-    )));
+    let lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            body,
+            Style::default().fg(theme.fg).bg(theme.bg),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            file_line,
+            Style::default().fg(theme.peer_text).bg(theme.bg),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            hint,
+            Style::default().fg(theme.info).bg(theme.bg),
+        )),
+    ];
 
     let para = Paragraph::new(lines)
         .block(block)

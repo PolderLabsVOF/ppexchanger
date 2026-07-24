@@ -679,7 +679,7 @@ pub fn enter_terminal(
     }
     crossterm::execute!(out, EnterAlternateScreen, SetTitle("ppexchanger"))?;
     let backend = CrosstermBackend::new(out);
-    Ok(Terminal::new(backend)?)
+    Terminal::new(backend)
 }
 
 /// Restore the terminal to its previous state. The teardown mirrors

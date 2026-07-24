@@ -169,15 +169,14 @@ pub struct AbortInfo {
     pub reason: String,
 }
 
+#[derive(Default)]
 pub struct OutboundMap {
     by_id: HashMap<FileId, OutboundTransfer>,
 }
 
 impl OutboundMap {
     pub fn new() -> Self {
-        Self {
-            by_id: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn insert(&mut self, t: OutboundTransfer) {
@@ -445,15 +444,14 @@ pub enum InboundError {
     Io(String),
 }
 
+#[derive(Default)]
 pub struct InboundMap {
     by_id: HashMap<FileId, InboundTransfer>,
 }
 
 impl InboundMap {
     pub fn new() -> Self {
-        Self {
-            by_id: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Insert a fresh inbound transfer. Returns `false` if an entry

@@ -122,7 +122,7 @@ fn tampered_ciphertext_rejected() {
     // Skip the success path entirely — go straight to bogus bytes.
     let len: u32 = 32;
     session.write_raw(&len.to_be_bytes()).unwrap();
-    session.write_raw(&vec![0xFFu8; 32]).unwrap();
+    session.write_raw(&[0xFFu8; 32]).unwrap();
     // Closing the writer half (drop) signals EOF, but the server's first
     // `recv` should already have errored before that matters.
     drop(session);

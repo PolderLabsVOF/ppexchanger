@@ -27,12 +27,8 @@ use std::sync::mpsc;
 pub fn dial(addr: SocketAddr, static_kp: &Keypair) -> std::io::Result<Session<TcpStream>> {
     let stream = TcpStream::connect(addr)?;
     let mut s = stream;
-    let res = run_initiator(&mut s, static_kp).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("handshake failed: {:?}", e),
-        )
-    })?;
+    let res = run_initiator(&mut s, static_kp)
+        .map_err(|e| std::io::Error::other(format!("handshake failed: {:?}", e)))?;
     let sess = Session::new(s, res.send_key, res.recv_key, res.remote_static);
     Ok(sess)
 }

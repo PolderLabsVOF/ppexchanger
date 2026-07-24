@@ -90,7 +90,7 @@ fn send_msg(w: &mut impl Write, payload: &[u8]) -> std::io::Result<()> {
 fn recv_msg(r: &mut impl Read) -> std::io::Result<Vec<u8>> {
     let hdr = read_exact(r, 8)?;
     let len = u32::from_be_bytes(hdr[0..4].try_into().unwrap()) as usize;
-    if len < 4 || len > 4096 {
+    if !(4..=4096).contains(&len) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "handshake message out of bounds",

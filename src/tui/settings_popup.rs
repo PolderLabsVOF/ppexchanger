@@ -11,7 +11,7 @@
 //!   * `Block::bordered().border_type(Double)` for the modal frame
 //!   * `Clear` for the modal background fill
 
-use crate::tui::config::{StatusFormat, UiConfig, DEFAULT_SCROLLBACK};
+use crate::tui::config::{StatusFormat, UiConfig};
 use crate::tui::theme::{Glyphs, Theme, ThemeName};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -228,6 +228,7 @@ pub fn centered(area: Rect) -> Rect {
         .split(vert[1])[1]
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
     theme: &Theme,
@@ -371,7 +372,7 @@ fn rows_for_tab(
             let theme_name = THEME_CHOICES[state.theme_idx.min(THEME_CHOICES.len() - 1)].as_str();
             let rows = vec![
                 mk("Theme", theme_name.to_string(), "←/→ cycles")
-                    .style(header_label_style.clone()),
+                    .style(header_label_style),
                 mk(
                     "Show footer",
                     if cfg.show_footer { "on" } else { "off" }.to_string(),
@@ -550,6 +551,7 @@ fn format_last_seen(unix: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::config::DEFAULT_SCROLLBACK;
 
     fn mk_cfg() -> UiConfig {
         UiConfig::default()

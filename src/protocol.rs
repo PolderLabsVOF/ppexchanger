@@ -102,7 +102,7 @@ pub fn decode_beacon(bytes: &[u8]) -> Option<Beacon> {
     if bytes.len() > BEACON_MAX_BYTES {
         return None;
     }
-    if &bytes[0..4] != &BEACON_MAGIC {
+    if bytes[0..4] != BEACON_MAGIC {
         return None;
     }
     if bytes[4] != BEACON_VERSION || bytes[5] != BEACON_MSG_TYPE {

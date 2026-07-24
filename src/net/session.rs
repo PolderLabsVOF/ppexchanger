@@ -62,7 +62,7 @@ impl<S: Read + Write> Session<S> {
         let nonce = Nonce::from_slice(&nonce_arr);
         let ct = cipher
             .encrypt(nonce, Payload { msg: &plaintext, aad: &[] })
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "AEAD encrypt failed"))?;
+            .map_err(|_| std::io::Error::other("AEAD encrypt failed"))?;
         let len = ct.len() as u32;
         self.stream.write_all(&len.to_be_bytes())?;
         self.stream.write_all(&ct)?;
