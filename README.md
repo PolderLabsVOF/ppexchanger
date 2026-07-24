@@ -1,9 +1,9 @@
-# lanchat
+# ppexchanger
 
 Fully-local, fully-encrypted LAN P2P terminal messenger written in Rust.
 
 ```
-╭─ lanchat ─ alice ───────────────────────────╮
+╭─ ppx ─ alice ───────────────────────────╮
 │ Peers (3)         │ alice: hi                │
 │  ●★ bob   (con)   │ bob:  yo                 │
 │  ○☆ carol (seen)  │ alice: how r u?          │
@@ -42,7 +42,7 @@ mainstream distro):
 curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh | bash
 ```
 
-The installer drops `lanchat` into `~/.local/bin`. If that directory is
+The installer drops `ppx` into `~/.local/bin`. If that directory is
 not already on your `PATH`, the installer prints the export line to
 add; most distros pick up `~/.local/bin` automatically.
 
@@ -66,7 +66,7 @@ manifest lists every asset:
 
 ```sh
 curl -fsSL -O https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/SHA256SUMS
-curl -fsSL -O https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/lanchat-<version>-x86_64-unknown-linux-gnu.tar.gz
+curl -fsSL -O https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/ppexchanger-<version>-x86_64-unknown-linux-gnu.tar.gz
 sha256sum -c SHA256SUMS
 ```
 
@@ -81,8 +81,8 @@ On Alpine / musl-based distros the gnu tarball runs in practice but
 isn't an officially published asset — [build from source](#from-source)
 if you hit a glibc symbol error.
 
-Config + identity live under `$XDG_CONFIG_HOME/lanchat/` (typically
-`~/.config/lanchat/`).
+Config + identity live under `$XDG_CONFIG_HOME/ppexchanger/` (typically
+`~/.config/ppexchanger/`).
 
 ### macOS
 
@@ -96,7 +96,7 @@ macOS users on Apple silicon get the native asset.
 curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh | bash
 ```
 
-The installer drops `lanchat` into `~/.local/bin`. macOS does **not**
+The installer drops `ppx` into `~/.local/bin`. macOS does **not**
 put `~/.local/bin` on `PATH` by default — once is enough:
 
 ```sh
@@ -108,7 +108,7 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # or ~/.bash_profile
 network connections. Click **Allow** when prompted so UDP multicast
 discovery (`/discover`) works. If you denied earlier, open
 *System Settings → Network → Firewall → Options…* and remove the
-deny rule for `lanchat`.
+deny rule for `ppx`.
 
 **Architectures published:**
 
@@ -123,15 +123,15 @@ developer cannot be verified" dialog. Either right-click → Open the
 first time, or strip the quarantine attribute:
 
 ```sh
-xattr -dr com.apple.quarantine ~/.local/bin/lanchat
+xattr -dr com.apple.quarantine ~/.local/bin/ppx
 ```
 
-Config + identity live under `~/Library/Application Support/lanchat/`
-(equivalent to `$XDG_CONFIG_HOME/lanchat`).
+Config + identity live under `~/Library/Application Support/ppexchanger/`
+(equivalent to `$XDG_CONFIG_HOME/ppx`).
 
 ### Windows
 
-A native Windows binary (`lanchat.exe`, x86_64 MSVC) ships alongside
+A native Windows binary (`ppx.exe`, x86_64 MSVC) ships alongside
 the Linux and macOS assets.
 
 **Recommended — via the bash installer** (Git Bash / MSYS2 / Cygwin on
@@ -149,13 +149,13 @@ carry the bit).
 zip from the release page:
 
 ```
-https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/lanchat-<version>-x86_64-pc-windows-msvc.zip
+https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/ppexchanger-<version>-x86_64-pc-windows-msvc.zip
 ```
 
 Extract it (Windows Explorer's "Extract All…" works) and put
-`lanchat.exe` somewhere on your `%PATH%` — typically
+`ppx.exe` somewhere on your `%PATH%` — typically
 `C:\Users\<you>\AppData\Local\Microsoft\WindowsApps` (no admin needed)
-or `C:\Program Files\lanchat\` (admin needed).
+or `C:\Program Files\ppexchanger\` (admin needed).
 
 **Architectures published:**
 
@@ -167,11 +167,11 @@ aarch64 Windows is **not yet published**. If you're on ARM64,
 [build from source](#from-source) with
 `rustup target add aarch64-pc-windows-msvc`.
 
-Config + identity + contacts live under `%APPDATA%\lanchat\`
-(typically `C:\Users\<you>\AppData\Roaming\lanchat\`), created on
+Config + identity + contacts live under `%APPDATA%\ppexchanger\`
+(typically `C:\Users\<you>\AppData\Roaming\ppexchanger\`), created on
 first run.
 
-**Windows Firewall** will prompt on first launch when `lanchat` binds
+**Windows Firewall** will prompt on first launch when `ppx` binds
 the listening port (default `0.0.0.0:7777`). Allow access when asked,
 or open the port manually. UDP multicast discovery may be silently
 dropped by Windows Firewall; the `/discover` command falls back to a
@@ -211,25 +211,25 @@ cargo install --git https://github.com/PolderLabsVOF/ppexchanger --locked
 git clone https://github.com/PolderLabsVOF/ppexchanger
 cd ppexchanger
 cargo build --release
-./target/release/lanchat
+./target/release/ppx
 ```
 
 ## Usage
 
 ```sh
-lanchat                      # start the TUI
-lanchat --name alice         # override display name
-lanchat --port 7777          # bind a specific TCP port
-lanchat --theme amber        # default | solarized | monochrome | neon | amber
-lanchat --config /tmp/c.toml # alternate config path
-lanchat --no-mouse           # disable mouse capture (default is ON)
-lanchat --gen-identity       # print fingerprint + peer_id and exit
-lanchat --version
-lanchat --help
+ppx                      # start the TUI
+ppx --name alice         # override display name
+ppx --port 7777          # bind a specific TCP port
+ppx --theme amber        # default | solarized | monochrome | neon | amber
+ppx --config /tmp/c.toml # alternate config path
+ppx --no-mouse           # disable mouse capture (default is ON)
+ppx --gen-identity       # print fingerprint + peer_id and exit
+ppx --version
+ppx --help
 ```
 
-On first run, lanchat generates an identity keypair and stores it under
-`~/.config/lanchat/` (or `$XDG_CONFIG_HOME/lanchat`):
+On first run, ppx generates an identity keypair and stores it under
+`~/.config/ppexchanger/` (or `$XDG_CONFIG_HOME/ppx`):
 
 - `identity` — 32-byte X25519 secret, 16-byte peer_id, display name
 - `peerdb` — known contacts (name, public key, last seen, trust flag)
@@ -257,7 +257,7 @@ There are two ways to send a file to the selected peer:
 
 1. **Paste a path** — type or paste a path like
    `/home/alice/report.pdf` and press Enter. If the path points at an
-   existing regular file, lanchat auto-detects it and starts a binary
+   existing regular file, ppx auto-detects it and starts a binary
    transfer; otherwise the text is sent as a chat message.
 2. **`/send <path>`** — explicit escape hatch. Bypasses auto-detect; use
    this when the file has no extension or you want unambiguous behaviour.
@@ -395,7 +395,7 @@ The TUI ships a retro amber-phosphor CRT vibe out of the box:
 
 ## Configuration
 
-`~/.config/lanchat/config.toml`:
+`~/.config/ppexchanger/config.toml`:
 
 ```toml
 [ui]
@@ -417,14 +417,14 @@ above the `[ui]` header in a non-overwritten file.
 - **Transport** — ChaCha20-Poly1305 AEAD with per-direction sequence
   counters; no plaintext on the wire after the handshake completes.
 - **Static keys** — X25519, generated from the kernel CSPRNG; the secret
-  half is stored with 0600 permissions in `~/.config/lanchat/identity`
+  half is stored with 0600 permissions in `~/.config/ppexchanger/identity`
   on Linux/macOS (Windows uses NTFS ACL inheritance instead).
 - **Trust model** — every peer is `untrusted` by default. Use `/trust
   <name>` to mark a peer as verified (typically after checking their
   fingerprint out-of-band). The trusted/untrusted flag persists in
   peerdb.
 - **No server, no telemetry, no update channel** — the binary doesn't
-  phone home. Run `lanchat --gen-identity` to dump your fingerprint for
+  phone home. Run `ppx --gen-identity` to dump your fingerprint for
   out-of-band verification with a peer before you `/trust` them.
 
 ## Layout

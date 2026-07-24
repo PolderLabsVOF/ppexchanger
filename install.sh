@@ -1,32 +1,35 @@
 #!/usr/bin/env bash
-# install.sh — install or update `lanchat`.
+# install.sh — install or update `ppx` (the ppexchanger binary).
 #
 # Usage:
 #   curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh | bash
-#   curl -fsSL ... | bash -s -- --tag v0.3.1
+#   curl -fsSL ... | bash -s -- --tag v0.5.0
 #   bash install.sh --uninstall
 #   bash install.sh --method source           # build from source instead of fetching the binary
 #
 # Environment overrides:
-#   LANCHAT_INSTALL_DIR   target directory (default: $HOME/.local/bin)
-#   LANCHAT_VERSION       specific version tag (default: latest release)
-#   LANCHAT_REPO          "owner/name"                  (default: PolderLabsVOF/ppexchanger)
-#   LANCHAT_SKIP_VERIFY   set to 1 to skip checksum verification
-#   LANCHAT_METHOD        "binary" | "source" | "auto" (default: auto = prompt when TTY, binary when piped)
+#   PPX_INSTALL_DIR     target directory (default: $HOME/.local/bin)
+#   PPX_VERSION         specific version tag (default: latest release)
+#   PPX_REPO            "owner/name"                  (default: PolderLabsVOF/ppexchanger)
+#   PPX_SKIP_VERIFY     set to 1 to skip checksum verification
+#   PPX_METHOD          "binary" | "source" | "auto" (default: auto = prompt when TTY, binary when piped)
 #
-# By default the script fetches a single-binary tarball (`lanchat-<tag>-<target>.tar.gz`),
-# verifies it against `SHA256SUMS`, extracts the `lanchat` binary into the
+# By default the script fetches a single-binary tarball (`ppexchanger-<tag>-<target>.tar.gz`),
+# verifies it against `SHA256SUMS`, extracts the `ppx` binary into the
 # install dir, and on update replaces the previous binary in place. With
 # `--method source` (or by answering "source" at the interactive prompt when
 # stdin is a TTY) the script instead clones the repo at the chosen tag and
 # runs `cargo install --path . --locked` into the same install dir.
 # Re-running the script is the supported update path.
+#
+# For backward compatibility, the v0.4.x env vars (LANCHAT_*) are still
+# honoured as fallbacks; new code should use PPX_*.
 
 set -euo pipefail
 
-REPO="${LANCHAT_REPO:-PolderLabsVOF/ppexchanger}"
-INSTALL_DIR="${LANCHAT_INSTALL_DIR:-$HOME/.local/bin}"
-VERSION="${LANCHAT_VERSION:-latest}"
+REPO="${PPX_REPO:-${LANCHAT_REPO:-PolderLabsVOF/ppexchanger}}"
+INSTALL_DIR="${PPX_INSTALL_DIR:-${LANCHAT_INSTALL_DIR:-$HOME/.local/bin}}"
+VERSION="${PPX_VERSION:-${LANCHAT_VERSION:-latest}}"
 
 # ANSI colour helpers — used only when stdout is a terminal.
 if [ -t 1 ]; then
@@ -35,27 +38,27 @@ else
     BOLD=""; GREEN=""; YELLOW=""; RED=""; RESET=""
 fi
 
-log()  { printf '%b[lanchat]%b %s\n' "$BOLD" "$RESET" "$*"; }
-ok()   { printf '%b[lanchat]%b %b%s%b\n' "$BOLD" "$RESET" "$GREEN" "$*" "$RESET"; }
-warn() { printf '%b[lanchat]%b %b%s%b\n' "$BOLD" "$RESET" "$YELLOW" "$*" "$RESET"; }
-die()  { printf '%b[lanchat]%b %b%s%b\n' "$BOLD" "$RESET" "$RED" "$*" "$RESET" >&2; exit 1; }
+log()  { printf '%b[ppx]%b %s\n' "$BOLD" "$RESET" "$*"; }
+ok()   { printf '%b[ppx]%b %b%s%b\n' "$BOLD" "$RESET" "$GREEN" "$*" "$RESET"; }
+warn() { printf '%b[ppx]%b %b%s%b\n' "$BOLD" "$RESET" "$YELLOW" "$*" "$RESET"; }
+die()  { printf '%b[ppx]%b %b%s%b\n' "$BOLD" "$RESET" "$RED" "$*" "$RESET" >&2; exit 1; }
 
 
 usage() {
     cat <<'EOF'
-install.sh — install or update lanchat
+install.sh — install or update ppx (ppexchanger)
 
 USAGE:
     bash install.sh [options]
 
 OPTIONS:
-    --tag <tag>         Install a specific release tag (e.g. v0.3.1). Default: latest.
+    --tag <tag>         Install a specific release tag (e.g. v0.5.0). Default: latest.
     --dir <path>        Install directory. Default: \$HOME/.local/bin.
     --method <mode>     Install method: "binary" (download release tarball, the default),
                         "source" (git clone + cargo install --path . --locked), or
                         "auto" (prompt when stdin is a TTY, else "binary").
                         Accepts both `--method source` and `--method=source` forms.
-                        Equivalent env var: LANCHAT_METHOD.
+                        Equivalent env var: PPX_METHOD (LANCHAT_METHOD also accepted).
     --yes               Skip the "replacing existing binary" prompt-style warning and
                         auto-pick the binary method when --method auto is in effect.
                         (The install is non-interactive anyway; useful for log scraping.)
@@ -66,22 +69,22 @@ OPTIONS:
     --help              Print this help.
 
 ENV:
-    LANCHAT_REPO            GitHub repo (owner/name)  default: PolderLabsVOF/ppexchanger
-    LANCHAT_INSTALL_DIR     Same as --dir
-    LANCHAT_VERSION         Same as --tag
-    LANCHAT_SKIP_VERIFY     Set to 1 to skip SHA256SUMS verification (not recommended)
-    LANCHAT_METHOD          "binary" | "source" | "auto" (default: auto)
-    LANCHAT_YES             Set to 1 to behave as if --yes was passed
+    PPX_REPO                GitHub repo (owner/name)  default: PolderLabsVOF/ppexchanger
+    PPX_INSTALL_DIR         Same as --dir
+    PPX_VERSION             Same as --tag
+    PPX_SKIP_VERIFY         Set to 1 to skip SHA256SUMS verification (not recommended)
+    PPX_METHOD              "binary" | "source" | "auto" (default: auto)
+    PPX_YES                 Set to 1 to behave as if --yes was passed
 
 EXAMPLES:
     curl -fsSL https://github.com/${REPO}/releases/latest/download/install.sh | bash
-    curl -fsSL https://github.com/${REPO}/releases/latest/download/install.sh | bash -s -- --tag v0.3.1
-    LANCHAT_INSTALL_DIR=/usr/local/bin bash install.sh
+    curl -fsSL https://github.com/${REPO}/releases/latest/download/install.sh | bash -s -- --tag v0.5.0
+    PPX_INSTALL_DIR=/usr/local/bin bash install.sh
 EOF
 }
 
 uninstall() {
-    local bin="$INSTALL_DIR/lanchat"
+    local bin="$INSTALL_DIR/ppx"
     if [ -e "$bin" ] || [ -L "$bin" ]; then
         rm -f "$bin"
         ok "removed $bin"
@@ -94,10 +97,10 @@ uninstall() {
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
-ASSUME_YES="${LANCHAT_YES:-0}"
+ASSUME_YES="${PPX_YES:-${LANCHAT_YES:-0}}"
 PRINT_TARGET=0
 PRINT_TAG=0
-METHOD="${LANCHAT_METHOD:-auto}"
+METHOD="${PPX_METHOD:-${LANCHAT_METHOD:-auto}}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -170,10 +173,10 @@ detect_target_triple() {
 TARGET_TRIPLE="$(detect_target_triple)"
 
 # Windows PE binaries carry the `.exe` suffix; ELF/Mach-O use bare
-# `lanchat`. Computed once so the rest of the script can reference it.
+# `ppx`. Computed once so the rest of the script can reference it.
 case "$TARGET_TRIPLE" in
-    *-pc-windows-*) BIN_BASENAME="lanchat.exe" ;;
-    *)             BIN_BASENAME="lanchat"    ;;
+    *-pc-windows-*) BIN_BASENAME="ppx.exe" ;;
+    *)             BIN_BASENAME="ppx"    ;;
 esac
 BIN_PATH="$INSTALL_DIR/$BIN_BASENAME"
 
@@ -264,8 +267,8 @@ else
     TAG="$VERSION"
 fi
 
-# Strip a leading "v" if present — assets are named `lanchat-<tag>.tar.gz`
-# where `<tag>` is the bare version string ("0.3.1", not "v0.3.1").
+# Strip a leading "v" if present — assets are named `ppexchanger-<tag>.tar.gz`
+# where `<tag>` is the bare version string ("0.5.0", not "v0.5.0").
 TAG_BARE="${TAG#v}"
 
 # `--print-tag` resolves the version and exits without touching the
@@ -287,7 +290,7 @@ trap 'rm -rf "$TMPDIR"' EXIT
 # ---------------------------------------------------------------------------
 # Clones the repo at the resolved tag into a scratch dir and runs
 # `cargo install --path . --locked` so the output lands in
-# `$INSTALL_DIR/lanchat(.exe)` — same target as the binary path. Uses
+# `$INSTALL_DIR/ppx(.exe)` — same target as the binary path. Uses
 # `--locked` so a Cargo.lock mismatch fails loudly instead of silently
 # picking up newer dep versions.
 install_from_source() {
@@ -298,10 +301,10 @@ install_from_source() {
         || die "git clone failed — check that tag $TAG exists in $REPO"
 
     # The source's `Cargo.toml` package name drives the installed binary
-    # name; fall back to "lanchat" if we can't introspect.
+    # name; fall back to "ppx" if we can't introspect.
     local pkg_name
     pkg_name="$(grep -E '^name *= *"' "$src_dir/Cargo.toml" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')"
-    [ -n "$pkg_name" ] || pkg_name="lanchat"
+    [ -n "$pkg_name" ] || pkg_name="ppx"
 
     log "running \`cargo install --path . --locked --root $TMPDIR/stage\`..."
     (
@@ -350,7 +353,7 @@ install_binary_file() {
         *) chmod +x "$BIN_PATH" ;;
     esac
 
-    ok "installed lanchat $TAG_BARE → $BIN_PATH"
+    ok "installed ppx $TAG_BARE → $BIN_PATH"
 
     case ":$PATH:" in
         *":$INSTALL_DIR:"*) ;;
@@ -384,7 +387,7 @@ fi
 
 # Binary path: download the tarball, verify, extract, then hand off to
 # the shared installer.
-ASSET="lanchat-${TAG_BARE}-${TARGET_TRIPLE}.tar.gz"
+ASSET="ppexchanger-${TAG_BARE}-${TARGET_TRIPLE}.tar.gz"
 BASE_URL="https://github.com/$REPO/releases/download/$TAG"
 TARBALL="$TMPDIR/$ASSET"
 SUMS="$TMPDIR/SHA256SUMS"
@@ -400,8 +403,8 @@ curl -fsSL -o "$SUMS" "$BASE_URL/SHA256SUMS" \
 # ---------------------------------------------------------------------------
 # Verify
 # ---------------------------------------------------------------------------
-if [ "${LANCHAT_SKIP_VERIFY:-0}" = "1" ]; then
-    warn "LANCHAT_SKIP_VERIFY=1 — skipping checksum verification (NOT recommended)"
+if [ "${PPX_SKIP_VERIFY:-${LANCHAT_SKIP_VERIFY:-0}}" = "1" ]; then
+    warn "PPX_SKIP_VERIFY=1 — skipping checksum verification (NOT recommended)"
 else
     log "verifying checksum..."
     (
@@ -426,7 +429,7 @@ fi
 log "extracting..."
 tar -xzf "$TARBALL" -C "$TMPDIR"
 # Tarball layout is `bin/<binary-name>`; the leaf name depends on the
-# target triple (lanchat.exe on Windows, lanchat elsewhere).
+# target triple (ppx.exe on Windows, ppx elsewhere).
 SRC_BIN="$TMPDIR/$BIN_BASENAME"
 [ -f "$SRC_BIN" ] || SRC_BIN="$TMPDIR/bin/$BIN_BASENAME"
 [ -f "$SRC_BIN" ] || die "expected binary '$BIN_BASENAME' not found in the tarball"

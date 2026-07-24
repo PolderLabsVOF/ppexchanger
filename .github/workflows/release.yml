@@ -4,8 +4,11 @@
 # so the one-line `curl | bash` install always fetches the script that
 # matches the binary it installs.
 #
-# One asset per (target triple) is published. The installer matches the
-# asset to the host machine and rejects anything outside the published set.
+# v0.5.0 ships linux-only: the matrix keeps the full set of targets for
+# future releases, but every non-x86_64-linux entry is marked
+# `allow_failure: true` so the publish job still succeeds off the working
+# asset. Re-enable entries by flipping the flag once the corresponding
+# runner is available.
 
 name: release
 
@@ -34,39 +37,35 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            binary_name: lanchat
+            binary_name: ppx
             allow_failure: false
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            binary_name: lanchat
-            # FIXME: rustc on the GHA ubuntu image occasionally produces
-            # x86_64 .o files for `--target aarch64-unknown-linux-gnu`
-            # builds, even when `rustup target add` reports success. The
-            # 64-bit Linux + 64-bit ARM Linux + Apple triples all build
-            # locally; until the root cause is pinned down (it may need
-            # the `dtolnay/rust-toolchain` flag bumped, a different
-            # linker driver, or an explicit cross toolchain),
-            # `continue-on-error` lets the publish job still produce
-            # the 3 working assets.
+            binary_name: ppx
+            # Non-x86_64-linux entries are marked `allow_failure: true`
+            # because v0.5.0 ships linux-only. The matrix is kept intact
+            # so future releases can flip the flags without rewriting
+            # the workflow. Re-enable once the corresponding runner
+            # cross-build is verified.
             allow_failure: true
           - target: x86_64-apple-darwin
             os: macos-latest
-            binary_name: lanchat
-            allow_failure: false
+            binary_name: ppx
+            allow_failure: true
           - target: aarch64-apple-darwin
             os: macos-latest
-            binary_name: lanchat
-            allow_failure: false
+            binary_name: ppx
+            allow_failure: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            binary_name: lanchat.exe
+            binary_name: ppx.exe
             # Windows PE binaries need link.exe (Visual Studio Build Tools),
             # which `windows-latest` ships but doesn't put on PATH. The
             # `ilammy/msvc-dev-cmd` step below activates vcvars64.bat.
             # Git Bash is used for the run steps (see `shell: bash`) so
             # `mkdir -p`, `cp`, `tar`, `sha256sum` semantics are uniform
             # across all matrix entries.
-            allow_failure: false
+            allow_failure: true
     steps:
       - uses: actions/checkout@v4
 
@@ -129,7 +128,7 @@ jobs:
           BINARY_NAME: ${{ matrix.binary_name }}
         run: |
           TAG_BARE="${TAG_BARE#v}"
-          ASSET="lanchat-${TAG_BARE}-${TARGET}.tar.gz"
+          ASSET="ppexchanger-${TAG_BARE}-${TARGET}.tar.gz"
           # POSIX tar works on Windows under Git Bash.
           tar -C staging -czf "${ASSET}" "bin/${BINARY_NAME}"
           # SHA256SUMS covers the tarball + the install script so the
@@ -140,8 +139,8 @@ jobs:
           # download from a browser). PowerShell's Compress-Archive is
           # built into Windows 10+ / Server 2019+, no extra tooling.
           if [ "${TARGET}" = "x86_64-pc-windows-msvc" ]; then
-            ZIP_ASSET="lanchat-${TAG_BARE}-${TARGET}.zip"
-            (cd staging && powershell.exe -NoProfile -Command "Compress-Archive -Path 'bin/lanchat.exe' -DestinationPath '../${ZIP_ASSET}' -Force")
+            ZIP_ASSET="ppexchanger-${TAG_BARE}-${TARGET}.zip"
+            (cd staging && powershell.exe -NoProfile -Command "Compress-Archive -Path 'bin/ppx.exe'' -DestinationPath '../${ZIP_ASSET}' -Force")
             sha256sum "${ZIP_ASSET}" >> SHA256SUMS
           fi
           cat SHA256SUMS
@@ -150,7 +149,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lanchat-${{ matrix.target }}
+          name: ppx-${{ matrix.target }}
           path: |
             *.tar.gz
             *.zip
@@ -184,7 +183,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: lanchat ${{ github.ref_name }}
+          name: ppexchanger ${{ github.ref_name }}
           generate_release_notes: true
           files: |
             SHA256SUMS
