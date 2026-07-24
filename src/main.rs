@@ -36,7 +36,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut name: Option<String> = None;
-    let mut port: u16 = 0;
+    // Default port is 7777 (the documented multicast port) so two
+    // machines running the TUI with no flags can find each other via
+    // the TCP subnet scan fallback. `0` is still accepted for ephemeral
+    // binding (mostly useful for tests).
+    let mut port: u16 = 7777;
     let mut mode = Mode::Tui;
     let mut theme_override: Option<ppexchanger::tui::ThemeName> = None;
     let mut config_override: Option<PathBuf> = None;
@@ -1073,13 +1077,21 @@ fn do_discover(
         let _ = tx_mc.send(Event::DiscoveryFinished);
     });
 
-    // Method 2: TCP subnet scan. Walks local /24 for hosts accepting TCP on
-    // the announced port.
+    // Method 2: TCP subnet scan. Walks local /24 for hosts accepting TCP.
+    // Probe BOTH the local beacon's announced port AND the canonical
+    // multicast port (7777). Two peers on different ports can still find
+    // each other: the scan covers both the custom port announced in our
+    // own beacon and the well-known default a peer might be using.
     let tx_tcp = tx.clone();
     let tcp_port = beacon.tcp_port;
     thread::spawn(move || {
-        let addrs = match ppexchanger::net::scan::scan_local_subnet(
-            tcp_port,
+        let mut ports: Vec<u16> = vec![tcp_port];
+        let canonical = ppexchanger::net::discovery::MULTICAST_PORT;
+        if !ports.contains(&canonical) {
+            ports.push(canonical);
+        }
+        let addrs = match ppexchanger::net::scan::scan_local_subnet_multi_port(
+            &ports,
             ppexchanger::net::scan::SCAN_HOSTS,
         ) {
             Ok(v) => v,
@@ -1096,8 +1108,13 @@ fn do_discover(
                 fingerprint: None,
             })
             .collect();
+        let label = if ports.len() > 1 {
+            format!("TCP subnet scan (ports {})", ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "))
+        } else {
+            format!("TCP subnet scan (port {})", tcp_port)
+        };
         let _ = tx_tcp.send(Event::DiscoveryUpdate {
-            method: format!("TCP subnet scan (port {})", tcp_port),
+            method: label,
             peers,
         });
         let _ = tx_tcp.send(Event::DiscoveryFinished);

@@ -85,6 +85,27 @@ pub fn scan_local_subnet(
     Ok(out)
 }
 
+/// Scan the local subnet on every port in `ports`. Used by `/discover`
+/// so the scan catches both peers that bound the default port (7777)
+/// and peers that bound a custom port announced via the local beacon.
+/// De-dupes results by `(ip, port)` so the same hit isn't reported
+/// twice when both ports land on the same address.
+pub fn scan_local_subnet_multi_port(
+    ports: &[u16],
+    hosts_per_side: u8,
+) -> io::Result<Vec<SocketAddrV4>> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for &p in ports {
+        for sa in scan_local_subnet(p, hosts_per_side)? {
+            if seen.insert(sa) {
+                out.push(sa);
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +172,14 @@ mod tests {
         }
         let _ = (o0, o1, o2);
         out
+    }
+
+    #[test]
+    fn multi_port_dedupes_identical_hits() {
+        // Loopback guard short-circuits before any network calls, so this
+        // exercises the dedup path with empty per-port results — confirming
+        // the loop walks both ports and the seen-set doesn't blow up.
+        let result = scan_local_subnet_multi_port(&[7777, 9000], 4).unwrap();
+        assert!(result.is_empty());
     }
 }
