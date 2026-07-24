@@ -132,32 +132,120 @@ Config + identity live under `~/Library/Application Support/ppexchanger/`
 ### Windows
 
 A native Windows binary (`ppx.exe`, x86_64 MSVC) ships alongside
-the Linux and macOS assets.
+the Linux and macOS assets. The installer and the binary both work
+under **Git Bash**, **MSYS2**, or **Cygwin** — pick whichever you
+already have. PowerShell or WSL alone are not enough on their own;
+the installer is a bash script.
 
-**Recommended — via the bash installer** (Git Bash / MSYS2 / Cygwin on
-Windows):
+#### Prerequisites
+
+- **Git for Windows** (ships Git Bash + curl + tar + sha256sum):
+  <https://git-scm.com/download/win>. Pick "Git from the command line
+  and also from 3rd-party software" so `curl.exe` lands on your PATH.
+- **Visual Studio Build Tools** with the **"Desktop development with
+  C++"** workload — required for the source-build path only (the
+  installer uses `link.exe`). Skip if you only install the prebuilt
+  binary.
+  <https://visualstudio.microsoft.com/visual-cpp-build-tools/>
+
+#### Install via the bash installer
+
+Open **Git Bash** (not PowerShell or cmd) and run:
 
 ```sh
 curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh | bash
 ```
 
-The installer detects `MINGW*`, `MSYS*`, `CYGWIN*` from `uname -s` and
-downloads the Windows tarball. `chmod +x` is skipped (PE binaries don't
-carry the bit).
+What happens:
 
-**Manual download** — if you don't have a bash shell handy, grab the
-zip from the release page:
+1. The script detects `MINGW*`, `MSYS*`, or `CYGWIN*` from `uname -s`
+   and downloads the Windows tarball.
+2. The binary drops into `$HOME/.local/bin/ppx.exe`. On Git Bash,
+   `$HOME` resolves to `C:\Users\<you>\` so the install dir is
+   `C:\Users\<you>\.local\bin\`. If that directory isn't on your PATH
+   yet, the installer prints the `export` line to add — append it to
+   `~/.bashrc` to persist across shells.
+3. `chmod +x` is skipped (Windows PE binaries don't carry the bit —
+   the file association lives in the NTFS ACL).
+4. Smoke test: `ppx --version` runs to confirm the binary responds.
+
+To pin a specific tag:
+
+```sh
+curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh \
+  | bash -s -- --tag v0.5.0
+```
+
+To install into a different directory (e.g. one already on PATH):
+
+```sh
+PPX_INSTALL_DIR="/c/Users/Public/bin" \
+  bash <(curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh)
+```
+
+> Git Bash mounts `C:\` as `/c/` — use the unix-style path in
+> `PPX_INSTALL_DIR`. The installer writes the literal value into the
+> filesystem, so `C:\Users\Public\bin` and `/c/Users/Public/bin` both
+> resolve to the same directory.
+
+#### Manual install (no bash session)
+
+If you only have PowerShell or a plain cmd window — no bash — grab
+the zip from the release page:
 
 ```
 https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/ppexchanger-<version>-x86_64-pc-windows-msvc.zip
 ```
 
-Extract it (Windows Explorer's "Extract All…" works) and put
-`ppx.exe` somewhere on your `%PATH%` — typically
-`C:\Users\<you>\AppData\Local\Microsoft\WindowsApps` (no admin needed)
-or `C:\Program Files\ppexchanger\` (admin needed).
+Extract it (Windows Explorer's "Extract All…" works) and move
+`ppx.exe` somewhere on your `%PATH%`. Sensible choices:
 
-**Architectures published:**
+- `C:\Users\<you>\AppData\Local\Microsoft\WindowsApps` (no admin
+  needed; already on PATH on Windows 10/11).
+- `C:\Program Files\ppexchanger\` (admin needed; tidier if you want
+  it grouped with other tools).
+
+Open **PowerShell** and verify:
+
+```powershell
+ppx --version
+# ppexchanger 0.5.0
+```
+
+#### Build from source on Windows
+
+The installer can build from source instead of downloading the
+prebuilt binary. Two extra prerequisites beyond the binary install:
+
+1. **Visual Studio Build Tools** with the "Desktop development with
+   C++" workload installed (the installer shells out to `link.exe`).
+2. **Rust** via <https://rustup.rs> — the installer runs
+   `cargo install --path . --locked`, which needs both `cargo` and
+   `rustc` on PATH.
+
+Open **Git Bash** (so `uname -s` reports a value the installer
+recognises as Windows), then:
+
+```sh
+curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh \
+  | bash -s -- --method source
+```
+
+The first build takes a few minutes — `cargo install` resolves and
+compiles the dep tree before linking `ppx.exe`. Subsequent runs hit
+the cargo cache and complete in seconds.
+
+If you only have the **MSVC developer command prompt** open (not Git
+Bash), launch Git Bash from it with:
+
+```cmd
+"C:\Program Files\Git\bin\bash.exe"
+```
+
+so the installer sees a bash environment with MSVC's `link.exe` already
+on PATH.
+
+#### Architectures published
 
 | Arch   | Triple                       |
 | ------ | ---------------------------- |
@@ -167,13 +255,17 @@ aarch64 Windows is **not yet published**. If you're on ARM64,
 [build from source](#from-source) with
 `rustup target add aarch64-pc-windows-msvc`.
 
+#### Where config + identity live
+
 Config + identity + contacts live under `%APPDATA%\ppexchanger\`
 (typically `C:\Users\<you>\AppData\Roaming\ppexchanger\`), created on
-first run.
+first run. On Git Bash, that path is `/c/Users/<you>/AppData/Roaming/ppexchanger/`.
 
-**Windows Firewall** will prompt on first launch when `ppx` binds
-the listening port (default `0.0.0.0:7777`). Allow access when asked,
-or open the port manually. UDP multicast discovery may be silently
+#### Windows Firewall
+
+Windows Firewall will prompt on first launch when `ppx` binds the
+listening port (default `0.0.0.0:7777`). Allow access when asked, or
+open the port manually. UDP multicast discovery may be silently
 dropped by Windows Firewall; the `/discover` command falls back to a
 TCP subnet scan.
 
@@ -200,8 +292,15 @@ binary path uses. Pin a tag the same way as the binary path:
 
 ```sh
 curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh \
-  | bash -s -- --method source --tag v0.3.1
+  | bash -s -- --method source --tag v0.5.0
 ```
+
+> **Windows source builds** additionally need the
+> [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+> ("Desktop development with C++" workload) so `link.exe` is on PATH.
+> Run the installer from **Git Bash** (not PowerShell or cmd) — the
+> `uname -s` detection only recognises `MINGW*`/`MSYS*`/`CYGWIN*`.
+> Full walk-through in the [Windows section](#windows) above.
 
 **Manual** — clone + build, no installer:
 
