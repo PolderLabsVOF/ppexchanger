@@ -1,4 +1,4 @@
-//! `lanchat` CLI entrypoint.
+//! `ppexchanger` CLI entrypoint.
 //!
 //! Modes:
 //!   * `--help`              print usage
@@ -11,16 +11,17 @@
 //!   * `--no-mouse`          disable mouse capture
 //!   * no flags              start the TUI
 
-use lanchat::config::{config_dir, identity_path};
-use lanchat::events::{Action, Bus, Event, PeerId, RegistryMsg};
-use lanchat::identity::load_or_create;
-use lanchat::net::discovery::Discovery;
-use lanchat::net::listener;
-use lanchat::net::peer;
-use lanchat::net::session::Session;
-use lanchat::peerdb::PeerDb;
-use lanchat::protocol::{fingerprint as pubkey_fingerprint, Beacon, FrameBody};
-use lanchat::tui::{self, UiConfig, UiState};
+use ppexchanger::config::{config_dir, identity_path};
+use ppexchanger::tui::config::StatusFormat;
+use ppexchanger::events::{Action, Bus, Event, PeerId, RegistryMsg};
+use ppexchanger::identity::load_or_create;
+use ppexchanger::net::discovery::Discovery;
+use ppexchanger::net::listener;
+use ppexchanger::net::peer;
+use ppexchanger::net::session::Session;
+use ppexchanger::peerdb::PeerDb;
+use ppexchanger::protocol::{fingerprint as pubkey_fingerprint, Beacon, FrameBody};
+use ppexchanger::tui::{self, PeerState, UiConfig, UiState};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -37,7 +38,7 @@ fn main() {
     let mut name: Option<String> = None;
     let mut port: u16 = 0;
     let mut mode = Mode::Tui;
-    let mut theme_override: Option<lanchat::tui::ThemeName> = None;
+    let mut theme_override: Option<ppexchanger::tui::ThemeName> = None;
     let mut config_override: Option<PathBuf> = None;
     let mut mouse_override: Option<bool> = None;
     let mut i = 1;
@@ -48,7 +49,7 @@ fn main() {
                 return;
             }
             "--version" | "-V" => {
-                println!("lanchat {}", VERSION);
+                println!("ppexchanger {}", VERSION);
                 return;
             }
             "--name" => {
@@ -79,7 +80,7 @@ fn main() {
                     eprintln!("--theme requires an argument");
                     std::process::exit(2);
                 }
-                match lanchat::tui::ThemeName::parse(&args[i]) {
+                match ppexchanger::tui::ThemeName::parse(&args[i]) {
                     Some(t) => theme_override = Some(t),
                     None => {
                         eprintln!("unknown theme: {}", args[i]);
@@ -122,12 +123,12 @@ enum Mode {
 
 fn print_help() {
     println!(
-        "lanchat {version} — fully-local LAN P2P encrypted terminal messenger\n\
+        "ppexchanger {version} — fully-local LAN P2P encrypted terminal messenger\n\
          \n\
-         USAGE:\n  lanchat [--name <name>] [--port <port>] [--theme <name>] [--config <path>] [--no-mouse]\n  lanchat --gen-identity\n  lanchat --help | --version\n\
+         USAGE:\n  ppx [--name <name>] [--port <port>] [--theme <name>] [--config <path>] [--no-mouse]\n  ppx --gen-identity\n  ppx --help | --version\n\
          \n\
-         OPTIONS:\n  --name <name>     display name (overrides stored)\n  --port <port>     TCP listen port (0 = ephemeral)\n  --theme <name>    default|solarized|monochrome|neon|amber\n  --config <path>   path to config.toml (default: $XDG_CONFIG_HOME/lanchat/config.toml on
-                    Linux/macOS, %APPDATA%\\lanchat\\config.toml on Windows)\n  --no-mouse        disable mouse capture (mouse is ON by default)\n  --gen-identity    generate a new identity and exit\n  --help, -h        print this help\n  --version, -V     print version",
+         OPTIONS:\n  --name <name>     display name (overrides stored)\n  --port <port>     TCP listen port (0 = ephemeral)\n  --theme <name>    default|solarized|monochrome|neon|amber\n  --config <path>   path to config.toml (default: $XDG_CONFIG_HOME/ppexchanger/config.toml on
+                    Linux/macOS, %APPDATA%\\ppexchanger\\config.toml on Windows)\n  --no-mouse        disable mouse capture (mouse is ON by default)\n  --gen-identity    generate a new identity and exit\n  --help, -h        print this help\n  --version, -V     print version",
         version = VERSION
     );
 }
@@ -136,10 +137,21 @@ fn run(
     mode: Mode,
     name: Option<String>,
     port: u16,
-    theme_override: Option<lanchat::tui::ThemeName>,
+    theme_override: Option<ppexchanger::tui::ThemeName>,
     config_override: Option<PathBuf>,
     mouse_override: Option<bool>,
 ) {
+    // First-run migration from the v0.4.x `lanchat/` config dir. Best-effort:
+    // a permission error just prints to stderr and we continue with the new
+    // (empty) dir. Idempotent — a no-op once the files have been copied.
+    if let Ok(true) = ppexchanger::config::migrate_legacy_config() {
+        eprintln!(
+            "migrated legacy lanchat config → {}",
+            ppexchanger::config::config_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|_| "<unknown>".into())
+        );
+    }
     let id = load_or_create(name).unwrap_or_else(|e| {
         eprintln!("failed to load identity: {}", e);
         std::process::exit(1);
@@ -170,7 +182,7 @@ fn hex(b: &[u8]) -> String {
 
 /// Persist the current UI config to disk. Best-effort: a permission error
 /// just posts an Event::Info warning instead of crashing the TUI.
-fn save_ui_config(cfg: &lanchat::tui::UiConfig, path: &std::path::Path) -> std::io::Result<()> {
+fn save_ui_config(cfg: &ppexchanger::tui::UiConfig, path: &std::path::Path) -> std::io::Result<()> {
     let body = format_ui_config(cfg);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -178,14 +190,8 @@ fn save_ui_config(cfg: &lanchat::tui::UiConfig, path: &std::path::Path) -> std::
     std::fs::write(path, body)
 }
 
-fn format_ui_config(cfg: &lanchat::tui::UiConfig) -> String {
-    let mut out = String::from("# lanchat UI config — generated, edits preserved on next /theme\n");
-    out.push_str("[ui]\n");
-    out.push_str(&format!("theme = \"{}\"\n", cfg.theme.as_str()));
-    out.push_str(&format!("show_footer = {}\n", cfg.show_footer));
-    out.push_str(&format!("mouse = {}\n", cfg.mouse));
-    out.push_str(&format!("scrollback = {}\n", cfg.scrollback));
-    out
+fn format_ui_config(cfg: &ppexchanger::tui::UiConfig) -> String {
+    cfg.to_toml()
 }
 
 fn default_config_path() -> PathBuf {
@@ -193,9 +199,9 @@ fn default_config_path() -> PathBuf {
 }
 
 fn start_tui(
-    id: lanchat::identity::Identity,
+    id: ppexchanger::identity::Identity,
     port: u16,
-    theme_override: Option<lanchat::tui::ThemeName>,
+    theme_override: Option<ppexchanger::tui::ThemeName>,
     config_override: Option<PathBuf>,
     mouse_override: Option<bool>,
 ) {
@@ -209,8 +215,8 @@ fn start_tui(
         ui_cfg.mouse = m;
     }
 
-    let theme = lanchat::tui::Theme::by_name(ui_cfg.theme);
-    let glyphs = lanchat::tui::detect_glyphs();
+    let theme = ppexchanger::tui::Theme::by_name(ui_cfg.theme);
+    let glyphs = ppexchanger::tui::detect_glyphs();
 
     let bus = Bus::new();
     let state = Arc::new(Mutex::new({
@@ -259,7 +265,7 @@ fn start_tui(
 
     // Wrap the static keypair in Arc so listener/handshake threads can share
     // it without cloning the inner struct (Keypair is intentionally not Clone).
-    let static_kp: Arc<lanchat::crypto::Keypair> = Arc::new(id.keypair);
+    let static_kp: Arc<ppexchanger::crypto::Keypair> = Arc::new(id.keypair);
 
     // Listener thread: accepts inbound TCP, runs responder handshake,
     // hands the outbound sender to the action thread via RegistryMsg,
@@ -283,7 +289,7 @@ fn start_tui(
                         let inbound_tx_for_driver = inbound_tx_for_listener.clone();
                         thread::spawn(move || {
                             let mut s = stream;
-                            match lanchat::net::handshake::run_responder(&mut s, &kp2) {
+                            match ppexchanger::net::handshake::run_responder(&mut s, &kp2) {
                                 Ok(res) => {
                                     let session = Session::new(
                                         s,
@@ -291,7 +297,7 @@ fn start_tui(
                                         res.recv_key,
                                         res.remote_static,
                                     );
-                                    let peer_id = lanchat::net::listener::peer_id_from_pubkey(
+                                    let peer_id = ppexchanger::net::listener::peer_id_from_pubkey(
                                         &session.remote_static,
                                     );
                                     let fp = res.remote_fingerprint.clone();
@@ -355,10 +361,10 @@ fn start_tui(
         thread::spawn(move || {
             let mut outbound: HashMap<PeerId, mpsc::Sender<FrameBody>> = HashMap::new();
             let mut peer_names: HashMap<PeerId, String> = HashMap::new();
-            let mut outbox: lanchat::net::file_xfer::OutboundMap =
-                lanchat::net::file_xfer::OutboundMap::new();
-            let mut inbox: lanchat::net::file_xfer::InboundMap =
-                lanchat::net::file_xfer::InboundMap::new();
+            let mut outbox: ppexchanger::net::file_xfer::OutboundMap =
+                ppexchanger::net::file_xfer::OutboundMap::new();
+            let mut inbox: ppexchanger::net::file_xfer::InboundMap =
+                ppexchanger::net::file_xfer::InboundMap::new();
             while !act_stop.load(Ordering::Relaxed) {
                 // Poll the action channel with a short timeout so we can
                 // also drain the registry + inbound-file channels
@@ -459,7 +465,7 @@ fn start_tui(
                             .get(&to)
                             .cloned()
                             .unwrap_or_else(|| hex(&to));
-                        match lanchat::net::file_xfer::OutboundTransfer::open(
+                        match ppexchanger::net::file_xfer::OutboundTransfer::open(
                             to, to_name, path,
                         ) {
                             Ok(t) => {
@@ -583,7 +589,7 @@ fn start_tui(
                 // drivers forward FileOffer / FileChunk / FileDone
                 // straight here.
                 while let Ok(ev) = act_inbound_rx.try_recv() {
-                    use lanchat::events::InboundFileEvent;
+                    use ppexchanger::events::InboundFileEvent;
                     match ev {
                         InboundFileEvent::Offer { peer, offer } => {
                             let from_name = peer_names
@@ -591,7 +597,7 @@ fn start_tui(
                                 .cloned()
                                 .unwrap_or_else(|| hex(&peer));
                             let accepted = inbox.offer(
-                                lanchat::net::file_xfer::InboundTransfer::new(
+                                ppexchanger::net::file_xfer::InboundTransfer::new(
                                     peer, from_name.clone(), offer.clone(),
                                 ),
                             );
@@ -618,7 +624,7 @@ fn start_tui(
                             }
                         }
                         InboundFileEvent::Chunk { peer: _, id, offset, data } => {
-                            use lanchat::net::file_xfer::WriteOutcome;
+                            use ppexchanger::net::file_xfer::WriteOutcome;
                             match inbox.write_chunk(id, offset, data) {
                                 WriteOutcome::Error(reason) => {
                                     if let Some(offer) = inbox.reject(id) {
@@ -640,7 +646,7 @@ fn start_tui(
                             // size for the size check, and use the
                             // peer name from the registry for the
                             // success event.
-                            use lanchat::net::file_xfer::FinalizeOutcome;
+                            use ppexchanger::net::file_xfer::FinalizeOutcome;
                             let expected_size = inbox.offer_size(&id).unwrap_or(u64::MAX);
                             match inbox.finalize(id, expected_size) {
                                 FinalizeOutcome::Done(info) => {
@@ -683,7 +689,7 @@ fn start_tui(
                     });
                 }
                 for result in outbox.step_all(|peer| outbound.get(&peer).cloned()) {
-                    use lanchat::net::file_xfer::StepResult;
+                    use ppexchanger::net::file_xfer::StepResult;
                     match result {
                         StepResult::Completed { peer, to_name, name, bytes } => {
                             let _ = act_bus_tx.send(Event::Info(format!(
@@ -708,9 +714,9 @@ fn start_tui(
     };
 
     // TUI loop.
-    let _guard = tui::TuiGuard::new(ui_cfg.mouse).unwrap();
+    let mut _guard = tui::TuiGuard::new(ui_cfg.mouse).unwrap();
     let mut terminal = tui::enter_terminal(ui_cfg.mouse).unwrap();
-    let mut editor = lanchat::tui::LineEditor::new();
+    let mut editor = ppexchanger::tui::LineEditor::new();
     // Active mutable copy of the config — `/theme` updates it, so we can
     // persist on change without re-reading from disk.
     let mut live_cfg = ui_cfg;
@@ -722,12 +728,37 @@ fn start_tui(
     loop {
         {
             let mut s = state.lock().unwrap();
-            tui::drain_events(&bus.rx_events, &mut s);
+            let text_count = tui::drain_events(&bus.rx_events, &mut s);
             // Stable sidebar ordering: Connected > Seen > Gone, then name.
             s.sort_peers();
+            // Notify-bell: when a fresh chat message arrived and the
+            // user opted in, ring the terminal bell on stderr. Avoids
+            // stdout (which the renderer owns). Fits in one byte so
+            // doing this inline is cheaper than spawning a notifier.
+            if live_cfg.notify_sound && text_count > 0 {
+                let _ = std::io::Write::write_all(&mut std::io::stderr(), b"\x07");
+            }
+            // Auto-trust: when a peer just transitioned to Connected
+            // and the user opted in, post a Trust action immediately
+            // so the contact DB and UI badge flip in one tick. The
+            // action thread re-applies the flag — idempotent because
+            // `set_trusted(true)` is a no-op when already set.
+            if live_cfg.auto_trust_seen {
+                for p in s.peers.iter() {
+                    if matches!(p.state, PeerState::Connected) && !p.trusted {
+                        let _ = bus.tx_actions.send(Action::Trust {
+                            peer_id: p.peer_id,
+                        });
+                    }
+                }
+            }
         }
         {
             let mut s = state.lock().unwrap();
+            // Mirror live cfg bits that the render loop reads. Cheap;
+            // called once per render pass so the footer / settings
+            // reflect every change without per-handler plumbing.
+            s.apply_live_cfg(&live_cfg);
             let view = tui::SettingsView {
                 cfg: Some(&live_cfg),
                 version: VERSION,
@@ -764,12 +795,12 @@ fn start_tui(
                             // Esc — keeping state mutation in one
                             // place.
                             if let Some(editor_ev) = handle_mouse(m, &state, rect) {
-                                if let lanchat::tui::EditorEvent::MenuAction(act) = editor_ev {
+                                if let ppexchanger::tui::EditorEvent::MenuAction(act) = editor_ev {
                                     match act {
-                                        lanchat::tui::MenuAction::Peers => {
+                                        ppexchanger::tui::MenuAction::Peers => {
                                             state.lock().unwrap().focus = tui::Focus::Sidebar;
                                         }
-                                        lanchat::tui::MenuAction::Discover => {
+                                        ppexchanger::tui::MenuAction::Discover => {
                                             state.lock().unwrap().start_discovery();
                                             do_discover(
                                                 announce_beacon.clone(),
@@ -778,13 +809,13 @@ fn start_tui(
                                                 Arc::clone(&stop),
                                             );
                                         }
-                                        lanchat::tui::MenuAction::Settings => {
+                                        ppexchanger::tui::MenuAction::Settings => {
                                             state.lock().unwrap().open_settings(&live_cfg);
                                         }
-                                        lanchat::tui::MenuAction::Help => {
+                                        ppexchanger::tui::MenuAction::Help => {
                                             state.lock().unwrap().show_help = true;
                                         }
-                                        lanchat::tui::MenuAction::Quit => {
+                                        ppexchanger::tui::MenuAction::Quit => {
                                             stop.store(true, Ordering::SeqCst);
                                         }
                                     }
@@ -810,6 +841,7 @@ fn start_tui(
                                     k,
                                     s.settings.as_mut().unwrap(),
                                     &mut live_cfg,
+                                    &mut _guard,
                                 );
                                 let close = k.code == crossterm::event::KeyCode::Esc;
                                 (close, s.settings.as_ref().unwrap().dirty)
@@ -835,7 +867,7 @@ fn start_tui(
                     }
                 } else {
                     match editor.on_key(&ev) {
-                        lanchat::tui::EditorEvent::Submit(text) => {
+                        ppexchanger::tui::EditorEvent::Submit(text) => {
                             if text.starts_with('/') {
                                 handle_command(
                                     &text,
@@ -872,19 +904,19 @@ fn start_tui(
                                 ));
                             }
                         }
-                    lanchat::tui::EditorEvent::Cancel => {
+                    ppexchanger::tui::EditorEvent::Cancel => {
                         let _ = bus.tx_actions.send(Action::Quit);
                         break;
                     }
-                    lanchat::tui::EditorEvent::Quit => {
+                    ppexchanger::tui::EditorEvent::Quit => {
                         let _ = bus.tx_actions.send(Action::Quit);
                         break;
                     }
-                    lanchat::tui::EditorEvent::FocusNext => {
+                    ppexchanger::tui::EditorEvent::FocusNext => {
                         let mut s = state.lock().unwrap();
                         s.cycle_focus();
                     }
-                    lanchat::tui::EditorEvent::ToggleTrust => {
+                    ppexchanger::tui::EditorEvent::ToggleTrust => {
                         let pid = {
                             let s = state.lock().unwrap();
                             s.selected().map(|p| p.peer_id)
@@ -893,7 +925,7 @@ fn start_tui(
                             let _ = bus.tx_actions.send(Action::Trust { peer_id: pid });
                         }
                     }
-                    lanchat::tui::EditorEvent::RevokePeer => {
+                    ppexchanger::tui::EditorEvent::RevokePeer => {
                         let pid = {
                             let s = state.lock().unwrap();
                             s.selected().map(|p| p.peer_id)
@@ -902,22 +934,22 @@ fn start_tui(
                             let _ = bus.tx_actions.send(Action::Revoke { peer_id: pid });
                         }
                     }
-                    lanchat::tui::EditorEvent::NewChat => {
+                    ppexchanger::tui::EditorEvent::NewChat => {
                         // For v1 this is a no-op visual hint; peer selection
                         // is via Up/Down on the sidebar after Tab.
                         let _ = bus.tx_events.send(Event::Info(
                             "use Tab to focus the sidebar, then Up/Down to pick a peer".into(),
                         ));
                     }
-                    lanchat::tui::EditorEvent::ToggleHelp => {
+                    ppexchanger::tui::EditorEvent::ToggleHelp => {
                         let mut s = state.lock().unwrap();
                         s.show_help = !s.show_help;
                     }
-                    lanchat::tui::EditorEvent::OpenSettings => {
+                    ppexchanger::tui::EditorEvent::OpenSettings => {
                         let mut s = state.lock().unwrap();
                         s.open_settings(&live_cfg);
                     }
-                    lanchat::tui::EditorEvent::PageUp => {
+                    ppexchanger::tui::EditorEvent::PageUp => {
                         let mut s = state.lock().unwrap();
                         if s.focus == tui::Focus::Chat {
                             s.scroll_back(5);
@@ -925,7 +957,7 @@ fn start_tui(
                             s.move_selection(-1);
                         }
                     }
-                    lanchat::tui::EditorEvent::PageDown => {
+                    ppexchanger::tui::EditorEvent::PageDown => {
                         let mut s = state.lock().unwrap();
                         if s.focus == tui::Focus::Chat {
                             s.scroll_forward(5);
@@ -933,8 +965,8 @@ fn start_tui(
                             s.move_selection(1);
                         }
                     }
-                    lanchat::tui::EditorEvent::ClearInput
-                    | lanchat::tui::EditorEvent::Clear => {
+                    ppexchanger::tui::EditorEvent::ClearInput
+                    | ppexchanger::tui::EditorEvent::Clear => {
                         // Editor already cleared its buffer. If a modal is
                         // open, Esc also closes it. The settings popup
                         // routes Esc through `route_settings_key`, so this
@@ -949,11 +981,11 @@ fn start_tui(
                             s.dismiss_logo();
                         }
                     }
-                    lanchat::tui::EditorEvent::HistoryPrev
-                    | lanchat::tui::EditorEvent::HistoryNext
-                    | lanchat::tui::EditorEvent::Edited
-                    | lanchat::tui::EditorEvent::MenuAction(_)
-                    | lanchat::tui::EditorEvent::None => {}
+                    ppexchanger::tui::EditorEvent::HistoryPrev
+                    | ppexchanger::tui::EditorEvent::HistoryNext
+                    | ppexchanger::tui::EditorEvent::Edited
+                    | ppexchanger::tui::EditorEvent::MenuAction(_)
+                    | ppexchanger::tui::EditorEvent::None => {}
                     }
                     // File-offer modal: Enter accepts, Esc rejects.
                     // Closed by either choice; the FileReceived /
@@ -1008,7 +1040,7 @@ fn start_tui(
     let _ = act_thread.join();
 }
 
-fn make_beacon(id: &lanchat::identity::Identity, tcp_port: u16) -> Beacon {
+fn make_beacon(id: &ppexchanger::identity::Identity, tcp_port: u16) -> Beacon {
     Beacon {
         peer_id: id.peer_id,
         public_key: id.keypair.public_bytes(),
@@ -1022,7 +1054,7 @@ fn make_beacon(id: &lanchat::identity::Identity, tcp_port: u16) -> Beacon {
 /// modal state from those events.
 fn do_discover(
     beacon: Beacon,
-    self_peer_id: lanchat::events::PeerId,
+    self_peer_id: ppexchanger::events::PeerId,
     tx: std::sync::mpsc::Sender<Event>,
     stop: Arc<AtomicBool>,
 ) {
@@ -1051,9 +1083,9 @@ fn do_discover(
     let tx_tcp = tx.clone();
     let tcp_port = beacon.tcp_port;
     thread::spawn(move || {
-        let addrs = match lanchat::net::scan::scan_local_subnet(
+        let addrs = match ppexchanger::net::scan::scan_local_subnet(
             tcp_port,
-            lanchat::net::scan::SCAN_HOSTS,
+            ppexchanger::net::scan::SCAN_HOSTS,
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -1063,7 +1095,7 @@ fn do_discover(
         };
         let peers = addrs
             .into_iter()
-            .map(|a| lanchat::events::DiscoveredPeer {
+            .map(|a| ppexchanger::events::DiscoveredPeer {
                 name: None,
                 addr: std::net::SocketAddr::V4(a),
                 fingerprint: None,
@@ -1085,11 +1117,11 @@ fn multicast_scan(
     beacon: &Beacon,
     stop: &Arc<AtomicBool>,
     window: Duration,
-) -> std::io::Result<Vec<lanchat::events::DiscoveredPeer>> {
+) -> std::io::Result<Vec<ppexchanger::events::DiscoveredPeer>> {
     let d = Discovery::bind(0)?;
     let _ = d.announce(beacon);
     let deadline = std::time::Instant::now() + window;
-    let mut seen: std::collections::HashMap<lanchat::events::PeerId, lanchat::events::DiscoveredPeer> =
+    let mut seen: std::collections::HashMap<ppexchanger::events::PeerId, ppexchanger::events::DiscoveredPeer> =
         std::collections::HashMap::new();
     while std::time::Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
         if let Ok(Some((src, b))) = d.recv_beacon() {
@@ -1097,7 +1129,7 @@ fn multicast_scan(
                 continue;
             }
             let tcp_addr: SocketAddr = (src.ip(), b.tcp_port).into();
-            seen.entry(b.peer_id).or_insert(lanchat::events::DiscoveredPeer {
+            seen.entry(b.peer_id).or_insert(ppexchanger::events::DiscoveredPeer {
                 name: if b.name.is_empty() { None } else { Some(b.name) },
                 addr: tcp_addr,
                 fingerprint: Some(pubkey_fingerprint(&b.public_key)),
@@ -1120,7 +1152,7 @@ fn handle_mouse(
     m: crossterm::event::MouseEvent,
     state: &Arc<Mutex<UiState>>,
     size: ratatui::layout::Rect,
-) -> Option<lanchat::tui::EditorEvent> {
+) -> Option<ppexchanger::tui::EditorEvent> {
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut s = state.lock().unwrap();
     let areas = tui::compute_layout(size);
@@ -1158,7 +1190,7 @@ fn handle_mouse(
                 // Ctrl-, / /. Clicks need access to `live_cfg`, `bus`,
                 // and `running` — only the event loop has those.
                 drop(s);
-                return Some(lanchat::tui::EditorEvent::MenuAction(action));
+                return Some(ppexchanger::tui::EditorEvent::MenuAction(action));
             }
         },
         MouseEventKind::ScrollUp => {
@@ -1245,8 +1277,8 @@ fn handle_command(
     state: &Arc<Mutex<UiState>>,
     cfg: &mut UiConfig,
     cfg_path: &std::path::Path,
-    announce_beacon: &lanchat::protocol::Beacon,
-    self_peer_id: lanchat::events::PeerId,
+    announce_beacon: &ppexchanger::protocol::Beacon,
+    self_peer_id: ppexchanger::events::PeerId,
     stop: Arc<AtomicBool>,
 ) {
     let mut it = line.split_whitespace();
@@ -1318,7 +1350,7 @@ fn handle_command(
                     return;
                 }
             };
-            match lanchat::tui::ThemeName::parse(name) {
+            match ppexchanger::tui::ThemeName::parse(name) {
                 Some(t) => {
                     cfg.theme = t;
                     match save_ui_config(cfg, cfg_path) {
@@ -1380,56 +1412,131 @@ fn handle_command(
 /// owns the lock and persists after `close_after` is reported.
 fn route_settings_key(
     k: &crossterm::event::KeyEvent,
-    st: &mut lanchat::tui::SettingsState,
-    cfg: &mut lanchat::tui::UiConfig,
+    st: &mut ppexchanger::tui::SettingsState,
+    cfg: &mut ppexchanger::tui::UiConfig,
+    guard: &mut ppexchanger::tui::TuiGuard,
 ) {
     use crossterm::event::{KeyCode, KeyModifiers};
-    use lanchat::tui::settings_popup::Tab;
+    use ppexchanger::tui::settings_popup::Tab;
     let code = k.code;
     let mods = k.modifiers;
-    // Number-row tab jump (1/2/3) — works without modifier.
+    // Auto-cancel a stale reset-confirm whenever the user does anything
+    // other than the 'y' that fires it. The earlier guard arm matches
+    // 'y' first; everything else falls through and clears the flag.
+    if st.confirm_reset && !matches!(code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+        st.confirm_reset = false;
+    }
+    // Number-row tab jump (1/2/3/4) — works without modifier.
     if mods == KeyModifiers::NONE || mods == KeyModifiers::SHIFT {
         match code {
             KeyCode::Char('1') => st.switch_tab(Tab::Display),
             KeyCode::Char('2') => st.switch_tab(Tab::Input),
-            KeyCode::Char('3') => st.switch_tab(Tab::About),
+            KeyCode::Char('3') => st.switch_tab(Tab::Behavior),
+            KeyCode::Char('4') => st.switch_tab(Tab::About),
             KeyCode::Left | KeyCode::Char('h') => match st.tab {
                 Tab::Display => match st.selected() {
                     0 => {
                         let _ = st.cycle_theme(-1);
-                        cfg.theme = lanchat::tui::settings_popup::THEME_CHOICES[st.theme_idx];
+                        cfg.theme = ppexchanger::tui::settings_popup::THEME_CHOICES[st.theme_idx];
                     }
                     2 => st.bump_scrollback(cfg, -100),
                     _ => {}
                 },
-                Tab::Input => st.toggle_mouse(cfg),
+                Tab::Input => match st.selected() {
+                    1 => {
+                        // Cycle backwards through status formats.
+                        let cur = cfg.status_format;
+                        let prev = match cur {
+                            StatusFormat::NameOnly => StatusFormat::Off,
+                            StatusFormat::NameAddr => StatusFormat::NameOnly,
+                            StatusFormat::Off => StatusFormat::NameAddr,
+                        };
+                        cfg.status_format = prev;
+                        st.dirty = true;
+                    }
+                                        _ => { st.toggle_mouse(cfg); let _ = guard.set_mouse(cfg.mouse); }
+                },
+                Tab::Behavior => match st.selected() {
+                    2 => {
+                        // Cycle backwards through status formats.
+                        let cur = cfg.status_format;
+                        let prev = match cur {
+                            StatusFormat::NameOnly => StatusFormat::Off,
+                            StatusFormat::NameAddr => StatusFormat::NameOnly,
+                            StatusFormat::Off => StatusFormat::NameAddr,
+                        };
+                        cfg.status_format = prev;
+                        st.dirty = true;
+                    }
+                    _ => {}
+                },
                 Tab::About => {}
             },
             KeyCode::Right | KeyCode::Char('l') => match st.tab {
                 Tab::Display => match st.selected() {
                     0 => {
                         let _ = st.cycle_theme(1);
-                        cfg.theme = lanchat::tui::settings_popup::THEME_CHOICES[st.theme_idx];
+                        cfg.theme = ppexchanger::tui::settings_popup::THEME_CHOICES[st.theme_idx];
                     }
                     2 => st.bump_scrollback(cfg, 100),
                     _ => {}
                 },
-                Tab::Input => st.toggle_mouse(cfg),
+                Tab::Input => match st.selected() {
+                    1 => {
+                        let _ = st.cycle_status_format(cfg);
+                    }
+                                        _ => { st.toggle_mouse(cfg); let _ = guard.set_mouse(cfg.mouse); }
+                },
+                Tab::Behavior => match st.selected() {
+                    2 => {
+                        let _ = st.cycle_status_format(cfg);
+                    }
+                    _ => {}
+                },
                 Tab::About => {}
             },
             KeyCode::Up | KeyCode::Char('k') => st.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => st.move_selection(1),
+            // Reset-confirm: when armed, the next Y fires the reset;
+            // any other key (including Enter) cancels. Pre-empts the
+            // normal Enter handler below so the selected row doesn't
+            // also trigger.
+            KeyCode::Char('y') | KeyCode::Char('Y') if st.confirm_reset => {
+                st.reset_to_defaults(cfg);
+                st.confirm_reset = false;
+            }
             KeyCode::Enter | KeyCode::Char(' ') => match st.tab {
                 Tab::Display => match st.selected() {
                     0 => {
                         let _ = st.cycle_theme(1);
-                        cfg.theme = lanchat::tui::settings_popup::THEME_CHOICES[st.theme_idx];
+                        cfg.theme = ppexchanger::tui::settings_popup::THEME_CHOICES[st.theme_idx];
                     }
                     1 => st.toggle_footer(cfg),
                     2 => st.bump_scrollback(cfg, 100),
+                    3 => st.toggle_notify_sound(cfg),
+                    4 => st.toggle_auto_trust_seen(cfg),
                     _ => {}
                 },
-                Tab::Input => st.toggle_mouse(cfg),
+                Tab::Input => match st.selected() {
+                    0 => { st.toggle_mouse(cfg); let _ = guard.set_mouse(cfg.mouse); }
+                    1 => {
+                        let _ = st.cycle_status_format(cfg);
+                    }
+                    2 => {
+                        // Arm the reset confirm; next 'y' fires, anything
+                        // else cancels via the `_ =>` arm in move_selection.
+                        st.confirm_reset = true;
+                    }
+                    _ => {}
+                },
+                Tab::Behavior => match st.selected() {
+                    0 => st.toggle_notify_sound(cfg),
+                    1 => st.toggle_auto_trust_seen(cfg),
+                    2 => {
+                        let _ = st.cycle_status_format(cfg);
+                    }
+                    _ => {} // custom name edit happens in the input row
+                },
                 Tab::About => {}
             },
             KeyCode::Tab => st.switch_tab(st.tab.next_tab()),
@@ -1446,7 +1553,7 @@ mod tests {
     #[test]
     fn looks_like_existing_file_accepts_real_path() {
         let dir = std::env::temp_dir().join(format!(
-            "lanchat-llf-accept-{}-{}",
+            "ppx-llf-accept-{}-{}",
             std::process::id(),
             rand_u64()
         ));

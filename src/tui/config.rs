@@ -1,17 +1,20 @@
 //! UI configuration loader.
 //!
 //! Reads a tiny subset of TOML from `<config_dir>/config.toml` (XDG
-//! `~/.config/lanchat/config.toml` on Linux/macOS,
-//! `%APPDATA%\lanchat\config.toml` on Windows). We intentionally
+//! `~/.config/ppexchanger/config.toml` on Linux/macOS,
+//! `%APPDATA%\ppexchanger\config.toml` on Windows). We intentionally
 //! hand-roll the parser instead of pulling in a TOML crate: the
 //! supported grammar is a single `[ui]` table with a few keys, all of
 //! which we can parse with a handful of lines.
 //!
 //! Supported keys under `[ui]`:
-//!   theme        = "default" | "solarized" | "monochrome" | "neon" | "amber"
-//!   show_footer  = true | false
-//!   mouse        = true | false
-//!   scrollback   = <integer>
+//!   theme             = "default" | "solarized" | "monochrome" | "neon" | "amber"
+//!   show_footer       = true | false
+//!   mouse             = true | false
+//!   scrollback        = <integer>
+//!   notify_sound      = true | false
+//!   auto_trust_seen   = true | false
+//!   status_format     = "name" | "name+addr" | "off"
 //!
 //! Lines starting with `#` are comments. Unknown keys are silently ignored.
 //! Missing file → defaults.
@@ -25,12 +28,55 @@ pub const DEFAULT_SCROLLBACK: usize = 500;
 /// Hard cap so a misconfigured file can't request an unbounded buffer.
 pub const MAX_SCROLLBACK: usize = 50_000;
 
+/// What the footer status line shows. `Off` hides it entirely; the other
+/// two modes are obvious from the name. Persisted as a string in TOML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusFormat {
+    NameOnly,
+    NameAddr,
+    Off,
+}
+
+impl StatusFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StatusFormat::NameOnly => "name",
+            StatusFormat::NameAddr => "name+addr",
+            StatusFormat::Off => "off",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "name" => Some(StatusFormat::NameOnly),
+            "name+addr" | "name_addr" | "name-addr" => Some(StatusFormat::NameAddr),
+            "off" => Some(StatusFormat::Off),
+            _ => None,
+        }
+    }
+}
+
+impl Default for StatusFormat {
+    fn default() -> Self {
+        StatusFormat::NameOnly
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UiConfig {
     pub theme: ThemeName,
     pub show_footer: bool,
     pub mouse: bool,
     pub scrollback: usize,
+    /// Emit a terminal bell on inbound messages. Off by default — most
+    /// people don't want their terminal beeping during a quiet chat.
+    pub notify_sound: bool,
+    /// Mark every newly-discovered peer as trusted instead of untrusted.
+    /// Off by default; turning it on is a security regression unless the
+    /// network is fully isolated (e.g. a single-room LAN party).
+    pub auto_trust_seen: bool,
+    /// What the footer status line renders. See `StatusFormat`.
+    pub status_format: StatusFormat,
 }
 
 impl Default for UiConfig {
@@ -44,6 +90,9 @@ impl Default for UiConfig {
             // when you need native drag-select (e.g. inside tmux).
             mouse: true,
             scrollback: DEFAULT_SCROLLBACK,
+            notify_sound: false,
+            auto_trust_seen: false,
+            status_format: StatusFormat::NameOnly,
         }
     }
 }
@@ -101,10 +150,48 @@ impl UiConfig {
                         out.scrollback = n.clamp(16, MAX_SCROLLBACK);
                     }
                 }
+                "notify_sound" => {
+                    if let Some(v) = parse_bool(value) {
+                        out.notify_sound = v;
+                    }
+                }
+                "auto_trust_seen" => {
+                    if let Some(v) = parse_bool(value) {
+                        out.auto_trust_seen = v;
+                    }
+                }
+                "status_format" => {
+                    if let Some(v) = unquote(value) {
+                        if let Some(f) = StatusFormat::parse(&v) {
+                            out.status_format = f;
+                        }
+                    }
+                }
                 _ => {} // unknown key — ignore
             }
         }
         Some(out)
+    }
+
+    /// Emit the canonical TOML form. Used by both `/theme` and the
+    /// reset-to-defaults flow. The header comment notes the file is
+    /// auto-generated so the user knows hand-edits above the `[ui]`
+    /// header survive a rewrite.
+    pub fn to_toml(&self) -> String {
+        let mut out =
+            String::from("# ppexchanger UI config — generated, edits preserved on next /theme\n");
+        out.push_str("[ui]\n");
+        out.push_str(&format!("theme = \"{}\"\n", self.theme.as_str()));
+        out.push_str(&format!("show_footer = {}\n", self.show_footer));
+        out.push_str(&format!("mouse = {}\n", self.mouse));
+        out.push_str(&format!("scrollback = {}\n", self.scrollback));
+        out.push_str(&format!("notify_sound = {}\n", self.notify_sound));
+        out.push_str(&format!("auto_trust_seen = {}\n", self.auto_trust_seen));
+        out.push_str(&format!(
+            "status_format = \"{}\"\n",
+            self.status_format.as_str()
+        ));
+        out
     }
 }
 
@@ -153,6 +240,10 @@ mod tests {
         // Mouse capture defaults to ON — see Default impl.
         assert!(c.mouse);
         assert_eq!(c.scrollback, DEFAULT_SCROLLBACK);
+        // v0.5.0 settings: all the new toggles default to off / conservative.
+        assert!(!c.notify_sound);
+        assert!(!c.auto_trust_seen);
+        assert_eq!(c.status_format, StatusFormat::NameOnly);
     }
 
     #[test]
@@ -210,7 +301,7 @@ mod tests {
     fn roundtrip_load_or_default() {
         // Write a config with the same shape our main() emitter produces,
         // parse it back, and verify every field survived.
-        let tmp = std::env::temp_dir().join("lanchat-test-config.toml");
+        let tmp = std::env::temp_dir().join("ppexchanger-test-config.toml");
         let _ = std::fs::remove_file(&tmp);
         if let Some(p) = tmp.parent() {
             std::fs::create_dir_all(p).ok();
@@ -229,5 +320,56 @@ scrollback = 1024\n";
         assert!(!loaded.mouse);
         assert_eq!(loaded.scrollback, 1024);
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn parses_new_v050_fields() {
+        let toml = r#"
+            [ui]
+            notify_sound = true
+            auto_trust_seen = yes
+            status_format = "name+addr"
+        "#;
+        let c = UiConfig::parse(toml).unwrap();
+        assert!(c.notify_sound);
+        assert!(c.auto_trust_seen);
+        assert_eq!(c.status_format, StatusFormat::NameAddr);
+    }
+
+    #[test]
+    fn parses_status_format_off_and_name_only() {
+        let c = UiConfig::parse("[ui]\nstatus_format = \"off\"\n").unwrap();
+        assert_eq!(c.status_format, StatusFormat::Off);
+        let c = UiConfig::parse("[ui]\nstatus_format = \"name\"\n").unwrap();
+        assert_eq!(c.status_format, StatusFormat::NameOnly);
+    }
+
+    #[test]
+    fn status_format_unknown_falls_back_to_default() {
+        // An unknown string is ignored — the field stays at the default.
+        let c = UiConfig::parse("[ui]\nstatus_format = \"bogus\"\n").unwrap();
+        assert_eq!(c.status_format, StatusFormat::NameOnly);
+    }
+
+    #[test]
+    fn to_toml_roundtrip_through_parse() {
+        let original = UiConfig {
+            theme: ThemeName::Solarized,
+            show_footer: false,
+            mouse: false,
+            scrollback: 2048,
+            notify_sound: true,
+            auto_trust_seen: false,
+            status_format: StatusFormat::NameAddr,
+        };
+        let toml = original.to_toml();
+        let parsed = UiConfig::parse(&toml).expect("self-emitted TOML must parse");
+        assert_eq!(parsed.theme, original.theme);
+        assert_eq!(parsed.show_footer, original.show_footer);
+        assert_eq!(parsed.mouse, original.mouse);
+        assert_eq!(parsed.scrollback, original.scrollback);
+        assert_eq!(parsed.notify_sound, original.notify_sound);
+        assert_eq!(parsed.auto_trust_seen, original.auto_trust_seen);
+        assert_eq!(parsed.status_format, original.status_format);
     }
 }
