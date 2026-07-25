@@ -70,6 +70,10 @@ OPTIONS:
     --print-target      Print the detected target triple for this host and exit.
     --print-tag         Resolve the latest (or pinned) tag and print it, then exit.
                         Useful in CI:  TAG=\$(curl -fsSL .../install.sh | bash -s -- --print-tag)
+    --firewall          On Windows: add a Windows Firewall inbound-allow rule for
+                        ppx's TCP port (default 7777) so peers on the LAN can dial
+                        in. Requires admin (a UAC prompt will appear). Idempotent.
+                        No-op on Linux/macOS.
     --help              Print this help.
 
 ENV:
@@ -79,6 +83,7 @@ ENV:
     PPX_SKIP_VERIFY         Set to 1 to skip SHA256SUMS verification (not recommended)
     PPX_METHOD              "binary" | "source" | "auto" (default: auto)
     PPX_YES                 Set to 1 to behave as if --yes was passed
+    PPX_FIREWALL            Set to 1 to add the Windows Firewall rule (same as --firewall)
 
 EXAMPLES:
     curl -fsSL https://github.com/${REPO}/releases/latest/download/install.sh | bash
@@ -105,6 +110,8 @@ ASSUME_YES="${PPX_YES:-${LANCHAT_YES:-0}}"
 PRINT_TARGET=0
 PRINT_TAG=0
 METHOD="${PPX_METHOD:-${LANCHAT_METHOD:-auto}}"
+# Default 0; PPX_FIREWALL=1 mirrors the --firewall flag env path.
+FIREWALL="${PPX_FIREWALL:-${LANCHAT_FIREWALL:-0}}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -113,6 +120,7 @@ while [ $# -gt 0 ]; do
         --method)       [ $# -ge 2 ] || die "--method requires an argument"; METHOD="$2"; shift 2 ;;
         --method=*)     METHOD="${1#--method=}"; shift ;;
         --yes)          ASSUME_YES=1; shift ;;
+        --firewall)     FIREWALL=1; shift ;;
         --uninstall)    uninstall ;;
         --print-target) PRINT_TARGET=1; shift ;;
         --print-tag)    PRINT_TAG=1; shift ;;
@@ -368,6 +376,90 @@ install_from_source() {
     install_binary_file "$built"
 }
 
+# Add a Windows Firewall inbound-allow rule for ppx's TCP port so peers
+# on the LAN can dial in. Default Windows policy drops unsolicited
+# inbound, so without this rule /discover shows zero peers even though
+# the host is up and ppx is bound to 7777.
+#
+# Requires admin (a UAC prompt appears via PowerShell Start-Process
+# -Verb RunAs). Idempotent — re-running with an existing rule just
+# overwrites it (the same `name` collapses to a single rule in the
+# Windows firewall store).
+#
+# On non-Windows hosts this is a clean no-op so the --firewall flag is
+# safe to pass unconditionally from a cross-platform script.
+add_firewall_rule() {
+    # Resolve the port: prefer --port from the installer's known port
+    # by sniffing the installed binary's --version output (which prints
+    # the version, not the port). Fall back to 7777 — the default that
+    # every unflagged `ppx` invocation uses.
+    local port=7777
+    # `INSTALLED_VER` is set by `install_binary_file` when the smoke
+    # test passes. The port isn't in the version string, so we use the
+    # default and let users who bound a custom port opt in with the
+    # manual hint shown by /discover.
+    case "$TARGET_TRIPLE" in
+        *-pc-windows-*) ;;
+        *)
+            # Linux / macOS — nothing to do. macOS users on a typical
+            # home LAN won't hit this; consumer routers don't enforce
+            # the same default-deny policy as Windows Firewall.
+            return 0
+            ;;
+    esac
+
+    if ! command -v powershell >/dev/null 2>&1 && ! command -v powershell.exe >/dev/null 2>&1; then
+        warn "powershell not on PATH — skipping firewall rule"
+        warn "run this in an elevated PowerShell to allow inbound:"
+        warn "  netsh advfirewall firewall add rule name=\"ppexchanger (TCP/$port)\" dir=in action=allow protocol=TCP localport=$port profile=private,domain"
+        return 0
+    fi
+
+    log "adding Windows Firewall inbound-allow rule for TCP $port (UAC prompt will appear)..."
+
+    # Write the PowerShell body to a temp file so we don't fight bash
+    # + PowerShell quoting. The body:
+    #  - deletes any existing rule with the same name (idempotent re-run)
+    #  - adds a fresh inbound-allow rule on private+domain profiles
+    #  - exits with the netsh exit code so the outer `Start-Process
+    #    -Wait -PassThru` reports success/failure correctly
+    local ps_file
+    ps_file="$(mktemp -t ppx-fw.XXXXXX.ps1)"
+    cat >"$ps_file" <<EOF
+\$ErrorActionPreference = "Stop"
+\$ruleName = 'ppexchanger (TCP/${port})'
+netsh advfirewall firewall delete rule name="\$ruleName" 2>\$null | Out-Null
+netsh advfirewall firewall add rule name="\$ruleName" dir=in action=allow protocol=TCP localport=${port} profile=private,domain description="Allow LAN peers to dial ppexchanger on TCP ${port}." | Out-Null
+if (\$LASTEXITCODE -ne 0) { throw "netsh add failed: \$LASTEXITCODE" }
+EOF
+
+    # `Start-Process -Verb RunAs` triggers UAC. The outer shell
+    # captures the inner shell's exit code via -Wait -PassThru.
+    local ps_cmd
+    ps_cmd="\$p = Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${ps_file//\\/\\\\}' -Wait -PassThru; if (\$p.ExitCode -ne 0) { exit \$p.ExitCode } else { exit 0 }"
+
+    local fw_out fw_exit
+    fw_out="$(mktemp -t ppx-fw-out.XXXXXX)"
+    if powershell.exe -NoProfile -Command "$ps_cmd" >"$fw_out" 2>&1; then
+        fw_exit=0
+    else
+        fw_exit=$?
+    fi
+    rm -f "$ps_file"
+
+    if [ "$fw_exit" = "0" ]; then
+        ok "firewall rule added: ppexchanger (TCP/$port) — inbound allowed on private/domain profiles"
+    else
+        warn "firewall setup did not complete (UAC declined or PowerShell errored: exit=$fw_exit)"
+        warn "you can still run ppx — peers on the LAN just won't see you until you run:"
+        warn "  netsh advfirewall firewall add rule name=\"ppexchanger (TCP/$port)\" dir=in action=allow protocol=TCP localport=$port profile=private,domain"
+        if [ -s "$fw_out" ]; then
+            warn "details: $(tr '\r\n' ' ' <"$fw_out" | head -c 200)"
+        fi
+    fi
+    rm -f "$fw_out"
+}
+
 # Shared by both paths: stage-source → BIN_PATH move + permission fix +
 # upgrade detection + smoke test. Defined before either caller so the
 # branch at the bottom of the script can call into it cleanly.
@@ -419,6 +511,14 @@ install_binary_file() {
         ok "smoke test: $INSTALLED_VER"
     else
         warn "installed binary did not respond to --version — check $BIN_PATH"
+    fi
+
+    # Windows Firewall rule — opt-in via --firewall. We don't try to be
+    # clever about auto-detecting "did the user mean this?"; the flag
+    # makes intent explicit and a UAC prompt gives the user a final
+    # confirmation. Linux/macOS: clean no-op.
+    if [ "$FIREWALL" = "1" ]; then
+        add_firewall_rule
     fi
 
     if [ "$UPDATE" = "1" ]; then
