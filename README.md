@@ -267,19 +267,39 @@ Windows Firewall blocks inbound connections by default, so a freshly
 installed `ppx` will bind `0.0.0.0:7777` but no peer on the LAN can
 dial in until you allow inbound TCP on that port.
 
-**Automatic (recommended):** reinstall with the firewall helper:
-```sh
-curl -fsSL https://github.com/${REPO}/releases/latest/download/install.sh | bash -s -- --firewall
-```
-A UAC prompt will appear; the rule (`ppexchanger (TCP/7777)`, profile
-private + domain) is added under your admin token. Re-run the same
-command to re-apply or refresh the rule.
+The installer adds the rule for you on Windows. The behavior depends
+on how you invoke it:
 
-**Manual:** open an elevated PowerShell ("Run as administrator") and
-run:
+| invocation                                            | result                                                                                  |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `bash install.sh` (interactive, Windows)              | After the binary is installed, prompts once: runs the UAC-elevated `netsh` add if Y.    |
+| `curl … \| bash -s --` (Windows, non-interactive)     | Skips silently. Prints the manual `netsh` one-liner as a warning so you can finish it. |
+| `curl … \| bash -s -- --firewall` (Windows)           | Always runs the UAC-elevated `netsh` add — no prompt.                                   |
+| `curl … \| bash -s -- --no-firewall` (Windows)        | Suppresses both the prompt and the warning. Use this if you manage rules out-of-band.  |
+| Linux / macOS                                         | No firewall plumbing. The flag is silently ignored.                                    |
+
+The rule written:
+
+```
+Name:        ppexchanger (TCP/7777)
+Direction:   in
+Action:      allow
+Protocol:    TCP
+Local port:  7777
+Profiles:    private, domain
+```
+
+Re-running the installer with `--firewall` overwrites the rule by
+name (Windows firewall store semantics), so updates are idempotent.
+
+**Manual fallback** (if UAC was declined or you ran the non-interactive
+variants above): open an elevated PowerShell ("Run as administrator")
+and run:
+
 ```powershell
 netsh advfirewall firewall add rule name="ppexchanger (TCP/7777)" dir=in action=allow protocol=TCP localport=7777 profile=private,domain
 ```
+
 The same one-liner is also shown in the `/discover` popup if a scan
 returns zero peers — the popup first checks whether the rule is
 already in place so you won't be nagged once the install is healthy.

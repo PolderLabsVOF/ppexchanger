@@ -74,6 +74,14 @@ OPTIONS:
                         ppx's TCP port (default 7777) so peers on the LAN can dial
                         in. Requires admin (a UAC prompt will appear). Idempotent.
                         No-op on Linux/macOS.
+                        Default behavior (no flag): on Windows when stdin is a TTY,
+                        prompt once. On Windows in a non-TTY install (curl|bash),
+                        skip silently and print the manual netsh one-liner as a
+                        warning. Use --no-firewall to suppress even the prompt.
+    --no-firewall       Skip the Windows Firewall step entirely. Suppresses both
+                        the TTY prompt and the manual-netsh warning. Use this
+                        when you manage firewall rules out-of-band (GPO, MDM,
+                        Ansible, etc.).
     --help              Print this help.
 
 ENV:
@@ -83,7 +91,7 @@ ENV:
     PPX_SKIP_VERIFY         Set to 1 to skip SHA256SUMS verification (not recommended)
     PPX_METHOD              "binary" | "source" | "auto" (default: auto)
     PPX_YES                 Set to 1 to behave as if --yes was passed
-    PPX_FIREWALL            Set to 1 to add the Windows Firewall rule (same as --firewall)
+    PPX_FIREWALL            "on" | "off" | "auto" — same as --firewall / --no-firewall / default
 
 EXAMPLES:
     curl -fsSL https://github.com/${REPO}/releases/latest/download/install.sh | bash
@@ -110,8 +118,18 @@ ASSUME_YES="${PPX_YES:-${LANCHAT_YES:-0}}"
 PRINT_TARGET=0
 PRINT_TAG=0
 METHOD="${PPX_METHOD:-${LANCHAT_METHOD:-auto}}"
-# Default 0; PPX_FIREWALL=1 mirrors the --firewall flag env path.
-FIREWALL="${PPX_FIREWALL:-${LANCHAT_FIREWALL:-0}}"
+# Firewall intent. One of: "on" (force-add), "off" (force-skip), "auto"
+# (ask on TTY, warn on non-TTY). Default is "auto" — the install succeeds
+# either way, but a TTY install asks the user once whether to open the
+# firewall rule. A non-TTY install (curl|bash) prints the manual netsh
+# one-liner as a warning so the user can finish it themselves.
+FIREWALL="${PPX_FIREWALL:-${LANCHAT_FIREWALL:-auto}}"
+case "$FIREWALL" in
+    on|off|auto) ;;
+    1|y|yes|true) FIREWALL=on ;;
+    0|n|no|false) FIREWALL=off ;;
+    *) die "PPX_FIREWALL must be 'on', 'off', or 'auto' (got: '$FIREWALL')" ;;
+esac
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -120,7 +138,8 @@ while [ $# -gt 0 ]; do
         --method)       [ $# -ge 2 ] || die "--method requires an argument"; METHOD="$2"; shift 2 ;;
         --method=*)     METHOD="${1#--method=}"; shift ;;
         --yes)          ASSUME_YES=1; shift ;;
-        --firewall)     FIREWALL=1; shift ;;
+        --firewall)     FIREWALL=on; shift ;;
+        --no-firewall)  FIREWALL=off; shift ;;
         --uninstall)    uninstall ;;
         --print-target) PRINT_TARGET=1; shift ;;
         --print-tag)    PRINT_TAG=1; shift ;;
@@ -513,13 +532,52 @@ install_binary_file() {
         warn "installed binary did not respond to --version — check $BIN_PATH"
     fi
 
-    # Windows Firewall rule — opt-in via --firewall. We don't try to be
-    # clever about auto-detecting "did the user mean this?"; the flag
-    # makes intent explicit and a UAC prompt gives the user a final
-    # confirmation. Linux/macOS: clean no-op.
-    if [ "$FIREWALL" = "1" ]; then
-        add_firewall_rule
-    fi
+    # Windows Firewall rule — auto-detected on Windows hosts.
+    #
+    # Decision tree:
+    #   FIREWALL=on   → run add_firewall_rule unconditionally
+    #   FIREWALL=off  → skip silently (also suppress the warning below)
+    #   FIREWALL=auto + Windows + stdin is a TTY → prompt Y/n
+    #   FIREWALL=auto + Windows + non-TTY (curl|bash) → skip + warn
+    #   FIREWALL=auto + Linux/macOS → skip silently
+    #
+    # The TTY prompt gives the user the final say; the non-TTY warning
+    # surfaces the manual netsh one-liner so a curl|bash user knows
+    # what to do. Skipping on non-TTY is the safe default for an
+    # unattended install (CI, package manager, etc.) — those flows
+    # manage the firewall out of band.
+    case "$FIREWALL:$TARGET_TRIPLE" in
+        on:*-pc-windows-*) add_firewall_rule ;;
+        off:*) : ;; # explicitly skipped
+        auto:*-pc-windows-*)
+            if [ -t 0 ]; then
+                # Interactive install — ask once. Default to Yes so a
+                # return key accepts; the user has to actively type n
+                # to refuse. This is the moment a non-technical user
+                # first sees the firewall requirement and decides.
+                local answer
+                printf '%sWindows Firewall is blocking inbound TCP 7777 — peers on the LAN cannot dial in until an inbound-allow rule exists.%s\nAdd a Windows Firewall rule for ppx now? (requires admin, UAC will prompt) [Y/n] ' "$YELLOW" "$RESET"
+                if read -r answer; then
+                    case "${answer:-y}" in
+                        n|N|no|No|NO) : ;; # declined
+                        *)            add_firewall_rule ;;
+                    esac
+                else
+                    warn "could not read stdin — skipping firewall rule"
+                fi
+            else
+                # Non-interactive install (curl|bash). We don't open
+                # UAC dialogs from a non-interactive shell — the user
+                # might not be at the console, and a blocking dialog
+                # would hang the script. Print the manual one-liner so
+                # they can finish it themselves.
+                warn "Windows Firewall rule not added (non-interactive install)."
+                warn "to let LAN peers dial in, run once in an elevated PowerShell:"
+                warn "  netsh advfirewall firewall add rule name=\"ppexchanger (TCP/7777)\" dir=in action=allow protocol=TCP localport=7777 profile=private,domain"
+            fi
+            ;;
+        *) : ;; # auto + non-Windows — silent skip
+    esac
 
     if [ "$UPDATE" = "1" ]; then
         ok "update complete (was ${PREV_VERSION:-unknown} → $TAG_BARE)"
