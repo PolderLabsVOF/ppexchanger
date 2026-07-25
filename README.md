@@ -263,11 +263,31 @@ first run. On Git Bash, that path is `/c/Users/<you>/AppData/Roaming/ppexchanger
 
 #### Windows Firewall
 
-Windows Firewall will prompt on first launch when `ppx` binds the
-listening port (default `0.0.0.0:7777`). Allow access when asked, or
-open the port manually. UDP multicast discovery may be silently
-dropped by Windows Firewall; the `/discover` command falls back to a
-TCP subnet scan.
+Windows Firewall blocks inbound connections by default, so a freshly
+installed `ppx` will bind `0.0.0.0:7777` but no peer on the LAN can
+dial in until you allow inbound TCP on that port.
+
+**Automatic (recommended):** reinstall with the firewall helper:
+```sh
+curl -fsSL https://github.com/${REPO}/releases/latest/download/install.sh | bash -s -- --firewall
+```
+A UAC prompt will appear; the rule (`ppexchanger (TCP/7777)`, profile
+private + domain) is added under your admin token. Re-run the same
+command to re-apply or refresh the rule.
+
+**Manual:** open an elevated PowerShell ("Run as administrator") and
+run:
+```powershell
+netsh advfirewall firewall add rule name="ppexchanger (TCP/7777)" dir=in action=allow protocol=TCP localport=7777 profile=private,domain
+```
+The same one-liner is also shown in the `/discover` popup if a scan
+returns zero peers — the popup first checks whether the rule is
+already in place so you won't be nagged once the install is healthy.
+
+UDP multicast discovery (used by `/discover`) is often blocked even
+when the TCP rule is allowed; in that case the popup falls back to
+the TCP subnet scan, which reaches any peer whose firewall accepts
+inbound TCP/7777.
 
 ### From source
 
