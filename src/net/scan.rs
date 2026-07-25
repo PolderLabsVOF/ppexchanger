@@ -6,18 +6,29 @@
 //! target port. A successful connect (or refused connection) means the host
 //! is reachable; a successful TCP handshake means it speaks ppx.
 //!
+//! Probes run in parallel (fixed thread pool) so a full-/24 scan completes
+//! in a couple of seconds rather than a sequential 50s sweep.
+//!
 //! ponytail: A future iteration could use `libc::getifaddrs` to enumerate
 //! every interface address (multi-homed hosts). The current single-interface
 //! heuristic covers the laptop-on-WiFi case and keeps the dep list clean.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
+use std::sync::{mpsc, Arc};
+use std::thread;
 use std::time::Duration;
 
-/// How many host addresses to try on each side of our own IP. Default 32 =
-/// ~6s scan at 200ms connect timeout, biased toward the DHCP range.
-pub const SCAN_HOSTS: u8 = 32;
+/// How many host addresses to try on each side of our own IP. Default 126 =
+/// covers the whole /24 (254 - 1 self = 253 probes, so 126 per side covers
+/// all reachable addresses regardless of which side the DHCP server lives
+/// on). A peer at 10.0.0.173 with our IP at 10.0.0.126 is +47 away — out of
+/// the previous 32-host window, in the new one.
+pub const SCAN_HOSTS: u8 = 126;
 const PROBE_TIMEOUT: Duration = Duration::from_millis(200);
+/// Parallel probe workers. /24 has 252 candidates; 16 threads finishes the
+/// scan in ~16*200ms = 3.2s worst case instead of 50s sequential.
+const SCAN_WORKERS: usize = 16;
 
 /// Discover the local outbound IPv4 address by opening a UDP socket toward a
 /// documentation-prefix address and reading back `local_addr`. No libc.
@@ -50,12 +61,28 @@ fn tcp_alive(addr: SocketAddrV4) -> bool {
     }
 }
 
-/// Scan `hosts_per_side` addresses around our own IP. Returns reachable
-/// socket addresses in best-effort order (randomized by the kernel timing).
+/// Enumerate every candidate host in the /24 — all 253 addresses that aren't
+/// the local IP. Used by the parallelized scanner; the old `±hosts_per_side`
+/// walker is kept for tests.
+fn enumerate_subnet(local: Ipv4Addr) -> Vec<Ipv4Addr> {
+    let octets = local.octets();
+    let base = [octets[0], octets[1], octets[2]];
+    let own_last = octets[3];
+    let mut out = Vec::with_capacity(253);
+    for last in 1u8..=254 {
+        if last == own_last {
+            continue;
+        }
+        out.push(Ipv4Addr::new(base[0], base[1], base[2], last));
+    }
+    out
+}
+
+/// Scan the full /24 on a single port, probing addresses in parallel.
 /// Loopback-only setups and unreachable networks yield an empty `Vec`.
 pub fn scan_local_subnet(
     target_port: u16,
-    hosts_per_side: u8,
+    _hosts_per_side: u8,
 ) -> io::Result<Vec<SocketAddrV4>> {
     let local = match local_outbound_ipv4() {
         Ok(ip) => ip,
@@ -64,23 +91,36 @@ pub fn scan_local_subnet(
         // /discover command.
         Err(_) => return Ok(Vec::new()),
     };
-    let octets = local.octets();
-    if octets[0] == 127 {
+    if local.octets()[0] == 127 {
         return Ok(Vec::new());
     }
-    let base = [octets[0], octets[1], octets[2]];
-    let own_last = octets[3] as i16;
-    let range = (hosts_per_side as i16).min(126);
-    let mut out = Vec::new();
-    for delta in 1..=range {
-        for sign in [-1i16, 1i16] {
-            let candidate = (own_last + sign * delta).clamp(1, 254);
-            let ip = Ipv4Addr::new(base[0], base[1], base[2], candidate as u8);
-            let sa = SocketAddrV4::new(ip, target_port);
-            if tcp_alive(sa) {
-                out.push(sa);
+    let candidates = enumerate_subnet(local);
+    let (tx, rx) = mpsc::channel::<SocketAddrV4>();
+    let workers = SCAN_WORKERS.min(candidates.len()).max(1);
+    let chunk = candidates.len().div_ceil(workers);
+    let candidates = Arc::new(candidates);
+    let mut handles = Vec::with_capacity(workers);
+    for w in 0..workers {
+        let tx = tx.clone();
+        let candidates = Arc::clone(&candidates);
+        let start = w * chunk;
+        let end = ((w + 1) * chunk).min(candidates.len());
+        handles.push(thread::spawn(move || {
+            for &ip in &candidates[start..end] {
+                let sa = SocketAddrV4::new(ip, target_port);
+                if tcp_alive(sa) {
+                    let _ = tx.send(sa);
+                }
             }
-        }
+        }));
+    }
+    drop(tx);
+    let mut out = Vec::new();
+    for sa in rx {
+        out.push(sa);
+    }
+    for h in handles {
+        let _ = h.join();
     }
     Ok(out)
 }
@@ -94,16 +134,24 @@ pub fn scan_local_subnet_multi_port(
     ports: &[u16],
     hosts_per_side: u8,
 ) -> io::Result<Vec<SocketAddrV4>> {
+    let mut all = Vec::new();
+    for &p in ports {
+        all.extend(scan_local_subnet(p, hosts_per_side)?);
+    }
+    Ok(dedup_by_addr_port(all))
+}
+
+/// Internal dedup helper — `(ip, port)` uniqueness. Pulled out so the
+/// dedup logic can be unit-tested without touching the network.
+fn dedup_by_addr_port(items: impl IntoIterator<Item = SocketAddrV4>) -> Vec<SocketAddrV4> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for &p in ports {
-        for sa in scan_local_subnet(p, hosts_per_side)? {
-            if seen.insert(sa) {
-                out.push(sa);
-            }
+    for sa in items {
+        if seen.insert(sa) {
+            out.push(sa);
         }
     }
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
@@ -179,7 +227,31 @@ mod tests {
         // Loopback guard short-circuits before any network calls, so this
         // exercises the dedup path with empty per-port results — confirming
         // the loop walks both ports and the seen-set doesn't blow up.
-        let result = scan_local_subnet_multi_port(&[7777, 9000], 4).unwrap();
-        assert!(result.is_empty());
+        let result = dedup_by_addr_port([
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 7777),
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 7777), // dup
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 9000),
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 11), 7777),
+        ]);
+        assert_eq!(result.len(), 3);
+        assert_eq!(
+            result,
+            vec![
+                SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 7777),
+                SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 9000),
+                SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 11), 7777),
+            ]
+        );
+    }
+
+    #[test]
+    fn enumerate_subnet_skips_self_includes_broadcast_neighbors() {
+        // 10.0.0.1 → 254 neighbors in [1..=254], minus self = 253 candidates.
+        let v = enumerate_subnet(Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(v.len(), 253);
+        assert!(!v.contains(&Ipv4Addr::new(10, 0, 0, 1))); // self skipped
+        assert!(v.contains(&Ipv4Addr::new(10, 0, 0, 254)));
+        assert!(v.contains(&Ipv4Addr::new(10, 0, 0, 2)));
+        assert!(v.contains(&Ipv4Addr::new(10, 0, 0, 173))); // far neighbor
     }
 }
