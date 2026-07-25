@@ -250,6 +250,10 @@ fn start_tui(
         }
     };
     let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+    // Plumb the bound port into the UI state so the discovery-empty
+    // hint can render the exact firewall one-liner the user needs to
+    // run (port must match what `ppx` actually bound).
+    state.lock().unwrap().bound_port = bound_port;
     bus.tx_events
         .send(Event::Info(format!("listening on 0.0.0.0:{}", bound_port)))
         .ok();

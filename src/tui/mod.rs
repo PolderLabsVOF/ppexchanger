@@ -144,6 +144,10 @@ pub struct UiState {
     /// the main loop redraws on every event/poll which is fast enough
     /// to look continuous on a 60Hz terminal.
     pub scanline_tick: bool,
+    /// TCP port we bound for inbound peer connections. Used by the
+    /// discovery-empty hint so the firewall one-liner matches the actual
+    /// listen port (default 7777, custom if the user passed `--port`).
+    pub bound_port: u16,
     /// How many lines back from the latest message we're scrolled. `0` =
     /// pinned to bottom (latest).
     pub scroll: usize,
@@ -162,6 +166,11 @@ pub struct DiscoveryState {
     /// Local UI tab: false = list, true = canvas map. Flipped by `2` /
     /// `3` in the popup; not persisted.
     pub view_map: bool,
+    /// One-line hint shown after discovery finishes with zero peers.
+    /// Populated only if we have a useful suggestion (e.g. Windows
+    /// firewall blocking inbound). Stays `None` if the scan is still
+    /// running or found peers.
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +229,7 @@ impl UiState {
             settings: None,
             show_logo: true,
             scanline_tick: false,
+            bound_port: 0,
             scroll: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
         }
@@ -357,6 +367,15 @@ impl UiState {
             Event::DiscoveryFinished => {
                 if let Some(d) = self.discovery.as_mut() {
                     d.running = false;
+                    // If every method came back empty, surface the
+                    // platform-specific hint. Windows users hit this when
+                    // the firewall silently drops inbound TCP — peers on
+                    // the LAN can see us but we can't reach them, so the
+                    // local peer list stays empty. macOS/Linux don't have
+                    // this default-deny issue for home LANs.
+                    if d.results.iter().all(|m| m.peers.is_empty()) {
+                        d.hint = Some(discovery_empty_hint(self.bound_port));
+                    }
                 }
             }
             // File-transfer events. The full file-offer modal lives in
@@ -452,12 +471,36 @@ impl UiState {
                 "running UDP multicast + TCP subnet scan…".into()
             },
             view_map: false,
+            hint: None,
         });
     }
 
     pub fn close_discovery(&mut self) {
         self.discovery = None;
     }
+}
+
+/// Build the user-facing hint for an empty discovery. Windows users
+/// hit this when the firewall is silently dropping inbound — peers on
+/// the LAN can see *us* (we bind 7777) but we can't reach them via
+/// the scan because nothing on the remote side is accepting the
+/// connect. Probe the rule state to avoid nagging users who already
+/// fixed it.
+fn discovery_empty_hint(bound_port: u16) -> String {
+    use crate::net::firewall;
+    if !firewall::SUPPORTED {
+        // Not Windows, or Windows feature not compiled in. The TCP
+        // scan should have found peers on the same /24 — if it didn't,
+        // they're either off, on a different subnet, or the multicast
+        // group is filtered. Generic hint is enough.
+        return "no peers found — check that the other machine is on the same network and running ppx".into();
+    }
+    if firewall::rule_present(bound_port) {
+        // Rule exists — the firewall isn't the problem. Point the user
+        // at the next likely cause instead.
+        return "no peers found — firewall rule is fine; check that the other machine is on the same network and running ppx".into();
+    }
+    firewall::manual_hint(bound_port)
 }
 
 impl UiState {

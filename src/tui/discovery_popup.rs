@@ -87,6 +87,18 @@ pub fn render(
 
     if !state.running {
         lines.push(Line::from(""));
+        if let Some(hint) = &state.hint {
+            // The hint can be multi-line (e.g. the Windows firewall
+            // message includes the netsh command). Push each line on
+            // its own so the popup wraps predictably.
+            for hl in hint.lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", hl),
+                    Style::default().fg(theme.error).bg(theme.bg),
+                )));
+            }
+        }
+        lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  press Esc to close",
             Style::default().fg(theme.info).bg(theme.bg),
