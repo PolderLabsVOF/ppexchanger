@@ -3,8 +3,9 @@
 //! caller-supplied channel.
 
 use crate::crypto::Keypair;
-use crate::net::handshake::run_responder;
+use crate::net::handshake::{run_responder, PROBE_MAGIC};
 use crate::net::session::Session;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -77,10 +78,33 @@ pub fn run(listener: TcpListener, static_kp: Arc<Keypair>, tx: mpsc::Sender<Acce
                 let tx2 = tx.clone();
                 std::thread::spawn(move || {
                     let mut s = stream;
-                    match run_responder(&mut s, &kp) {
+                    // Probe gate: peek for the 4-byte scanner magic. If it
+                    // matches, echo it back and proceed to the handshake.
+                    // If it doesn't, push the 4 bytes back into the stream
+                    // so the legacy handshake (older ppx / unknown clients)
+                    // still sees them as the length prefix it expects.
+                    let mut head = [0u8; 4];
+                    if s.read_exact(&mut head).is_err() {
+                        return;
+                    }
+                    let prefix = if &head == PROBE_MAGIC {
+                        let _ = s.write_all(PROBE_MAGIC);
+                        Vec::new()
+                    } else {
+                        head.to_vec()
+                    };
+                    let mut wrapped = PrefixedStream {
+                        head: &prefix,
+                        inner: s,
+                    };
+                    match run_responder(&mut wrapped, &kp) {
                         Ok(res) => {
-                            let session =
-                                Session::new(s, res.send_key, res.recv_key, res.remote_static);
+                            let session = Session::new(
+                                wrapped.inner,
+                                res.send_key,
+                                res.recv_key,
+                                res.remote_static,
+                            );
                             let _ = tx2.send(AcceptedPeer {
                                 remote_addr: addr,
                                 remote_static: res.remote_static,
@@ -100,5 +124,34 @@ pub fn run(listener: TcpListener, static_kp: Arc<Keypair>, tx: mpsc::Sender<Acce
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
+    }
+}
+
+/// Wrapper that yields a small fixed prefix before delegating to the
+/// underlying stream. Used by the listener to push back the 4 bytes it
+/// peeked at when they didn't match the probe magic.
+struct PrefixedStream<'a> {
+    head: &'a [u8],
+    inner: TcpStream,
+}
+
+impl<'a> Read for PrefixedStream<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if !self.head.is_empty() {
+            let n = buf.len().min(self.head.len());
+            buf[..n].copy_from_slice(&self.head[..n]);
+            self.head = &self.head[n..];
+            return Ok(n);
+        }
+        self.inner.read(buf)
+    }
+}
+
+impl<'a> std::io::Write for PrefixedStream<'a> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }

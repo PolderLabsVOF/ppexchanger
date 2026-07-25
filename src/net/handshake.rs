@@ -62,6 +62,16 @@ const HANDSHAKE_VERSION: u32 = 1;
 const AEAD_TAG: usize = 16;
 const STATIC_LEN: usize = 32;
 
+/// 4-byte magic preamble exchanged by the TCP subnet scanner before the
+/// handshake. The scanner sends `PROBE_MAGIC`, the listener echoes it
+/// back, and only then does the handshake follow. Older ppx peers
+/// (and any non-ppx service) won't echo → scanner drops them.
+///
+/// Layout: anything that doesn't start with these 4 bytes is treated
+/// as a legacy handshake attempt and falls through to the normal
+/// `recv_msg` read path.
+pub const PROBE_MAGIC: &[u8; 4] = b"PPXP";
+
 /// Result of a successful handshake.
 #[derive(Clone)]
 pub struct HandshakeResult {
@@ -152,6 +162,18 @@ fn decrypt_with_ad(ck: &[u8; 32], h: &Sha256, ciphertext: &[u8]) -> std::io::Res
     cipher
         .decrypt(nonce, Payload { msg: ciphertext, aad: &aad })
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "handshake MAC failed"))
+}
+
+/// Initiator-side probe: send `PROBE_MAGIC`, expect the same 4 bytes
+/// back within the caller's socket timeout. Returns `true` iff the
+/// peer is speaking ppx (and is willing to do the handshake).
+pub fn send_probe<S: Read + Write>(stream: &mut S) -> std::io::Result<bool> {
+    stream.write_all(PROBE_MAGIC)?;
+    let mut reply = [0u8; 4];
+    match stream.read_exact(&mut reply) {
+        Ok(()) => Ok(&reply == PROBE_MAGIC),
+        Err(_) => Ok(false),
+    }
 }
 
 // ─── initiator ───────────────────────────────────────────────────────────────

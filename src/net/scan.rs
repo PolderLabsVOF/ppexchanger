@@ -19,6 +19,8 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
+use crate::net::handshake::send_probe;
+
 /// How many host addresses to try on each side of our own IP. Default 126 =
 /// covers the whole /24 (254 - 1 self = 253 probes, so 126 per side covers
 /// all reachable addresses regardless of which side the DHCP server lives
@@ -44,21 +46,19 @@ fn local_outbound_ipv4() -> io::Result<Ipv4Addr> {
     }
 }
 
-/// Try a TCP connect on `addr` and treat any concrete reply — accepted,
-/// refused, or RST — as proof the host is up. A timeout or unreachable ICMP
-/// is treated as absent so noisy WiFi networks don't fill the list with
-/// ghost peers.
-fn tcp_alive(addr: SocketAddrV4) -> bool {
+/// True iff `addr` accepts a TCP connect AND echoes the ppx probe magic
+/// back within `PROBE_TIMEOUT`. The first guard alone caught any TCP
+/// service (SSH, printers, NAS web UI) — the probe magic confirms the
+/// peer is actually running ppx.
+fn is_ppx_peer(addr: SocketAddrV4) -> bool {
     let saddr: SocketAddr = addr.into();
-    match TcpStream::connect_timeout(&saddr, PROBE_TIMEOUT) {
-        Ok(_s) => true,
-        Err(e) => matches!(
-            e.kind(),
-            io::ErrorKind::ConnectionRefused
-                | io::ErrorKind::HostUnreachable
-                | io::ErrorKind::ConnectionAborted
-        ),
-    }
+    let mut stream = match TcpStream::connect_timeout(&saddr, PROBE_TIMEOUT) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
+    send_probe(&mut stream).unwrap_or(false)
 }
 
 /// Enumerate every candidate host in the /24 — all 253 addresses that aren't
@@ -108,7 +108,7 @@ pub fn scan_local_subnet(
         handles.push(thread::spawn(move || {
             for &ip in &candidates[start..end] {
                 let sa = SocketAddrV4::new(ip, target_port);
-                if tcp_alive(sa) {
+                if is_ppx_peer(sa) {
                     let _ = tx.send(sa);
                 }
             }
@@ -184,12 +184,12 @@ mod tests {
     }
 
     #[test]
-    fn tcp_alive_does_not_panic_on_unreachable_host() {
+    fn is_ppx_peer_does_not_panic_on_unreachable_host() {
         // 0.0.0.0:1 — address we definitely can't reach. The probe should
         // either return ConnectionRefused or surface a different error and
         // still return within `PROBE_TIMEOUT`. We only assert it terminates.
         let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 1);
-        let _ = tcp_alive(addr);
+        let _ = is_ppx_peer(addr);
     }
 
     #[test]
@@ -253,5 +253,50 @@ mod tests {
         assert!(v.contains(&Ipv4Addr::new(10, 0, 0, 254)));
         assert!(v.contains(&Ipv4Addr::new(10, 0, 0, 2)));
         assert!(v.contains(&Ipv4Addr::new(10, 0, 0, 173))); // far neighbor
+    }
+
+    #[test]
+    fn is_ppx_peer_accepts_running_listener_and_rejects_silent_one() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+        // Listener half of the probe: read 4 bytes, echo them.
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = match l.local_addr().unwrap() {
+            std::net::SocketAddr::V4(v4) => v4,
+            _ => unreachable!("bound on 127.0.0.1"),
+        };
+        let handle = thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut head = [0u8; 4];
+            s.read_exact(&mut head).unwrap();
+            s.write_all(&head).unwrap();
+            // Hold the connection so the scanner has time to read the reply.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+        assert!(is_ppx_peer(addr));
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn is_ppx_peer_rejects_non_ppx_listener() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::thread;
+        // Non-ppx listener: doesn't echo the magic back.
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = match l.local_addr().unwrap() {
+            std::net::SocketAddr::V4(v4) => v4,
+            _ => unreachable!("bound on 127.0.0.1"),
+        };
+        let handle = thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            // Read 4 bytes (the scanner's magic), then close without echoing.
+            let mut buf = [0u8; 4];
+            let _ = std::io::Read::read_exact(&mut s, &mut buf);
+            let _ = s.flush();
+        });
+        assert!(!is_ppx_peer(addr));
+        let _ = handle.join();
     }
 }
