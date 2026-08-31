@@ -1288,7 +1288,12 @@ fn multicast_scan(
     stop: &Arc<AtomicBool>,
     window: Duration,
 ) -> std::io::Result<Vec<ppexchanger::events::DiscoveredPeer>> {
-    let mut d = Discovery::bind(0)?;
+    // Beacons are addressed to the well-known multicast UDP port. Binding an
+    // ephemeral local port here lets us send an announcement, but guarantees
+    // we never receive another machine's reply: UDP delivery is keyed by the
+    // destination port. TCP may use 7777 at the same time; it is a separate
+    // transport namespace.
+    let mut d = Discovery::bind(ppexchanger::net::discovery::MULTICAST_PORT)?;
     let _ = d.announce_both(beacon);
     let deadline = std::time::Instant::now() + window;
     let mut seen: std::collections::HashMap<ppexchanger::events::PeerId, ppexchanger::events::DiscoveredPeer> =
