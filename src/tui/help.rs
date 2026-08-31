@@ -68,6 +68,10 @@ pub fn render(f: &mut Frame, theme: &super::theme::Theme, glyphs: &super::theme:
     f.render_widget(para, popup);
 }
 
+pub fn rect(area: Rect) -> Rect {
+    centered(area)
+}
+
 fn centered(area: Rect) -> Rect {
     let w = POPUP_W.min(area.width);
     let h = POPUP_H.min(area.height);

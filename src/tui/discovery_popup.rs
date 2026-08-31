@@ -134,6 +134,10 @@ pub fn render(
     f.render_widget(para, popup);
 }
 
+pub fn rect(area: Rect) -> Rect {
+    centered(area)
+}
+
 fn short_fp(fp: &str) -> String {
     if fp.len() <= 12 {
         fp.to_string()
@@ -186,7 +190,7 @@ pub fn render_map(
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Double)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border_active))
         .title(Span::styled(
             title,

@@ -8,7 +8,7 @@
 //! Widgets in active rotation here:
 //!   * `Tabs` for sub-navigation
 //!   * `Table` + `TableState` for the toggle rows
-//!   * `Block::bordered().border_type(Double)` for the modal frame
+//!   * `Block::bordered().border_type(Rounded)` for the modal frame
 //!   * `Clear` for the modal background fill
 
 use crate::tui::config::{StatusFormat, UiConfig};
@@ -43,6 +43,15 @@ pub enum Tab {
     Input,
     Behavior,
     About,
+}
+
+/// Click targets exposed to the event loop. Keeping geometry here ensures
+/// mouse selection follows the same layout as the rendered settings panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseTarget {
+    Tab(Tab),
+    Row(usize),
+    Close,
 }
 
 impl Tab {
@@ -89,6 +98,10 @@ pub struct SettingsState {
     /// Set when a mutation occurred; cleared on save. Mirrors the
     /// `apply-on-change` pattern `/theme` uses for the legacy code path.
     pub dirty: bool,
+    /// Editable local display name. This persists to the identity record,
+    /// rather than `config.toml`, when the dialog closes.
+    pub name_draft: String,
+    pub editing_name: bool,
     /// Runtime-only data the popup can't derive from `UiConfig`: build
     /// target triple, connected peer count, last-seen timestamp. The
     /// caller (the main loop) refreshes these on every render frame.
@@ -107,6 +120,8 @@ impl SettingsState {
             theme_idx,
             confirm_reset: false,
             dirty: false,
+            name_draft: String::new(),
+            editing_name: false,
             extra: SettingsExtras::default(),
         }
     }
@@ -228,6 +243,32 @@ pub fn centered(area: Rect) -> Rect {
         .split(vert[1])[1]
 }
 
+pub fn mouse_target(area: Rect, col: u16, row: u16, state: &SettingsState) -> Option<MouseTarget> {
+    let popup = centered(area);
+    if col < popup.x || col >= popup.right() || row < popup.y || row >= popup.bottom() {
+        return None;
+    }
+    let inner = Block::default().borders(Borders::ALL).inner(popup);
+    if row == inner.y {
+        let tab_width = (inner.width / Tab::ALL.len() as u16).max(1);
+        let idx = ((col.saturating_sub(inner.x)) / tab_width) as usize;
+        return Tab::ALL.get(idx.min(Tab::ALL.len() - 1)).copied().map(MouseTarget::Tab);
+    }
+    if row == inner.bottom().saturating_sub(1) {
+        return Some(MouseTarget::Close);
+    }
+    // The table header consumes the first table line; settings rows start
+    // immediately below it and are all one terminal row high.
+    let first_row = inner.y.saturating_add(2);
+    if row >= first_row {
+        let idx = (row - first_row) as usize;
+        if idx < state.rows_in_tab() {
+            return Some(MouseTarget::Row(idx));
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
@@ -246,13 +287,15 @@ pub fn render(
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Double)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border_active))
         .title(Line::from(ratatui::text::Span::styled(
             " settings ",
             Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         )));
 
+    // Keep content inside the rounded frame rather than drawing through it.
+    let inner = block.inner(popup);
     // Split into tab strip + table + footer hint.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -261,7 +304,7 @@ pub fn render(
             Constraint::Min(3),    // table
             Constraint::Length(1), // footer hint
         ])
-        .split(popup);
+        .split(inner);
 
     // Tab strip — three labels with the active one in accent.
     let tab_titles: Vec<Line> = Tab::ALL
@@ -318,10 +361,10 @@ pub fn render(
 
     // Footer hint.
     let hint = match state.tab {
-        Tab::Display => " ←/→ change   Enter toggle   Esc save & close ",
-        Tab::Input => " ←/→ toggle   Enter activate   Esc save & close ",
-        Tab::Behavior => " ←/→ change   Enter toggle   Esc save & close ",
-        Tab::About => " Esc close ",
+        Tab::Display => " click a row to change · click here or Esc to save & close ",
+        Tab::Input => " click a row to change · click here or Esc to save & close ",
+        Tab::Behavior => " click a row to change · click here or Esc to save & close ",
+        Tab::About => " click here or Esc to close ",
     };
     f.render_widget(
         Paragraph::new(Line::from(ratatui::text::Span::styled(
@@ -435,9 +478,13 @@ fn rows_for_tab(
                     "←/→ cycles",
                 ),
                 mk(
-                    "Custom display name",
-                    display_name_or_default(cfg_display_name(cfg)).to_string(),
-                    "Enter to edit",
+                    "Display name",
+                    if state.editing_name {
+                        format!("{}▏", state.name_draft)
+                    } else {
+                        state.name_draft.clone()
+                    },
+                    if state.editing_name { "type · Enter saves" } else { "Enter to edit" },
                 ),
             ];
             (rows, widths)
@@ -481,8 +528,8 @@ fn rows_for_tab(
                     Cell::from(""),
                 ]),
                 Row::new(vec![
-                    Cell::from("Custom name").style(label_style),
-                    Cell::from(display_name_or_default(cfg_display_name(cfg))).style(value_style),
+                    Cell::from("Display name").style(label_style),
+                    Cell::from(state.name_draft.clone()).style(value_style),
                     Cell::from(""),
                 ]),
             ];
@@ -498,21 +545,6 @@ pub struct SettingsExtras {
     pub build_target: &'static str,
     pub connected_count: usize,
     pub last_seen_unix: u64,
-}
-
-fn cfg_display_name(_cfg: &UiConfig) -> Option<&str> {
-    // Display-name override is runtime-only, not stored in UiConfig.
-    // The caller (`render`) injects the override via a setter on
-    // SettingsState before rendering. We surface a placeholder here so
-    // the row column width stays consistent.
-    None
-}
-
-fn display_name_or_default(name: Option<&str>) -> String {
-    match name {
-        Some(s) if !s.is_empty() => s.to_string(),
-        _ => "(identity: <see /help>)".to_string(),
-    }
 }
 
 /// Format the hex fingerprint as `xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx`
@@ -642,6 +674,27 @@ mod tests {
         assert_eq!(s.rows_in_tab(), 4);
         s.tab = Tab::About;
         assert_eq!(s.rows_in_tab(), 8);
+    }
+
+    #[test]
+    fn mouse_target_selects_tabs_rows_and_footer() {
+        let mut state = SettingsState::new(&mk_cfg());
+        let area = Rect::new(0, 0, 100, 30);
+        let popup = centered(area);
+        let inner = Block::default().borders(Borders::ALL).inner(popup);
+        assert_eq!(
+            mouse_target(area, inner.x + inner.width / 2, inner.y, &state),
+            Some(MouseTarget::Tab(Tab::Behavior))
+        );
+        state.tab = Tab::Behavior;
+        assert_eq!(
+            mouse_target(area, inner.x + 2, inner.y + 3, &state),
+            Some(MouseTarget::Row(1))
+        );
+        assert_eq!(
+            mouse_target(area, inner.x + 2, inner.bottom() - 1, &state),
+            Some(MouseTarget::Close)
+        );
     }
 
     #[test]

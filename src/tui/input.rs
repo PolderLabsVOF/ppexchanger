@@ -69,6 +69,29 @@ use std::collections::VecDeque;
 
 const HISTORY_CAP: usize = 64;
 
+/// Commands surfaced by the inline command palette. Keep this catalogue next
+/// to completion so the preview and Tab behavior can never drift apart.
+pub const COMMANDS: &[(&str, &str)] = &[
+    ("/discover", "find peers on the local network"),
+    ("/map", "toggle the discovery peer map"),
+    ("/peers", "show known peers"),
+    ("/trust", "trust a peer: /trust <name>"),
+    ("/revoke", "revoke a peer: /revoke <name>"),
+    ("/theme", "change the color theme"),
+    ("/send", "send a file: /send <path>"),
+    ("/settings", "open settings"),
+    ("/quit", "quit ppexchanger"),
+];
+
+pub fn command_matches(input: &str) -> Vec<(&'static str, &'static str)> {
+    let query = input.split_whitespace().next().unwrap_or(input);
+    COMMANDS
+        .iter()
+        .copied()
+        .filter(|(command, _)| command.starts_with(query))
+        .collect()
+}
+
 /// Hard cap on a single pasted payload, in bytes. 1 MiB is well above
 /// any sane paste (a screenshot's worth of text, a config file dump)
 /// but small enough that a "I pasted an entire log file by accident"
@@ -142,6 +165,7 @@ impl LineEditor {
         }
         if *modifiers == KeyModifiers::NONE {
             match code {
+                KeyCode::Tab if self.buffer.starts_with('/') => return self.complete_command(),
                 KeyCode::Tab => return EditorEvent::FocusNext,
                 KeyCode::Esc => {
                     self.clear();
@@ -208,6 +232,23 @@ impl LineEditor {
         self.history.push_back(line.to_string());
     }
 
+    fn complete_command(&mut self) -> EditorEvent {
+        let command_end = self
+            .buffer
+            .find(char::is_whitespace)
+            .unwrap_or(self.buffer.len());
+        let query = self.buffer[..command_end].to_string();
+        let Some((command, _)) = command_matches(&query).first().copied() else {
+            return EditorEvent::None;
+        };
+        let suffix = self.buffer[command_end..].to_string();
+        self.buffer = format!("{}{}", command, suffix);
+        if suffix.is_empty() && command != query {
+            self.buffer.push(' ');
+        }
+        EditorEvent::Edited
+    }
+
     /// Step the history cursor. `delta == -1` is older, `+1` is newer.
     fn recall_history(&mut self, delta: i32) -> EditorEvent {
         if self.history.is_empty() {
@@ -271,6 +312,15 @@ mod tests {
         let mut ed = LineEditor::new();
         let ev = ed.on_key(&press(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(ev, EditorEvent::FocusNext);
+    }
+
+    #[test]
+    fn tab_completes_a_slash_command() {
+        let mut ed = LineEditor::new();
+        ed.buffer = "/disc".into();
+        assert_eq!(ed.on_key(&press(KeyCode::Tab, KeyModifiers::NONE)), EditorEvent::Edited);
+        assert_eq!(ed.buffer, "/discover ");
+        assert_eq!(command_matches("/se")[0].0, "/send");
     }
 
     #[test]

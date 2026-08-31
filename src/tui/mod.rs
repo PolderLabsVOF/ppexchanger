@@ -36,26 +36,32 @@ use crate::events::{Event, PeerId};
 use crate::identity::Identity;
 use crate::peerdb::{Contact, PeerDb};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, BorderType, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Scrollbar,
+    ScrollbarOrientation, ScrollbarState, Wrap,
+};
 use ratatui::Terminal;
 use std::collections::VecDeque;
 use std::io::{stdout, Stdout};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Layout constants shared between `render()` and `hit_test()`. The
-/// sidebar column is 24 cells wide; the body row is at least 3 cells
-/// tall. Changing these constants in one place is enough.
-const SIDEBAR_WIDTH: u16 = 24;
-const FOOTER_HEIGHT: u16 = 3;
+/// sidebar has room for connection metadata; the body always retains a
+/// usable chat region. Changing these constants in one place is enough.
+const SIDEBAR_WIDTH: u16 = 30;
+/// A focused message field plus an unboxed status/action line. Slash-command
+/// suggestions render above it in the chat pane.
+const FOOTER_HEIGHT: u16 = 5;
 const BODY_MIN_HEIGHT: u16 = 3;
-/// Menu bar height. One row holding clickable buttons (Peers / Discover /
-/// Settings / Help / Quit). Pinned — never grows.
-const MENU_HEIGHT: u16 = 1;
+/// The application header has an identity row and a compact navigation row.
+const MENU_HEIGHT: u16 = 4;
+const MENU_BUTTON_WIDTH: u16 = 12;
+const MENU_BUTTON_GAP: u16 = 1;
 
-/// Menu buttons, top to bottom-left order. Used as the click target for
+/// Menu buttons, left-to-right order. Used as the click target for
 /// the menu bar; `Hit::Menu(MenuAction)` returns the variant under the
 /// cursor, and `handle_mouse` routes it to the corresponding slash
 /// command or `EditorEvent` in the main loop.
@@ -118,6 +124,9 @@ pub struct UiState {
     /// Bounded message ring; older entries are dropped when full.
     pub messages: VecDeque<UiMessage>,
     pub status: String,
+    /// The draft displayed in the composer. Keeping it in UI state lets the
+    /// renderer draw a real input field without overloading `status`.
+    pub composer: String,
     pub selected_peer: usize,
     pub focus: Focus,
     pub show_help: bool,
@@ -235,6 +244,7 @@ impl UiState {
             peers: Vec::new(),
             messages: VecDeque::new(),
             status: "starting…".into(),
+            composer: String::new(),
             selected_peer: 0,
             focus: Focus::Chat,
             show_help: false,
@@ -256,7 +266,9 @@ impl UiState {
     /// opening twice is a no-op rather than reset the cursor.
     pub fn open_settings(&mut self, cfg: &crate::tui::UiConfig) {
         if self.settings.is_none() {
-            self.settings = Some(SettingsState::new(cfg));
+            let mut settings = SettingsState::new(cfg);
+            settings.name_draft = self.self_name.clone();
+            self.settings = Some(settings);
         }
     }
 
@@ -720,21 +732,28 @@ pub fn modal_rect(area: Rect) -> Rect {
 /// must match the order `draw_sidebar` iterates in, or click-to-select
 /// will pick the wrong peer.
 pub fn hit_test(
-    screen: Rect,
+    _screen: Rect,
     col: u16,
     row: u16,
     areas: &LayoutAreas,
     modal_open: bool,
     peers_len: usize,
 ) -> Hit {
+    // A popup is modal across the entire screen. This prevents clicks just
+    // outside its rounded frame from selecting a peer or firing navigation
+    // hidden behind it.
+    if modal_open {
+        return Hit::Modal;
+    }
     // Menu row: checked first so menu clicks don't fall through to the
     // sidebar or chat pane underneath. Mirrors draw_menu: 5 buttons of
     // width BUTTON_W = 12 with a 1-cell gap. Clicks past the last
     // button fall through to the regular pane hit-test.
-    if point_in_rect(areas.menu, col, row) {
-        const BUTTON_W: u16 = 12;
-        const GAP: u16 = 1;
-        const STRIDE: u16 = BUTTON_W + GAP;
+    // Buttons occupy the second inner header row only. The identity and
+    // connection gauge above remain informational rather than accidental
+    // click targets.
+    if row == areas.menu.y.saturating_add(2) && point_in_rect(areas.menu, col, row) {
+        const STRIDE: u16 = MENU_BUTTON_WIDTH + MENU_BUTTON_GAP;
         let local_col = col.saturating_sub(areas.menu.x);
         let idx = (local_col / STRIDE) as usize;
         if let Some(action) = match idx {
@@ -748,11 +767,6 @@ pub fn hit_test(
             return Hit::Menu(action);
         }
         // Past the last button — fall through to sidebar/chat.
-    }
-    // Modals always win — they draw over the centre, so any click in
-    // that rect must NOT fall through to the chat pane.
-    if modal_open && point_in_rect(modal_rect(screen), col, row) {
-        return Hit::Modal;
     }
     if point_in_rect(areas.sidebar, col, row) {
         // Sidebar: header (Peers (n)) takes 1 line, border takes the
@@ -872,12 +886,16 @@ pub fn render(
     state.scanline_tick = !state.scanline_tick;
     terminal.draw(|f| {
         let area = f.area();
+        // Paint the complete canvas first. This prevents stale cells when a
+        // message wraps differently after a resize or theme switch.
+        f.render_widget(Block::default().style(theme.style()), area);
         // Single source of truth for the layout — hit_test reuses it.
         let areas = compute_layout(area);
 
         draw_menu(f, areas.menu, state, theme, glyphs);
         draw_sidebar(f, areas.sidebar, state, theme, glyphs);
         draw_chat(f, areas.chat, state, theme, glyphs);
+        draw_command_palette(f, areas.chat, state, theme);
         if state.show_footer {
             draw_footer(f, areas.footer, state, theme, glyphs);
         }
@@ -894,36 +912,6 @@ pub fn render(
         }
         if let Some(p) = &state.file_offer {
             file_offer_popup::render(f, theme, glyphs, p);
-        }
-        // Startup logo: only on a fresh session, only when the chat
-        // pane is empty, AND no modal is open. Without the modal
-        // guard the logo paints over the help / discovery popup,
-        // interleaving art with popup content.
-        let any_modal = state.show_help
-            || state.discovery.is_some()
-            || state.file_offer.is_some()
-            || state.settings.is_some();
-        if state.show_logo && state.messages.is_empty() && !any_modal {
-            art::render(f, areas.chat, art::LogoKind::Large, theme);
-            // Startup hint under the logo so the empty state isn't silent.
-            // Centred, in dim amber — matches the rest of the empty-state vibe.
-            let logo_h = art::rect(areas.chat, art::LogoKind::Large)
-                .map(|r| r.height)
-                .unwrap_or(0);
-            let hint_y = areas
-                .chat
-                .y
-                .saturating_add(logo_h.saturating_add(1))
-                .min(areas.chat.y + areas.chat.height.saturating_sub(1));
-            let hint_rect = Rect::new(areas.chat.x, hint_y, areas.chat.width, 1);
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "press ? for help · ctrl-, for settings · mouse on",
-                    Style::default().fg(theme.info).bg(theme.bg),
-                )))
-                .alignment(Alignment::Center),
-                hint_rect,
-            );
         }
         // Settings popup renders last so it sits on top of every other
         // modal. Caller passes the live UiConfig; the popup mutates it
@@ -951,46 +939,72 @@ pub fn render(
 /// mouse column back to an action. Buttons render as `[ Label ]` with
 /// brackets in `border_inactive` and label in `accent` so the menu
 /// reads at a glance against the CRT palette.
-fn draw_menu(f: &mut Frame, area: Rect, _state: &UiState, theme: &Theme, _glyphs: &Glyphs) {
+fn draw_menu(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, _glyphs: &Glyphs) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let labels = [
-        (MenuAction::Peers, "Peers"),
-        (MenuAction::Discover, "Discover"),
-        (MenuAction::Settings, "Settings"),
-        (MenuAction::Help, "Help"),
-        (MenuAction::Quit, "Quit"),
-    ];
-    // One bordered button per action, with a 1-cell gap. Sized so the
-    // row fits on an 80-col terminal with room to spare; on wider
-    // terminals the trailing space fills with bg.
-    let button_w: u16 = 12;
-    let total_w = button_w * labels.len() as u16 + (labels.len() as u16 - 1);
-    let x_offset = area.x;
-    let y = area.y;
-    for (i, (action, label)) in labels.iter().enumerate() {
-        let x = x_offset + i as u16 * (button_w + 1);
-        if x + button_w > area.x + area.width {
-            break;
-        }
-        let _ = action; // hit_test re-derives from column
-        let rect = Rect::new(x, y, button_w, 1);
-        let btn = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(theme.border_inactive))
-            .title(Span::styled(
-                format!(" {} ", label),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        f.render_widget(btn, rect);
-        let _ = total_w; // reserved for future spacer
-    }
+    let online = state
+        .peers
+        .iter()
+        .filter(|p| p.state == PeerState::Connected)
+        .count();
+    let known = state.peers.len();
+    let health = if known == 0 { 0 } else { (online * 100 / known) as u16 };
+    let title = Line::from(vec![
+        Span::styled(" PPX ", Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD)),
+        Span::styled("  secure local exchange", Style::default().fg(theme.fg).bg(theme.bg).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  ·  {} online", online), theme.dim_style()),
+    ]);
+    let button = |label: &str, style: Style| {
+        Span::styled(
+            format!("{:^width$}", label, width = MENU_BUTTON_WIDTH as usize),
+            style,
+        )
+    };
+    let active_button = Style::default()
+        .fg(theme.bg)
+        .bg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let quiet_button = Style::default().fg(theme.fg).bg(theme.status_bg);
+    let info_button = Style::default().fg(theme.info).bg(theme.status_bg);
+    let danger_button = Style::default().fg(theme.error).bg(theme.status_bg);
+    // Fixed-width, filled controls read as buttons in every color theme and
+    // stay exactly aligned with the mouse hit regions below.
+    let nav = Line::from(vec![
+        button("o PEERS", if state.focus == Focus::Sidebar { active_button } else { quiet_button }),
+        Span::raw(" "),
+        button("/ DISCOVER", info_button),
+        Span::raw(" "),
+        button("* SETTINGS", quiet_button),
+        Span::raw(" "),
+        button("? HELP", quiet_button),
+        Span::raw(" "),
+        button("x QUIT", danger_button),
+    ]);
+    let block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
+        .border_style(theme.border_style(false));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let header = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(inner);
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(28), Constraint::Length(22)])
+        .split(header[0]);
+    f.render_widget(Paragraph::new(title), top[0]);
+    f.render_widget(
+        Gauge::default()
+            .ratio(f64::from(health) / 100.0)
+            .label(format!(" LINK {} / {} ", online, known))
+            .use_unicode(true)
+            .style(Style::default().fg(theme.status_fg).bg(theme.status_bg))
+            .gauge_style(theme.gauge_filled_style()),
+        top[1],
+    );
+    f.render_widget(Paragraph::new(nav), header[1]);
 }
-// Laying out: button_w + 1 gap                                  ^ row height
 
 fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
     let active = state.focus == Focus::Sidebar;
@@ -1004,7 +1018,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
         .border_type(BorderType::Rounded)
         .border_style(title_style)
         .title(Span::styled(
-            format!(" {} Peers ({}) ", glyphs.cursor, state.peers.len()),
+            format!(" {} PEERS · {} ", glyphs.cursor, state.peers.len()),
             Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         ));
 
@@ -1036,6 +1050,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
                 } else {
                     theme.peer_message_style()
                 };
+                let detail = match p.state {
+                    PeerState::Connected => "online",
+                    PeerState::Seen => "available",
+                    PeerState::Gone => "offline",
+                };
                 let label = if i == state.selected_peer {
                     Line::from(vec![
                         Span::styled(
@@ -1043,9 +1062,10 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
                             Style::default().fg(dot_color),
                         ),
                         Span::styled(
-                            format!("{} {}", trust, p.name),
+                            format!("{} {}  ", trust, p.name),
                             name_style.add_modifier(Modifier::BOLD),
                         ),
+                        Span::styled(detail, Style::default().fg(dot_color).bg(theme.status_bg)),
                     ])
                 } else {
                     Line::from(vec![
@@ -1054,6 +1074,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
                             style,
                         ),
                         Span::styled(p.name.clone(), name_style),
+                        Span::styled(format!(" · {}", detail), theme.dim_style()),
                     ])
                 };
                 ListItem::new(label)
@@ -1061,7 +1082,17 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
             .collect()
     };
 
-    f.render_widget(List::new(items).block(block), area);
+    let mut list_state = ListState::default();
+    if !state.peers.is_empty() {
+        list_state.select(Some(state.selected_peer));
+    }
+    f.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_style(Style::default().bg(theme.status_bg)),
+        area,
+        &mut list_state,
+    );
 }
 
 fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
@@ -1069,10 +1100,11 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
     let selected = state.selected();
     let selected_name = selected.map(|p| p.name.clone()).unwrap_or_default();
 
-    // Build improved header with peer info and status
+    // Conversation header follows the selected peer and is deliberately
+    // separate from the app chrome, so context survives scrolling.
     let title = if selected_name.is_empty() {
         Line::from(vec![Span::styled(
-            format!(" {} ppexchanger ", glyphs.cursor),
+            format!(" {} INBOX ", glyphs.cursor),
             Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         )])
     } else {
@@ -1092,14 +1124,14 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
                 Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("  {}", status_text),
+                format!("  · {}", status_text.trim_matches(&['[', ']'][..])),
                 Style::default().fg(dot_color),
             ),
         ])
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Double)
+        .border_type(BorderType::Rounded)
         .border_style(theme.border_style(active))
         .title(title);
 
@@ -1111,16 +1143,9 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
     let start = end.saturating_sub(visible_n);
 
     // Empty state: show improved welcome message
-    let visible: Vec<Line> = if state.messages.is_empty() {
-        let welcome = if selected_name.is_empty() {
-            "  select a peer from the sidebar to start chatting"
-        } else {
-            "  no messages yet — send the first message!"
-        };
-        vec![Line::from(vec![Span::styled(
-            welcome,
-            theme.dim_style(),
-        )])]
+    let empty = state.messages.is_empty();
+    let visible: Vec<Line> = if empty {
+        Vec::new()
     } else {
         state
             .messages
@@ -1142,27 +1167,14 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
                 let timestamp = chrono_timestamp(&Some(m.ts_unix));
                 let timestamp_style = theme.dim_style();
 
-                // Build message line: sender + message, then timestamp
-                // Received messages: left-aligned with sender prefix
-                // Sent messages: right-aligned with sender prefix
-                let content = if m.outgoing {
-                    // Sent message: right-aligned, show timestamp on left
-                    Line::from(vec![
-                        Span::styled(format!("{}: ", who), who_style.add_modifier(Modifier::BOLD)),
-                        Span::styled(m.body.clone(), Style::default().fg(theme.fg).bg(theme.bg)),
-                        Span::raw("  "),
-                        Span::styled(timestamp, timestamp_style),
-                    ])
-                } else {
-                    // Received message: left-aligned
-                    Line::from(vec![
-                        Span::styled(format!("{}: ", who), who_style.add_modifier(Modifier::BOLD)),
-                        Span::styled(m.body.clone(), Style::default().fg(theme.fg).bg(theme.bg)),
-                        Span::raw("  "),
-                        Span::styled(timestamp, timestamp_style),
-                    ])
-                };
-                content
+                let marker = if m.outgoing { " YOU " } else { " PEER " };
+                Line::from(vec![
+                    Span::styled(marker, who_style.add_modifier(Modifier::BOLD).bg(theme.status_bg)),
+                    Span::styled(format!(" {}  ", who), who_style.add_modifier(Modifier::BOLD)),
+                    Span::styled(timestamp, timestamp_style),
+                    Span::raw("  "),
+                    Span::styled(m.body.clone(), Style::default().fg(theme.fg).bg(theme.bg)),
+                ])
             })
             .collect()
     };
@@ -1172,40 +1184,213 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
         .wrap(Wrap { trim: false })
         .style(Style::default().fg(theme.fg).bg(theme.bg));
     f.render_widget(para, area);
+    if empty {
+        let body = area.inner(Margin { vertical: 1, horizontal: 1 });
+        let height = 5.min(body.height);
+        let empty_area = Rect::new(
+            body.x,
+            body.y.saturating_add(body.height.saturating_sub(height) / 2),
+            body.width,
+            height,
+        );
+        let (headline, detail) = if selected_name.is_empty() {
+            ("YOUR INBOX IS READY", "Choose a peer, or use Discover to find someone on your LAN.")
+        } else {
+            ("START THE CONVERSATION", "Write a message below — your exchange stays encrypted on this network.")
+        };
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(headline, theme.highlight_style())),
+                Line::from(""),
+                Line::from(Span::styled(detail, theme.dim_style())),
+                Line::from(""),
+                Line::from(Span::styled("Discover  ·  Select a peer  ·  Start chatting", theme.info_style())),
+            ])
+            .alignment(Alignment::Center),
+            empty_area,
+        );
+    }
+    // The chat's scroll position is discoverable at a glance, including
+    // when mouse-wheel or PageUp navigation moves away from the newest item.
+    if total > visible_n && area.width > 2 && area.height > 2 {
+        let mut scrollbar_state = ScrollbarState::new(total)
+            .position(total.saturating_sub(visible_n.saturating_add(state.scroll)))
+            .viewport_content_length(visible_n);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_style(Style::default().fg(theme.accent).bg(theme.bg))
+            .track_style(Style::default().fg(theme.border_inactive).bg(theme.bg))
+            .begin_symbol(None)
+            .end_symbol(None);
+        f.render_stateful_widget(
+            scrollbar,
+            area.inner(Margin { vertical: 1, horizontal: 0 }),
+            &mut scrollbar_state,
+        );
+    }
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
-    // Build improved footer with clear prompt and submit hint
+    if area.width < 4 || area.height < FOOTER_HEIGHT {
+        return;
+    }
+    let composer_area = Rect::new(area.x, area.y, area.width, 3);
+    let composer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme.border_style(state.focus == Focus::Chat))
+        .title(Span::styled(
+            " message ",
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ));
+    let input_area = composer_block.inner(composer_area);
+    f.render_widget(composer_block, composer_area);
+    let target = state.selected().map(|p| p.name.as_str()).unwrap_or("no recipient");
+    let target_label = truncate_tail(target, 18);
+    let chip = format!(" TO {} ", target_label);
+    let prefix = format!(" {} ", glyphs.arrow);
+    let available = input_area
+        .width
+        .saturating_sub(chip.chars().count() as u16)
+        .saturating_sub(prefix.chars().count() as u16)
+        .max(1) as usize;
+    let draft = truncate_tail(&state.composer, available);
+    let is_empty = state.composer.is_empty();
+    let input = Line::from(vec![
+        Span::styled(chip, Style::default().fg(theme.status_fg).bg(theme.status_bg)),
+        Span::styled(prefix.clone(), theme.highlight_style()),
+        Span::styled(if is_empty { glyphs.cursor } else { "" }, theme.highlight_style()),
+        Span::styled(
+            if is_empty { "Write a message or /command".to_string() } else { draft.clone() },
+            if is_empty { theme.dim_style() } else { Style::default().fg(theme.fg).bg(theme.bg) },
+        ),
+    ]);
+    f.render_widget(Paragraph::new(input), input_area);
+
+    // Place the terminal cursor at the logical end of the visible draft.
+    let modal_open = state.show_help
+        || state.discovery.is_some()
+        || state.file_offer.is_some()
+        || state.settings.is_some();
+    if state.focus == Focus::Chat && !modal_open && !is_empty {
+        let cursor_x = input_area
+            .x
+            .saturating_add(target_label.chars().count() as u16 + 5)
+            .saturating_add(prefix.chars().count() as u16)
+            .saturating_add(draft.chars().count() as u16)
+            .min(input_area.right().saturating_sub(1));
+        f.set_cursor_position((cursor_x, input_area.y));
+    }
+    let status = if state.status_format == crate::tui::config::StatusFormat::Off {
+        "Ready".to_string()
+    } else if state.status.trim().is_empty() {
+        "Ready".to_string()
+    } else {
+        truncate_tail(&state.status, area.width.saturating_sub(28) as usize)
+    };
+    let status_style = status_style(&status, theme);
+    let meta = Line::from(vec![
+        Span::styled(" STATUS ", status_style.bg(theme.status_bg).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {}", status), status_style),
+        Span::raw("  "),
+        Span::styled(
+            " ENTER SEND ",
+            Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  Esc clear", theme.dim_style()),
+        Span::styled("   ? Help", Style::default().fg(theme.info).bg(theme.bg)),
+        Span::styled("   Tab switch pane", theme.dim_style()),
+    ]);
+    f.render_widget(
+        Paragraph::new(meta),
+        Rect::new(area.x, area.y.saturating_add(3), area.width, 1),
+    );
+}
+
+/// Show matching slash commands immediately above the borderless composer.
+/// It is deliberately contextual: ordinary message drafting never loses chat
+/// space to a permanently visible command menu.
+fn draw_command_palette(f: &mut Frame, chat: Rect, state: &UiState, theme: &Theme) {
+    let Some((popup, shown)) = command_palette_layout(chat, &state.composer) else {
+        return;
+    };
+    f.render_widget(Clear, popup);
+    let lines: Vec<Line> = shown
+        .into_iter()
+        .map(|(command, description)| {
+            Line::from(vec![
+                Span::styled(format!(" {:<12}", command), theme.highlight_style()),
+                Span::styled(description, theme.dim_style()),
+            ])
+        })
+        .collect();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Thick)
-        .border_style(theme.border_style(state.focus == Focus::Chat));
+        .border_type(BorderType::Rounded)
+        .border_style(theme.border_style(true))
+        .title(Span::styled(
+            " commands · Tab completes ",
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), popup);
+}
 
-    // Build input line with clear prompt indicator
-    let prefix = match state.focus {
-        Focus::Sidebar => format!("[{}] ", glyphs.cursor),
-        Focus::Chat => String::from("> "),
-    };
+/// Resolve a palette click into a completed command. The popup is rendered
+/// inside chat, so its hit map lives alongside the drawing geometry.
+pub fn command_palette_hit(chat: Rect, composer: &str, col: u16, row: u16) -> Option<&'static str> {
+    let (popup, shown) = command_palette_layout(chat, composer)?;
+    if col < popup.x || col >= popup.right() || row <= popup.y || row >= popup.bottom() {
+        return None;
+    }
+    shown.get((row - popup.y - 1) as usize).map(|(command, _)| *command)
+}
 
-    // Show status text or typing hint
-    let status_text = match state.status_format {
-        crate::tui::config::StatusFormat::Off => {
-            if state.selected().is_some() {
-                String::from("type message...")
-            } else {
-                String::from("select a peer to start chatting")
-            }
-        }
-        _ => state.status.clone(),
-    };
+fn command_palette_layout(chat: Rect, composer: &str) -> Option<(Rect, Vec<(&'static str, &'static str)>)> {
+    if !composer.starts_with('/') || chat.width < 30 || chat.height < 7 {
+        return None;
+    }
+    let shown: Vec<_> = input::command_matches(composer).into_iter().take(5).collect();
+    if shown.is_empty() {
+        return None;
+    }
+    let height = (shown.len() as u16 + 2).min(chat.height.saturating_sub(2));
+    Some((
+        Rect::new(
+            chat.x.saturating_add(2),
+            chat.bottom().saturating_sub(height.saturating_add(1)),
+            chat.width.saturating_sub(4).min(58),
+            height,
+        ),
+        shown,
+    ))
+}
 
-    // Build the footer line with input prompt
-    let line = Line::from(vec![
-        Span::styled(&prefix, theme.highlight_style()),
-        Span::styled(&status_text, Style::default().fg(theme.fg).bg(theme.status_bg)),
-    ]);
+/// Keep a status or draft on one terminal line, preserving the newest end of
+/// a long value. The input model appends at the end, so this is the part users
+/// need to see while typing.
+fn truncate_tail(value: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let count = value.chars().count();
+    if count <= width {
+        return value.to_string();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+    let tail: String = value.chars().skip(count - (width - 3)).collect();
+    format!("...{}", tail)
+}
 
-    f.render_widget(Paragraph::new(line).block(block), area);
+fn status_style(status: &str, theme: &Theme) -> Style {
+    let lower = status.to_ascii_lowercase();
+    if ["failed", "denied", "error", "aborted"].iter().any(|needle| lower.contains(needle)) {
+        theme.error_style()
+    } else if ["connected", "listening", "saved", "ready"].iter().any(|needle| lower.contains(needle)) {
+        theme.self_message_style()
+    } else {
+        theme.info_style()
+    }
 }
 
 /// Drain all pending events from the receiver into the shared state.
@@ -1583,17 +1768,34 @@ mod tests {
     #[test]
     fn compute_layout_produces_four_rects() {
         let (screen, areas) = synthetic_layout();
-        // Outer is menu + body + 3-tall footer; sidebar is 24 wide.
+        // Outer is header + body + composer; constants define their sizes.
         assert_eq!(areas.sidebar.width, SIDEBAR_WIDTH);
         assert_eq!(areas.footer.height, FOOTER_HEIGHT);
         assert_eq!(areas.chat.x, areas.sidebar.x + SIDEBAR_WIDTH);
         assert_eq!(areas.footer.y, screen.height - FOOTER_HEIGHT);
-        // Menu row sits at the very top, one row tall, full width.
+        // Header sits at the very top and spans the full width.
         assert_eq!(areas.menu.y, 0);
-        assert_eq!(areas.menu.height, 1);
+        assert_eq!(areas.menu.height, MENU_HEIGHT);
         assert_eq!(areas.menu.width, screen.width);
         // Body sits below the menu.
         assert_eq!(areas.chat.y, MENU_HEIGHT);
+    }
+
+    #[test]
+    fn truncate_tail_keeps_the_latest_input_visible() {
+        assert_eq!(truncate_tail("hello", 8), "hello");
+        assert_eq!(truncate_tail("abcdefghijkl", 8), "...hijkl");
+        assert_eq!(truncate_tail("abcdef", 3), "...");
+    }
+
+    #[test]
+    fn command_palette_click_resolves_the_visible_command() {
+        let chat = Rect::new(0, 0, 80, 24);
+        let (popup, _) = command_palette_layout(chat, "/disc").unwrap();
+        assert_eq!(
+            command_palette_hit(chat, "/disc", popup.x + 2, popup.y + 1),
+            Some("/discover")
+        );
     }
 
     #[test]
@@ -1609,7 +1811,7 @@ mod tests {
             (44, MenuAction::Help),
             (57, MenuAction::Quit),
         ] {
-            let hit = hit_test(screen, col_target as u16, 0, &areas, false, 0);
+            let hit = hit_test(screen, col_target as u16, 2, &areas, false, 0);
             assert!(
                 matches!(hit, Hit::Menu(a) if a == expected),
                 "col {} expected {:?}, got {:?}",
@@ -1623,7 +1825,7 @@ mod tests {
         // options at y=0 are Sidebar (if x < 24) or Footer (default).
         let past = stride * 5 + 2;
         if (past as u16) < screen.width {
-            let hit = hit_test(screen, past as u16, 0, &areas, false, 0);
+            let hit = hit_test(screen, past as u16, 2, &areas, false, 0);
             assert!(
                 !matches!(hit, Hit::Menu(_)),
                 "past-end should not be a Menu hit, got {:?}",

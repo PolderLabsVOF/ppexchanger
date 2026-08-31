@@ -24,6 +24,12 @@ pub enum Decision {
     Rejected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseAction {
+    Accept,
+    Reject,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileOfferPrompt {
     pub from_peer: crate::events::PeerId,
@@ -57,9 +63,19 @@ pub fn render(
     let file_line = format!("  {}  ({})", state.offer.name, size);
 
     let hint = match state.decision {
-        Decision::Pending => "[Enter] accept   [Esc] reject",
-        Decision::Accepted => "accepted — receiving…",
-        Decision::Rejected => "rejected",
+        Decision::Pending => Line::from(vec![
+            Span::styled(
+                "  ACCEPT (Enter)  ",
+                Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("   "),
+            Span::styled(
+                "  REJECT (Esc)  ",
+                Style::default().fg(theme.error).bg(theme.status_bg).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Decision::Accepted => Line::from(Span::styled("accepted — receiving…", theme.info_style())),
+        Decision::Rejected => Line::from(Span::styled("rejected", theme.error_style())),
     };
     let lines: Vec<Line> = vec![
         Line::from(Span::styled(
@@ -72,10 +88,7 @@ pub fn render(
             Style::default().fg(theme.peer_text).bg(theme.bg),
         )),
         Line::from(""),
-        Line::from(Span::styled(
-            hint,
-            Style::default().fg(theme.info).bg(theme.bg),
-        )),
+        hint,
     ];
 
     let para = Paragraph::new(lines)
@@ -83,6 +96,22 @@ pub fn render(
         .wrap(Wrap { trim: false })
         .style(Style::default().fg(theme.fg).bg(theme.bg));
     f.render_widget(para, popup);
+}
+
+/// The bottom action row is split into two large mouse targets, so the file
+/// prompt is not keyboard-only.
+pub fn mouse_action(area: Rect, col: u16, row: u16) -> Option<MouseAction> {
+    let popup = centered(area);
+    // The fifth content line is the action row (one row below the inner
+    // border plus four preceding body lines).
+    if row != popup.y.saturating_add(5) || col < popup.x || col >= popup.right() {
+        return None;
+    }
+    if col < popup.x.saturating_add(popup.width / 2) {
+        Some(MouseAction::Accept)
+    } else {
+        Some(MouseAction::Reject)
+    }
 }
 
 /// Rect of the centred popup, used by `hit_test` to consume clicks.

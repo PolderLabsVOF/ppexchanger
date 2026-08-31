@@ -46,6 +46,21 @@ pub fn load_or_create(name_override: Option<String>) -> io::Result<Identity> {
     }
 }
 
+/// Persist a new local display name without rotating the peer identity or
+/// touching its key material. Used by the settings panel.
+pub fn update_name(name: &str) -> io::Result<()> {
+    if name.trim().is_empty() || name.len() > NAME_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "name must be between 1 and 256 bytes",
+        ));
+    }
+    let path = identity_path()?;
+    let mut id = load(&path)?;
+    id.name = name.trim().to_string();
+    save(&path, &id)
+}
+
 fn fresh(name_override: Option<String>) -> io::Result<Identity> {
     let mut pid = [0u8; 16];
     OsRng.fill_bytes(&mut pid);

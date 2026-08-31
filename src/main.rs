@@ -840,6 +840,93 @@ fn start_tui(
                                 width: sz.width,
                                 height: sz.height,
                             };
+                            // Modal controls own their mouse interactions.
+                            // Handle them before generic pane hit-testing so a
+                            // click never leaks through to the chat beneath.
+                            if matches!(m.kind, crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)) {
+                                let settings_target = {
+                                    let s = state.lock().unwrap();
+                                    s.settings.as_ref().and_then(|settings| {
+                                        ppexchanger::tui::settings_popup::mouse_target(
+                                            rect, m.column, m.row, settings,
+                                        )
+                                    })
+                                };
+                                if let Some(target) = settings_target {
+                                    use ppexchanger::tui::settings_popup::MouseTarget;
+                                    match target {
+                                        MouseTarget::Tab(tab) => {
+                                            state.lock().unwrap().settings.as_mut().unwrap().switch_tab(tab);
+                                        }
+                                        MouseTarget::Row(row) => {
+                                            let key = crossterm::event::KeyEvent::new(
+                                                crossterm::event::KeyCode::Enter,
+                                                crossterm::event::KeyModifiers::NONE,
+                                            );
+                                            let mut s = state.lock().unwrap();
+                                            let settings = s.settings.as_mut().unwrap();
+                                            settings.selected = row;
+                                            route_settings_key(&key, settings, &mut live_cfg, &mut _guard);
+                                        }
+                                        MouseTarget::Close => {
+                                            let name = {
+                                                let mut s = state.lock().unwrap();
+                                                let name = s.settings.as_ref().unwrap().name_draft.trim().to_string();
+                                                if !name.is_empty() {
+                                                    s.self_name = name.clone();
+                                                }
+                                                s.close_settings();
+                                                name
+                                            };
+                                            let _ = save_ui_config(&live_cfg, &live_cfg_path);
+                                            if !name.is_empty() {
+                                                let _ = ppexchanger::identity::update_name(&name);
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+                                let file_action = {
+                                    let s = state.lock().unwrap();
+                                    s.file_offer.as_ref().and_then(|_| {
+                                        ppexchanger::tui::file_offer_popup::mouse_action(rect, m.column, m.row)
+                                    })
+                                };
+                                if let Some(file_action) = file_action {
+                                    let pending = state.lock().unwrap().file_offer.as_ref().map(|p| (p.from_peer, p.offer.id));
+                                    if let Some((peer, id)) = pending {
+                                        match file_action {
+                                            ppexchanger::tui::file_offer_popup::MouseAction::Accept => {
+                                                let _ = bus.tx_actions.send(Action::AcceptFile { from_peer: peer, id });
+                                            }
+                                            ppexchanger::tui::file_offer_popup::MouseAction::Reject => {
+                                                let _ = bus.tx_actions.send(Action::RejectFile { from_peer: peer, id });
+                                                state.lock().unwrap().file_offer = None;
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+                                let dismiss_overlay = {
+                                    let s = state.lock().unwrap();
+                                    (s.show_help && tui::point_in_rect(tui::help::rect(rect), m.column, m.row))
+                                        || (s.discovery.is_some() && tui::point_in_rect(tui::discovery_popup::rect(rect), m.column, m.row))
+                                };
+                                if dismiss_overlay {
+                                    let mut s = state.lock().unwrap();
+                                    s.show_help = false;
+                                    s.close_discovery();
+                                    continue;
+                                }
+                                let command = {
+                                    let s = state.lock().unwrap();
+                                    let chat = tui::compute_layout(rect).chat;
+                                    tui::command_palette_hit(chat, &s.composer, m.column, m.row)
+                                };
+                                if let Some(command) = command {
+                                    editor.buffer = format!("{} ", command);
+                                }
+                            }
                             // Menu clicks come back as EditorEvents so
                             // the dispatch arm below can run them
                             // through the same path as Ctrl-, / ? /
@@ -896,7 +983,19 @@ fn start_tui(
                                 (close, s.settings.as_ref().unwrap().dirty)
                             };
                             if close_after {
-                                state.lock().unwrap().close_settings();
+                                let name_draft = {
+                                    let mut s = state.lock().unwrap();
+                                    let name = s
+                                        .settings
+                                        .as_ref()
+                                        .map(|settings| settings.name_draft.trim().to_string())
+                                        .unwrap_or_default();
+                                    if !name.is_empty() && name != s.self_name {
+                                        s.self_name = name.clone();
+                                    }
+                                    s.close_settings();
+                                    name
+                                };
                                 match save_ui_config(&live_cfg, &live_cfg_path) {
                                     Ok(()) => {
                                         let _ = bus.tx_events.send(Event::Info(
@@ -906,6 +1005,14 @@ fn start_tui(
                                     Err(e) => {
                                         let _ = bus.tx_events.send(Event::Info(format!(
                                             "settings save failed: {}",
+                                            e
+                                        )));
+                                    }
+                                }
+                                if !name_draft.is_empty() {
+                                    if let Err(e) = ppexchanger::identity::update_name(&name_draft) {
+                                        let _ = bus.tx_events.send(Event::Info(format!(
+                                            "display name save failed: {}",
                                             e
                                         )));
                                     }
@@ -1069,12 +1176,11 @@ fn start_tui(
                         }
                     }
                 }
-                let mut s = state.lock().unwrap();
-                let prefix = match s.focus {
-                    tui::Focus::Sidebar => format!("[sidebar] > {}", editor.as_str()),
-                    tui::Focus::Chat => format!("> {}", editor.as_str()),
-                };
-                s.status = prefix;
+                // The composer is renderer state, while `status` is reserved
+                // for network and command feedback. Keeping them separate
+                // means an incoming connection status is no longer erased by
+                // every keystroke.
+                state.lock().unwrap().composer = editor.as_str().to_owned();
             }
         }
         if stop.load(Ordering::Relaxed) {
@@ -1221,7 +1327,7 @@ fn handle_mouse(
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut s = state.lock().unwrap();
     let areas = tui::compute_layout(size);
-    let modal_open = s.file_offer.is_some() || s.show_help || s.discovery.is_some();
+    let modal_open = s.file_offer.is_some() || s.show_help || s.discovery.is_some() || s.settings.is_some();
     let hit = tui::hit_test(
         size,
         m.column,
@@ -1478,6 +1584,27 @@ fn route_settings_key(
     use ppexchanger::tui::settings_popup::Tab;
     let code = k.code;
     let mods = k.modifiers;
+    // The display-name field is a small inline editor inside Settings. It
+    // consumes printable keys before the normal dialog shortcuts so typing a
+    // name never changes tabs or toggles unrelated options.
+    if st.editing_name {
+        match code {
+            KeyCode::Enter => {
+                st.name_draft = st.name_draft.trim().to_string();
+                st.editing_name = false;
+            }
+            KeyCode::Backspace => {
+                st.name_draft.pop();
+            }
+            KeyCode::Char(c) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
+                if st.name_draft.len() < 256 {
+                    st.name_draft.push(c);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
     // Auto-cancel a stale reset-confirm whenever the user does anything
     // other than the 'y' that fires it. The earlier guard arm matches
     // 'y' first; everything else falls through and clears the flag.
@@ -1585,7 +1712,8 @@ fn route_settings_key(
                     0 => st.toggle_notify_sound(cfg),
                     1 => st.toggle_auto_trust_seen(cfg),
                     2 => { let _ = st.cycle_status_format(cfg); }
-                    _ => {} // custom name edit happens in the input row
+                    3 => st.editing_name = true,
+                    _ => {}
                 },
                 Tab::About => {}
             },
