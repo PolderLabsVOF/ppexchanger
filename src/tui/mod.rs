@@ -993,10 +993,10 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let dot = match p.state {
-                    PeerState::Connected => glyphs.dot_connected,
-                    PeerState::Seen => glyphs.dot_seen,
-                    PeerState::Gone => glyphs.dot_gone,
+                let (dot, dot_color) = match p.state {
+                    PeerState::Connected => (glyphs.dot_connected, theme.status_online),
+                    PeerState::Seen => (glyphs.dot_seen, theme.status_seen),
+                    PeerState::Gone => (glyphs.dot_gone, theme.status_offline),
                 };
                 let trust = if p.trusted { glyphs.trusted } else { glyphs.untrusted };
                 let style = if p.trusted {
@@ -1012,13 +1012,20 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
                 let label = if i == state.selected_peer {
                     Line::from(vec![
                         Span::styled(
-                            format!("{} {} {}", dot, trust, p.name),
+                            format!("{} ", dot),
+                            Style::default().fg(dot_color),
+                        ),
+                        Span::styled(
+                            format!("{} {}", trust, p.name),
                             name_style.add_modifier(Modifier::BOLD),
                         ),
                     ])
                 } else {
                     Line::from(vec![
-                        Span::styled(format!("{} {} ", dot, trust), style),
+                        Span::styled(
+                            format!("{} {} ", dot, trust),
+                            style,
+                        ),
                         Span::styled(p.name.clone(), name_style),
                     ])
                 };
