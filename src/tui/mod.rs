@@ -1,13 +1,17 @@
 //! ratatui-driven terminal UI.
 //!
 //! Layout:
-//!   ╭─ ppexchanger ─ alice ────────────────────────────────────────────╮
-//!   │ Peers (n)       │ alice: hi                                    │
-//!   │  bob  trusted   │ bob:  yo                                     │
-//!   │  carol pending  │ alice: how r u?                              │
-//!   ├─────────────────┴──────────────────────────────────────────────┤
-//!   │ > typing...                                                    │
-//!   ╰────────────────────────────────────────────────────────────────╯
+//!   ╭─ ppexchanger ───────────────────────────────────────────────────╮
+//!   │  ● bob (macbook)                              [connected]       │
+//!   ├──────────────────────────────────────────────────────────────────┤
+//!   │                                                                   │
+//!   │  bob: hey alice                              10:32               │
+//!   │                                                                   │
+//!   │                                    alice: hi!       10:32        │
+//!   │                                                                   │
+//!   ├──────────────────────────────────────────────────────────────────┤
+//!   │  > type message...                                         [⏎]  │
+//!   ╰──────────────────────────────────────────────────────────────────╯
 //!
 //! The theme + glyph palettes live in `theme.rs`. The hand-rolled TOML
 //! config reader lives in `config.rs`. The keyboard overlay lives in
@@ -632,6 +636,29 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Format a Unix timestamp as HH:MM (24-hour format).
+fn chrono_timestamp(ts: &Option<u64>) -> String {
+    match ts {
+        Some(t) => {
+            let secs = *t;
+            // Convert to hours and minutes
+            let hours = (secs / 3600) % 24;
+            let minutes = (secs / 60) % 60;
+            format!("{:02}:{:02}", hours, minutes)
+        }
+        None => {
+            // Use current time if no timestamp
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let hours = (now / 3600) % 24;
+            let minutes = (now / 60) % 60;
+            format!("{:02}:{:02}", hours, minutes)
+        }
+    }
+}
+
 /// Compute the three rectangles that the TUI is split into. Used by
 /// `render()` (to lay out widgets) and `hit_test()` (to map clicks
 /// back to panes). Returns the same shape regardless of caller, so a
@@ -1042,18 +1069,18 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
     let selected = state.selected();
     let selected_name = selected.map(|p| p.name.clone()).unwrap_or_default();
 
-    // Build title with peer status indicator
+    // Build improved header with peer info and status
     let title = if selected_name.is_empty() {
         Line::from(vec![Span::styled(
-            format!(" {} ppexchanger — {} ", glyphs.cursor, state.self_name),
+            format!(" {} ppexchanger ", glyphs.cursor),
             Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         )])
     } else {
-        // Show status dot for selected peer with appropriate color
-        let (dot, dot_color) = match selected.map(|p| p.state) {
-            Some(PeerState::Connected) => (glyphs.dot_connected, theme.status_online),
-            Some(PeerState::Seen) => (glyphs.dot_seen, theme.status_seen),
-            Some(PeerState::Gone) | None => (glyphs.dot_gone, theme.status_offline),
+        // Show status dot and peer hostname with connection status
+        let (dot, dot_color, status_text) = match selected.map(|p| p.state) {
+            Some(PeerState::Connected) => (glyphs.dot_connected, theme.status_online, "[connected]"),
+            Some(PeerState::Seen) => (glyphs.dot_seen, theme.status_seen, "[seen]"),
+            Some(PeerState::Gone) | None => (glyphs.dot_gone, theme.status_offline, "[offline]"),
         };
         Line::from(vec![
             Span::styled(
@@ -1061,8 +1088,12 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
                 Style::default().fg(dot_color),
             ),
             Span::styled(
-                format!("{}{} {} {} ", glyphs.cursor, state.self_name, glyphs.arrow, selected_name),
+                selected_name.clone(),
                 Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {}", status_text),
+                Style::default().fg(dot_color),
             ),
         ])
     };
@@ -1078,14 +1109,13 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
     let visible_n = (area.height as usize).saturating_sub(2); // minus borders
     let end = total.saturating_sub(state.scroll);
     let start = end.saturating_sub(visible_n);
-    let dim_phase = state.scanline_tick; // flips each frame for CRT effect
 
-    // Empty state: show welcome message
+    // Empty state: show improved welcome message
     let visible: Vec<Line> = if state.messages.is_empty() {
         let welcome = if selected_name.is_empty() {
-            "connect to a peer to start chatting"
+            "  select a peer from the sidebar to start chatting"
         } else {
-            "no messages yet — say hello!"
+            "  no messages yet — send the first message!"
         };
         vec![Line::from(vec![Span::styled(
             welcome,
@@ -1097,31 +1127,42 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
             .iter()
             .skip(start)
             .take(end - start)
-            .enumerate()
-            .map(|(i, m)| {
-                let who_style = if m.outgoing {
-                    theme.self_message_style()
-                } else {
-                    theme.peer_message_style()
-                };
+            .map(|m| {
                 let who = if m.outgoing {
                     state.self_name.clone()
                 } else {
                     m.from_name.clone()
                 };
-                let mut body_style =
-                    Style::default().fg(theme.fg).bg(theme.bg);
-                // CRT scanline: every 4th row gets a DIM modifier so the
-                // text appears to scan downward, alternating each frame via
-                // `scanline_tick`. The coarser band (4 rows instead of 2)
-                // keeps messages legible while preserving the CRT vibe.
-                if dim_phase ^ (i % 4 == 0) {
-                    body_style = body_style.add_modifier(Modifier::DIM);
-                }
-                Line::from(vec![
-                    Span::styled(format!("{}: ", who), who_style.add_modifier(Modifier::BOLD)),
-                    Span::styled(m.body.clone(), body_style),
-                ])
+                let who_style = if m.outgoing {
+                    theme.self_message_style()
+                } else {
+                    theme.peer_message_style()
+                };
+                // Format timestamp as HH:MM
+                let timestamp = chrono_timestamp(&Some(m.ts_unix));
+                let timestamp_style = theme.dim_style();
+
+                // Build message line: sender + message, then timestamp
+                // Received messages: left-aligned with sender prefix
+                // Sent messages: right-aligned with sender prefix
+                let content = if m.outgoing {
+                    // Sent message: right-aligned, show timestamp on left
+                    Line::from(vec![
+                        Span::styled(format!("{}: ", who), who_style.add_modifier(Modifier::BOLD)),
+                        Span::styled(m.body.clone(), Style::default().fg(theme.fg).bg(theme.bg)),
+                        Span::raw("  "),
+                        Span::styled(timestamp, timestamp_style),
+                    ])
+                } else {
+                    // Received message: left-aligned
+                    Line::from(vec![
+                        Span::styled(format!("{}: ", who), who_style.add_modifier(Modifier::BOLD)),
+                        Span::styled(m.body.clone(), Style::default().fg(theme.fg).bg(theme.bg)),
+                        Span::raw("  "),
+                        Span::styled(timestamp, timestamp_style),
+                    ])
+                };
+                content
             })
             .collect()
     };
@@ -1134,46 +1175,36 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
+    // Build improved footer with clear prompt and submit hint
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Thick)
-        .border_style(theme.border_style(state.focus == Focus::Chat))
-        .title(Span::styled(
-            format!(" {} message ", glyphs.arrow),
-            Style::default().fg(theme.accent),
-        ));
-    // The prompt character reflects focus. When a peer is selected, also
-    // prepend a status icon (dot_connected / dot_seen / dot_gone) so the
-    // footer shows whether the selected peer is reachable.
-    let status_icon = state.selected().map(|p| match p.state {
-        PeerState::Connected => glyphs.dot_connected,
-        PeerState::Seen => glyphs.dot_seen,
-        PeerState::Gone => glyphs.dot_gone,
-    });
+        .border_style(theme.border_style(state.focus == Focus::Chat));
+
+    // Build input line with clear prompt indicator
     let prefix = match state.focus {
         Focus::Sidebar => format!("[{}] ", glyphs.cursor),
-        Focus::Chat => format!("{} ", glyphs.arrow),
+        Focus::Chat => String::from("> "),
     };
-    let prefix = match status_icon {
-        Some(icon) => format!("{}{}", icon, prefix),
-        None => prefix,
+
+    // Show status text or typing hint
+    let status_text = match state.status_format {
+        crate::tui::config::StatusFormat::Off => {
+            if state.selected().is_some() {
+                String::from("type message...")
+            } else {
+                String::from("select a peer to start chatting")
+            }
+        }
+        _ => state.status.clone(),
     };
-    // `status_format` controls the footer text. `Off` renders an empty
-// line (footer block stays for the border/title); the other two modes
-// show the bare status string. Plumbing the peer addr through UiState
-// for `NameAddr` would require adding a SocketAddr field; for now the
-// two on modes collapse to the same display. Add when peer addresses
-// are already in the state for a different reason.
-let line = Line::from(vec![
-        Span::styled(prefix, theme.highlight_style()),
-        Span::styled(
-            match state.status_format {
-                crate::tui::config::StatusFormat::Off => String::new(),
-                _ => state.status.clone(),
-            },
-            Style::default().fg(theme.fg).bg(theme.status_bg),
-        ),
+
+    // Build the footer line with input prompt
+    let line = Line::from(vec![
+        Span::styled(&prefix, theme.highlight_style()),
+        Span::styled(&status_text, Style::default().fg(theme.fg).bg(theme.status_bg)),
     ]);
+
     f.render_widget(Paragraph::new(line).block(block), area);
 }
 
