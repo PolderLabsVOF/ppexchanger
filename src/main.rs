@@ -467,7 +467,8 @@ fn start_tui(
                                 });
                             } else if let Some((control_addr, target_peer_id)) = reverse {
                                 match Discovery::request_reverse_connect(control_addr, target_peer_id, fallback_port) {
-                                    Ok(()) => { let _ = tx_clone.send(Event::Info(format!("direct connection failed; asked {} to connect back", addr))); }
+                                    Ok(true) => { let _ = tx_clone.send(Event::Info(format!("{} received the reverse-connect request", addr))); }
+                                    Ok(false) => { let _ = tx_clone.send(Event::Info(format!("{} did not acknowledge the reverse-connect request", addr))); }
                                     Err(e) => { let _ = tx_clone.send(Event::Info(format!("direct connection and reverse request failed: {}", e))); }
                                 }
                             }

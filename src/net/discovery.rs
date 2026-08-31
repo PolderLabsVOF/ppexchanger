@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 pub const MULTICAST_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 42, 99);
 pub const MULTICAST_PORT: u16 = 7777;
 const REVERSE_MAGIC: &[u8; 4] = b"PPXR";
+const REVERSE_ACK_MAGIC: &[u8; 4] = b"PPXA";
 
 /// Announcement interval.
 pub const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(2);
@@ -135,14 +136,28 @@ impl Discovery {
         addr: SocketAddr,
         target_peer_id: [u8; 16],
         requester_tcp_port: u16,
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
         let socket = UdpSocket::bind("0.0.0.0:0")?;
+        socket.set_read_timeout(Some(Duration::from_millis(350)))?;
         let mut packet = [0u8; 22];
         packet[..4].copy_from_slice(REVERSE_MAGIC);
         packet[4..20].copy_from_slice(&target_peer_id);
         packet[20..].copy_from_slice(&requester_tcp_port.to_be_bytes());
-        socket.send_to(&packet, addr)?;
-        Ok(())
+        // UDP is not reliable, particularly on client Wi-Fi. A short retry
+        // keeps the fallback snappy while avoiding a long OS TCP timeout.
+        for _ in 0..3 {
+            socket.send_to(&packet, addr)?;
+            let mut reply = [0u8; 20];
+            match socket.recv_from(&mut reply) {
+                Ok((20, _)) if &reply[..4] == REVERSE_ACK_MAGIC && reply[4..] == target_peer_id => {
+                    return Ok(true);
+                }
+                Ok(_) => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(false)
     }
 
     /// Receive one reverse-connect request, ignoring ordinary beacons and
@@ -152,6 +167,10 @@ impl Discovery {
         let mut buf = [0u8; 64];
         match self.socket.recv_from(&mut buf) {
             Ok((22, source)) if &buf[..4] == REVERSE_MAGIC && buf[4..20] == our_peer_id => {
+                let mut ack = [0u8; 20];
+                ack[..4].copy_from_slice(REVERSE_ACK_MAGIC);
+                ack[4..].copy_from_slice(&our_peer_id);
+                let _ = self.socket.send_to(&ack, source);
                 let port = u16::from_be_bytes([buf[20], buf[21]]);
                 Ok((port != 0).then(|| SocketAddr::new(source.ip(), port)))
             }
