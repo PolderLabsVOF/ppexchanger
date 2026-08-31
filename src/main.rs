@@ -921,7 +921,12 @@ fn start_tui(
                                         if let Some(discovery) = s.discovery.as_mut() {
                                             discovery.selected = index;
                                         }
-                                        s.selected_discovery_peer()
+                                        let peer = s.selected_discovery_peer();
+                                        if let Some(peer) = &peer {
+                                            s.status = format!("connecting to {}…", peer.addr);
+                                            s.close_discovery();
+                                        }
+                                        peer
                                     };
                                     if let Some(peer) = peer {
                                         let name = peer.name.unwrap_or_else(|| format!("peer@{}", peer.addr));
@@ -1061,7 +1066,15 @@ fn start_tui(
                                     state.lock().unwrap().move_discovery_selection(1);
                                 }
                                 crossterm::event::KeyCode::Enter => {
-                                    let peer = state.lock().unwrap().selected_discovery_peer();
+                                    let peer = {
+                                        let mut s = state.lock().unwrap();
+                                        let peer = s.selected_discovery_peer();
+                                        if let Some(peer) = &peer {
+                                            s.status = format!("connecting to {}…", peer.addr);
+                                            s.close_discovery();
+                                        }
+                                        peer
+                                    };
                                     if let Some(peer) = peer {
                                         let name = peer.name.unwrap_or_else(|| format!("peer@{}", peer.addr));
                                         let _ = bus.tx_actions.send(Action::Connect {

@@ -50,8 +50,8 @@ pub fn connect(
 ) -> Option<(PeerId, DiscoveredPeer)> {
     let sess = match dial(addr, static_kp) {
         Ok(s) => s,
-        Err(_e) => {
-            let _ = tx.send(Event::Info(format!("dial {} failed", addr)));
+        Err(e) => {
+            let _ = tx.send(Event::Info(format!("could not connect to {}: {}", addr, e)));
             return None;
         }
     };
