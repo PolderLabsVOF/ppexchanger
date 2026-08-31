@@ -281,7 +281,7 @@ fn start_tui(
     // This allows one-sided discovery: only the initiator needs to run `/discover`.
     let announcer_stop = Arc::clone(&stop);
     let announcer_beacon = announce_beacon.clone();
-    let announcer_actions = bus.tx_actions.clone();
+    let announcer_events = bus.tx_events.clone();
     std::thread::spawn(move || {
         let mut d = match ppexchanger::net::discovery::Discovery::bind(0) {
             Ok(d) => d,
@@ -299,11 +299,11 @@ fn start_tui(
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             while std::time::Instant::now() < deadline && !announcer_stop.load(std::sync::atomic::Ordering::Relaxed) {
                 if let Ok(Some(addr)) = d.recv_reverse_connect(beacon.peer_id) {
-                    let _ = announcer_actions.send(Action::Connect {
+                    let _ = announcer_events.send(Event::ConnectionRequest {
                         addr,
-                        name_hint: format!("peer@{}", addr),
-                        public_key: [0; 32],
-                        reverse: None,
+                        name: format!("peer@{}", addr),
+                        hostname: String::new(),
+                        fingerprint: "pending reverse connection".into(),
                     });
                 }
             }
@@ -928,6 +928,28 @@ fn start_tui(
                                     }
                                     continue;
                                 }
+                                let pending_click = {
+                                    let s = state.lock().unwrap();
+                                    let sidebar = tui::compute_layout(rect).sidebar;
+                                    s.pending_connection.as_ref().and_then(|request| {
+                                        (m.column >= sidebar.x
+                                            && m.column < sidebar.right()
+                                            && m.row >= sidebar.y
+                                            && m.row < sidebar.y.saturating_add(5))
+                                            .then(|| request.clone())
+                                    })
+                                };
+                                if let Some(request) = pending_click {
+                                    state.lock().unwrap().pending_connection = None;
+                                    state.lock().unwrap().status = format!("accepting connection from {}…", request.name);
+                                    let _ = bus.tx_actions.send(Action::Connect {
+                                        addr: request.addr,
+                                        name_hint: request.name,
+                                        public_key: [0; 32],
+                                        reverse: None,
+                                    });
+                                    continue;
+                                }
                                 let discovered = {
                                     let s = state.lock().unwrap();
                                     s.discovery.as_ref().and_then(|discovery| {
@@ -1010,6 +1032,31 @@ fn start_tui(
                                         }
                                     }
                                 }
+                        }
+                    }
+                } else if state.lock().unwrap().pending_connection.is_some() {
+                    if let crossterm::event::Event::Key(k) = &ev {
+                        if k.kind == crossterm::event::KeyEventKind::Press {
+                            match k.code {
+                                crossterm::event::KeyCode::Enter => {
+                                    let request = { state.lock().unwrap().pending_connection.take() };
+                                    if let Some(request) = request {
+                                        state.lock().unwrap().status = format!("accepting connection from {}…", request.name);
+                                        let _ = bus.tx_actions.send(Action::Connect {
+                                            addr: request.addr,
+                                            name_hint: request.name,
+                                            public_key: [0; 32],
+                                            reverse: None,
+                                        });
+                                    }
+                                }
+                                crossterm::event::KeyCode::Esc => {
+                                    let mut s = state.lock().unwrap();
+                                    s.pending_connection = None;
+                                    s.status = "connection request declined".into();
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 } else if state

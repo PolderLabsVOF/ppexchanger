@@ -1033,6 +1033,33 @@ fn draw_menu(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, _glyphs:
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
+    // Connection requests are deliberately visible in their own compact
+    // container. It appears only while action is required, leaving the
+    // normal peer list uncluttered at all other times.
+    let peer_area = if let Some(request) = &state.pending_connection {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(5), Constraint::Min(3)])
+            .split(area);
+        let pending = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(theme.border_style(true))
+            .title(Span::styled(
+                " ◌ PENDING CONNECTION ",
+                Style::default().fg(theme.status_seen).add_modifier(Modifier::BOLD),
+            ));
+        let prompt = Paragraph::new(vec![
+            Line::from(Span::styled(request.name.clone(), theme.peer_message_style())),
+            Line::from(Span::styled("Click / Enter accept · Esc decline", theme.dim_style())),
+        ])
+        .block(pending)
+        .wrap(Wrap { trim: true });
+        f.render_widget(prompt, rows[0]);
+        rows[1]
+    } else {
+        area
+    };
     let active = state.focus == Focus::Sidebar;
     let title_style = if active {
         theme.border_style(true)
@@ -1116,7 +1143,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
         List::new(items)
             .block(block)
             .highlight_style(Style::default().bg(theme.status_bg)),
-        area,
+        peer_area,
         &mut list_state,
     );
 }
