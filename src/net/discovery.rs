@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 /// Multicast group used by every `ppexchanger` instance.
 pub const MULTICAST_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 42, 99);
 pub const MULTICAST_PORT: u16 = 7777;
+const REVERSE_MAGIC: &[u8; 4] = b"PPXR";
 
 /// Announcement interval.
 pub const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(2);
@@ -124,6 +125,38 @@ impl Discovery {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
                 Ok(None)
             }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Ask a peer whose inbound TCP is blocked to dial us back. The request
+    /// is accepted only by the beacon owner identified by `target_peer_id`.
+    pub fn request_reverse_connect(
+        addr: SocketAddr,
+        target_peer_id: [u8; 16],
+        requester_tcp_port: u16,
+    ) -> io::Result<()> {
+        let socket = UdpSocket::bind("0.0.0.0:0")?;
+        let mut packet = [0u8; 22];
+        packet[..4].copy_from_slice(REVERSE_MAGIC);
+        packet[4..20].copy_from_slice(&target_peer_id);
+        packet[20..].copy_from_slice(&requester_tcp_port.to_be_bytes());
+        socket.send_to(&packet, addr)?;
+        Ok(())
+    }
+
+    /// Receive one reverse-connect request, ignoring ordinary beacons and
+    /// malformed packets. The returned address uses the sender IP and the
+    /// TCP port carried by the request.
+    pub fn recv_reverse_connect(&self, our_peer_id: [u8; 16]) -> io::Result<Option<SocketAddr>> {
+        let mut buf = [0u8; 64];
+        match self.socket.recv_from(&mut buf) {
+            Ok((22, source)) if &buf[..4] == REVERSE_MAGIC && buf[4..20] == our_peer_id => {
+                let port = u16::from_be_bytes([buf[20], buf[21]]);
+                Ok((port != 0).then(|| SocketAddr::new(source.ip(), port)))
+            }
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => Ok(None),
             Err(e) => Err(e),
         }
     }

@@ -203,6 +203,7 @@ pub struct DiscoveredPeer {
     pub hostname: Option<String>,
     pub addr: std::net::SocketAddr,
     pub fingerprint: Option<String>,
+    pub reverse: Option<(std::net::SocketAddr, crate::events::PeerId)>,
 }
 
 /// An inbound connection request waiting for user accept/deny.
@@ -413,6 +414,7 @@ impl UiState {
                             hostname: p.hostname.clone(),
                             addr: p.addr,
                             fingerprint: p.fingerprint.clone(),
+                            reverse: p.reverse,
                         })
                         .collect();
                     let mstr: &str = method.as_str();
@@ -1667,6 +1669,7 @@ mod tests {
                 hostname: Some("macbook".into()),
                 addr: "10.0.0.2:7777".parse().unwrap(),
                 fingerprint: Some("abcd".into()),
+                reverse: None,
             }],
         });
         s.apply(&Event::DiscoveryFinished);
@@ -1699,6 +1702,7 @@ mod tests {
                 hostname: None,
                 addr: "10.0.0.3:7777".parse().unwrap(),
                 fingerprint: None,
+                reverse: None,
             }],
         });
         s.apply(&Event::DiscoveryUpdate {
@@ -1709,12 +1713,14 @@ mod tests {
                     hostname: None,
                     addr: "10.0.0.3:7777".parse().unwrap(),
                     fingerprint: None,
+                    reverse: None,
                 },
                 crate::events::DiscoveredPeer {
                     name: None,
                     hostname: None,
                     addr: "10.0.0.4:7777".parse().unwrap(),
                     fingerprint: None,
+                    reverse: None,
                 },
             ],
         });

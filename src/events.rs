@@ -129,6 +129,9 @@ pub struct DiscoveredPeer {
     pub hostname: Option<String>,
     pub addr: SocketAddr,
     pub fingerprint: Option<String>,
+    /// UDP control endpoint and peer id used to request a reverse dial when
+    /// this peer cannot accept inbound TCP.
+    pub reverse: Option<(SocketAddr, PeerId)>,
 }
 
 #[derive(Debug)]
@@ -145,7 +148,12 @@ pub enum Action {
     /// Reject an inbound file offer. Sends `FileReject` and drops the
     /// pending transfer state.
     RejectFile { from_peer: PeerId, id: FileId },
-    Connect { addr: SocketAddr, name_hint: String, public_key: [u8; 32] },
+    Connect {
+        addr: SocketAddr,
+        name_hint: String,
+        public_key: [u8; 32],
+        reverse: Option<(SocketAddr, PeerId)>,
+    },
     /// Accept an inbound connection request after user confirms.
     AcceptConnection { addr: SocketAddr },
     /// Deny an inbound connection request after user declines.

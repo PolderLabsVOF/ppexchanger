@@ -24,6 +24,7 @@ fn multicast_exchange_works() {
         tcp_port: d1.local_port().unwrap_or(0),
         name: "alice".into(),
         hostname: "alice-host".into(),
+        control_port: 0,
     };
     let b2 = Beacon {
         peer_id: [0xB2u8; 16],
@@ -31,6 +32,7 @@ fn multicast_exchange_works() {
         tcp_port: d2.local_port().unwrap_or(0),
         name: "bob".into(),
         hostname: "bob-host".into(),
+        control_port: 0,
     };
 
     // Announce once from each side.
@@ -69,6 +71,7 @@ fn multicast_bind_and_announce_succeed() {
         tcp_port: 12345,
         name: "loopback".into(),
         hostname: "loopback-host".into(),
+        control_port: 0,
     };
     // Just verify encode+send doesn't error. Some hosts refuse send_to on a
     // multicast group; tolerate either outcome but require no panic.

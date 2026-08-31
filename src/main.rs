@@ -281,6 +281,7 @@ fn start_tui(
     // This allows one-sided discovery: only the initiator needs to run `/discover`.
     let announcer_stop = Arc::clone(&stop);
     let announcer_beacon = announce_beacon.clone();
+    let announcer_actions = bus.tx_actions.clone();
     std::thread::spawn(move || {
         let mut d = match ppexchanger::net::discovery::Discovery::bind(0) {
             Ok(d) => d,
@@ -289,11 +290,23 @@ fn start_tui(
                 return;
             }
         };
+        let mut beacon = announcer_beacon;
+        beacon.control_port = d.local_port().unwrap_or(0);
         while !announcer_stop.load(std::sync::atomic::Ordering::Relaxed) {
-            if let Err(e) = d.announce_both(&announcer_beacon) {
+            if let Err(e) = d.announce_both(&beacon) {
                 eprintln!("announcer error: {}", e);
             }
-            std::thread::sleep(std::time::Duration::from_secs(5));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while std::time::Instant::now() < deadline && !announcer_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(Some(addr)) = d.recv_reverse_connect(beacon.peer_id) {
+                    let _ = announcer_actions.send(Action::Connect {
+                        addr,
+                        name_hint: format!("peer@{}", addr),
+                        public_key: [0; 32],
+                        reverse: None,
+                    });
+                }
+            }
         }
     });
 
@@ -420,6 +433,7 @@ fn start_tui(
                         addr,
                         name_hint,
                         public_key: _,
+                        reverse,
                     }) => {
                         // peer::connect dials, handshakes, spawns the
                         // driver, and registers its outbound sender with
@@ -430,6 +444,7 @@ fn start_tui(
                         let tx_inbound_clone = bus.tx_inbound_files.clone();
                         let kp_clone = Arc::clone(&kp);
                         let reg_clone = act_reg_tx.clone();
+                        let fallback_port = bound_port;
                         thread::spawn(move || {
                             if let Some((peer_id, discovered)) = peer::connect(
                                 addr,
@@ -450,6 +465,11 @@ fn start_tui(
                                     trusted: false,
                                     addr,
                                 });
+                            } else if let Some((control_addr, target_peer_id)) = reverse {
+                                match Discovery::request_reverse_connect(control_addr, target_peer_id, fallback_port) {
+                                    Ok(()) => { let _ = tx_clone.send(Event::Info(format!("direct connection failed; asked {} to connect back", addr))); }
+                                    Err(e) => { let _ = tx_clone.send(Event::Info(format!("direct connection and reverse request failed: {}", e))); }
+                                }
                             }
                         });
                     }
@@ -934,6 +954,7 @@ fn start_tui(
                                             addr: peer.addr,
                                             name_hint: name,
                                             public_key: [0u8; 32],
+                                            reverse: peer.reverse,
                                         });
                                     }
                                     continue;
@@ -1081,6 +1102,7 @@ fn start_tui(
                                             addr: peer.addr,
                                             name_hint: name,
                                             public_key: [0u8; 32],
+                                            reverse: peer.reverse,
                                         });
                                     }
                                 }
@@ -1270,6 +1292,7 @@ fn make_beacon(id: &ppexchanger::identity::Identity, tcp_port: u16) -> Beacon {
         tcp_port,
         name: id.name.clone(),
         hostname: id.hostname.clone(),
+        control_port: 0,
     }
 }
 
@@ -1332,6 +1355,7 @@ fn do_discover(
                 hostname: None,
                 addr: std::net::SocketAddr::V4(a),
                 fingerprint: None,
+                reverse: None,
             })
             .collect();
         let label = if ports.len() > 1 {
@@ -1372,12 +1396,23 @@ fn multicast_scan(
                 continue;
             }
             let tcp_addr: SocketAddr = (src.ip(), b.tcp_port).into();
-            seen.entry(b.peer_id).or_insert(ppexchanger::events::DiscoveredPeer {
+            let discovered = ppexchanger::events::DiscoveredPeer {
                 name: if b.name.is_empty() { None } else { Some(b.name) },
                 hostname: if b.hostname.is_empty() { None } else { Some(b.hostname) },
                 addr: tcp_addr,
                 fingerprint: Some(pubkey_fingerprint(&b.public_key)),
-            });
+                reverse: (b.control_port != 0).then(|| (SocketAddr::new(src.ip(), b.control_port), b.peer_id)),
+            };
+            seen.entry(b.peer_id)
+                .and_modify(|existing| {
+                    // A concurrent `/discover` beacon from this peer lacks
+                    // its announcer's ephemeral control port. Prefer the
+                    // periodic announcer beacon when it arrives later.
+                    if existing.reverse.is_none() && discovered.reverse.is_some() {
+                        *existing = discovered.clone();
+                    }
+                })
+                .or_insert(discovered);
         }
     }
     Ok(seen.into_values().collect())

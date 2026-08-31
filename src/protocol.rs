@@ -58,6 +58,9 @@ pub struct Beacon {
     pub name: String,
     /// Machine hostname for identification (may be empty for v1 beacons)
     pub hostname: String,
+    /// Ephemeral UDP port that accepts reverse-connect requests. `0` means
+    /// an older peer which does not support the fallback.
+    pub control_port: u16,
 }
 
 /// 16-byte random transfer identifier. Generated sender-side with
@@ -90,12 +93,12 @@ pub fn encode_beacon(b: &Beacon) -> Option<Vec<u8>> {
     let name_bytes = b.name.as_bytes();
     let hostname_bytes = b.hostname.as_bytes();
     let mut out = Vec::with_capacity(
-        4 + 1 + 1 + 2 + 16 + 32 + 2 + 2 + name_bytes.len() + 2 + hostname_bytes.len() + 4,
+        4 + 1 + 1 + 2 + 16 + 32 + 2 + 2 + name_bytes.len() + 2 + hostname_bytes.len() + 2 + 4,
     );
     out.extend_from_slice(&BEACON_MAGIC);
     out.push(BEACON_VERSION);
     out.push(BEACON_MSG_TYPE);
-    let payload_len = (16 + 32 + 2 + 2 + name_bytes.len() + 2 + hostname_bytes.len()) as u16;
+    let payload_len = (16 + 32 + 2 + 2 + name_bytes.len() + 2 + hostname_bytes.len() + 2) as u16;
     out.extend_from_slice(&payload_len.to_be_bytes());
     out.extend_from_slice(&b.peer_id);
     out.extend_from_slice(&b.public_key);
@@ -104,6 +107,7 @@ pub fn encode_beacon(b: &Beacon) -> Option<Vec<u8>> {
     out.extend_from_slice(name_bytes);
     out.extend_from_slice(&(hostname_bytes.len() as u16).to_be_bytes());
     out.extend_from_slice(hostname_bytes);
+    out.extend_from_slice(&b.control_port.to_be_bytes());
     let crc = crc32(&out);
     out.extend_from_slice(&crc.to_be_bytes());
     Some(out)
@@ -166,12 +170,21 @@ pub fn decode_beacon(bytes: &[u8]) -> Option<Beacon> {
         if p + hostname_len > total_len - 4 {
             return None;
         }
-        std::str::from_utf8(&bytes[p..p + hostname_len])
+        let hostname = std::str::from_utf8(&bytes[p..p + hostname_len])
             .ok()?
-            .to_string()
+            .to_string();
+        p += hostname_len;
+        hostname
         // hostname can be empty string
     } else {
         String::new()
+    };
+    // v2.1 extension: two optional bytes after hostname. Older v2 peers
+    // simply ignore this suffix; missing bytes mean no reverse fallback.
+    let control_port = if p + 2 <= total_len - 4 {
+        u16::from_be_bytes(bytes[p..p + 2].try_into().ok()?)
+    } else {
+        0
     };
 
     Some(Beacon {
@@ -180,6 +193,7 @@ pub fn decode_beacon(bytes: &[u8]) -> Option<Beacon> {
         tcp_port,
         name,
         hostname,
+        control_port,
     })
 }
 
@@ -459,6 +473,7 @@ mod tests {
             tcp_port: 4242,
             name: "alice".into(),
             hostname: "test-host".into(),
+            control_port: 0,
         };
         let enc = encode_beacon(&b).unwrap();
         let dec = decode_beacon(&enc).unwrap();
@@ -473,6 +488,7 @@ mod tests {
             tcp_port: 1,
             name: "x".into(),
             hostname: "test-host".into(),
+            control_port: 0,
         };
         let mut enc = encode_beacon(&b).unwrap();
         let last = enc.len() - 1;
@@ -488,6 +504,7 @@ mod tests {
             tcp_port: 1,
             name: "x".into(),
             hostname: "test-host".into(),
+            control_port: 0,
         })
         .unwrap();
         b[0] = 0;

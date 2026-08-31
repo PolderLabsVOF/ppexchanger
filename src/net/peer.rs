@@ -22,11 +22,19 @@ use crate::net::session::Session;
 use crate::protocol::{fingerprint as pubkey_fingerprint, FrameBody};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc;
+use std::time::Duration;
+
+/// Keep a failed LAN dial responsive enough for discovery's reverse-connect
+/// fallback instead of leaving the UI waiting on the operating system's TCP
+/// timeout (which can be a minute or more).
+const DIAL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Connect to a peer via TCP + Noise_XX. Returns the freshly minted session.
 pub fn dial(addr: SocketAddr, static_kp: &Keypair) -> std::io::Result<Session<TcpStream>> {
-    let stream = TcpStream::connect(addr)?;
+    let stream = TcpStream::connect_timeout(&addr, DIAL_TIMEOUT)?;
     let mut s = stream;
+    s.set_read_timeout(Some(DIAL_TIMEOUT))?;
+    s.set_write_timeout(Some(DIAL_TIMEOUT))?;
     let res = run_initiator(&mut s, static_kp)
         .map_err(|e| std::io::Error::other(format!("handshake failed: {:?}", e)))?;
     let sess = Session::new(s, res.send_key, res.recv_key, res.remote_static);
@@ -63,6 +71,7 @@ pub fn connect(
         hostname: None,
         addr,
         fingerprint: Some(fingerprint.clone()),
+        reverse: None,
     };
     let (outbound_tx, outbound_rx) = mpsc::channel::<FrameBody>();
     let _ = reg_tx.send(RegistryMsg::Register {
