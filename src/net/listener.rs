@@ -129,9 +129,9 @@ pub fn run(listener: TcpListener, static_kp: Arc<Keypair>, tx: mpsc::Sender<Acce
 /// Wrapper that yields a small fixed prefix before delegating to the
 /// underlying stream. Used by the listener to push back the 4 bytes it
 /// peeked at when they didn't match the probe magic.
-struct PrefixedStream<'a> {
-    head: &'a [u8],
-    inner: TcpStream,
+pub struct PrefixedStream<'a> {
+    pub head: &'a [u8],
+    pub inner: TcpStream,
 }
 
 impl<'a> Read for PrefixedStream<'a> {

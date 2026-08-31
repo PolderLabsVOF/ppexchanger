@@ -23,6 +23,7 @@ use ppexchanger::peerdb::PeerDb;
 use ppexchanger::protocol::{fingerprint as pubkey_fingerprint, Beacon, FrameBody};
 use ppexchanger::tui::{self, PeerState, UiConfig, UiState};
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -318,10 +319,26 @@ fn start_tui(
                         let inbound_tx_for_driver = inbound_tx_for_listener.clone();
                         thread::spawn(move || {
                             let mut s = stream;
-                            match ppexchanger::net::handshake::run_responder(&mut s, &kp2) {
+                            // Probe gate: peek for the 4-byte PPXP magic. If it
+                            // matches, echo it back and proceed to the handshake.
+                            let mut head = [0u8; 4];
+                            if s.read_exact(&mut head).is_err() {
+                                return;
+                            }
+                            let prefix = if &head == b"PPXP" {
+                                let _ = s.write_all(b"PPXP");
+                                Vec::new()
+                            } else {
+                                head.to_vec()
+                            };
+                            let mut wrapped = ppexchanger::net::listener::PrefixedStream {
+                                head: &prefix,
+                                inner: s,
+                            };
+                            match ppexchanger::net::handshake::run_responder(&mut wrapped, &kp2) {
                                 Ok(res) => {
                                     let session = Session::new(
-                                        s,
+                                        wrapped.inner,
                                         res.send_key,
                                         res.recv_key,
                                         res.remote_static,
