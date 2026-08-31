@@ -134,6 +134,9 @@ pub struct UiState {
     /// Modal state for `/settings` / `Ctrl-,`. `None` means the popup is
     /// closed; otherwise it tracks the active tab + cursor + dirty flag.
     pub settings: Option<SettingsState>,
+    /// Modal state for an inbound connection request. `None` means no pending
+    /// request; otherwise the modal is shown and user can accept or deny.
+    pub pending_connection: Option<ConnectionRequest>,
     /// True until the user dismisses the large startup logo (or sends
     /// their first message). Lives in UiState so render() doesn't need
     /// a separate channel to know whether to draw it.
@@ -182,8 +185,17 @@ pub struct DiscoveryMethod {
 #[derive(Debug, Clone)]
 pub struct DiscoveredPeer {
     pub name: Option<String>,
+    pub hostname: Option<String>,
     pub addr: std::net::SocketAddr,
     pub fingerprint: Option<String>,
+}
+
+/// An inbound connection request waiting for user accept/deny.
+#[derive(Clone)]
+pub struct ConnectionRequest {
+    pub addr: std::net::SocketAddr,
+    pub name: String,
+    pub fingerprint: String,
 }
 
 #[derive(Clone)]
@@ -227,6 +239,7 @@ impl UiState {
             file_offer: None,
             discovery: None,
             settings: None,
+            pending_connection: None,
             show_logo: true,
             scanline_tick: false,
             bound_port: 0,
@@ -267,23 +280,54 @@ impl UiState {
             Event::PeerSeen {
                 peer_id,
                 name,
+                hostname,
                 fingerprint,
                 addr,
                 ..
             } => {
+                // Update or add peer as "Seen" state (discovered but not connected)
+                let display_name = if hostname.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{} ({})", name, hostname)
+                };
                 if let Some(p) = self.peers.iter_mut().find(|p| &p.peer_id == peer_id) {
-                    p.name = name.clone();
+                    p.name = display_name;
                     p.fingerprint = fingerprint.clone();
                 } else {
                     self.peers.push(UiPeer {
                         peer_id: *peer_id,
-                        name: name.clone(),
+                        name: display_name,
                         fingerprint: fingerprint.clone(),
                         trusted: false,
                         state: PeerState::Seen,
                     });
                 }
                 let _ = addr;
+            }
+            Event::ConnectionRequest {
+                addr,
+                name,
+                hostname,
+                fingerprint,
+            } => {
+                // Show connection request popup
+                let display_name = if hostname.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{} ({})", name, hostname)
+                };
+                self.pending_connection = Some(crate::tui::ConnectionRequest {
+                    addr: *addr,
+                    name: display_name,
+                    fingerprint: fingerprint.clone(),
+                });
+            }
+            Event::ConnectionAccepted { .. } => {
+                // Handled by PeerConnected event that follows
+            }
+            Event::ConnectionDenied { addr } => {
+                self.status = format!("connection denied by {}", addr);
             }
             Event::PeerConnected {
                 peer_id,
@@ -348,6 +392,7 @@ impl UiState {
                         .iter()
                         .map(|p| DiscoveredPeer {
                             name: p.name.clone(),
+                            hostname: p.hostname.clone(),
                             addr: p.addr,
                             fingerprint: p.fingerprint.clone(),
                         })
@@ -1181,18 +1226,20 @@ mod tests {
             peer_id: [0u8; 16],
             keypair: crate::crypto::Keypair::generate(),
             name: "alice".into(),
+            hostname: "test-host".into(),
         };
         let mut s = UiState::from_identity(&id);
         let ev = Event::PeerSeen {
             peer_id: [1u8; 16],
             name: "bob".into(),
+            hostname: "macbook".into(),
             public_key: [0u8; 32],
             fingerprint: "deadbeef00000000".into(),
             addr: "127.0.0.1:1".parse().unwrap(),
         };
         s.apply(&ev);
         assert_eq!(s.peers.len(), 1);
-        assert_eq!(s.peers[0].name, "bob");
+        assert_eq!(s.peers[0].name, "bob (macbook)");
     }
 
     #[test]
@@ -1201,6 +1248,7 @@ mod tests {
             peer_id: [0u8; 16],
             keypair: crate::crypto::Keypair::generate(),
             name: "alice".into(),
+            hostname: "test-host".into(),
         };
         let mut s = UiState::from_identity(&id);
         s.apply(&Event::TextMessage {
@@ -1218,6 +1266,7 @@ mod tests {
             peer_id: [0u8; 16],
             keypair: crate::crypto::Keypair::generate(),
             name: "alice".into(),
+            hostname: "test-host".into(),
         };
         let mut s = UiState::from_identity(&id);
         s.max_scrollback = 4;
@@ -1239,6 +1288,7 @@ mod tests {
             peer_id: [0u8; 16],
             keypair: crate::crypto::Keypair::generate(),
             name: "alice".into(),
+            hostname: "test-host".into(),
         };
         let mut s = UiState::from_identity(&id);
         for i in 0..5 {
@@ -1262,6 +1312,7 @@ mod tests {
             peer_id: [0u8; 16],
             keypair: crate::crypto::Keypair::generate(),
             name: "alice".into(),
+            hostname: "test-host".into(),
         };
         let s = UiState::from_identity(&id);
         assert!(!s.scanline_tick);
@@ -1277,6 +1328,7 @@ mod tests {
             peer_id: [0u8; 16],
             keypair: crate::crypto::Keypair::generate(),
             name: "alice".into(),
+            hostname: "test-host".into(),
         };
         let mut s = UiState::from_identity(&id);
         assert!(s.show_logo);
@@ -1305,6 +1357,7 @@ mod tests {
             peer_id: [0u8; 16],
             keypair: crate::crypto::Keypair::generate(),
             name: "alice".into(),
+            hostname: "test-host".into(),
         };
         let mut s = UiState::from_identity(&id);
         assert_eq!(s.focus, Focus::Chat);
@@ -1320,6 +1373,7 @@ mod tests {
             peer_id: [0u8; 16],
             keypair: crate::crypto::Keypair::generate(),
             name: "alice".into(),
+            hostname: "test-host".into(),
         };
         let mut s = UiState::from_identity(&id);
         s.start_discovery();
@@ -1334,6 +1388,7 @@ mod tests {
             peer_id: [0u8; 16],
             keypair: crate::crypto::Keypair::generate(),
             name: "alice".into(),
+            hostname: "test-host".into(),
         };
         let mut s = UiState::from_identity(&id);
         assert!(s.discovery.is_none());
@@ -1347,6 +1402,7 @@ mod tests {
             method: "UDP multicast (239.255.42.99)".into(),
             peers: vec![crate::events::DiscoveredPeer {
                 name: Some("bob".into()),
+                hostname: Some("macbook".into()),
                 addr: "10.0.0.2:7777".parse().unwrap(),
                 fingerprint: Some("abcd".into()),
             }],
@@ -1370,6 +1426,7 @@ mod tests {
             peer_id: [0u8; 16],
             keypair: crate::crypto::Keypair::generate(),
             name: "alice".into(),
+            hostname: "test-host".into(),
         };
         let mut s = UiState::from_identity(&id);
         s.start_discovery();
@@ -1377,6 +1434,7 @@ mod tests {
             method: "TCP subnet scan".into(),
             peers: vec![crate::events::DiscoveredPeer {
                 name: None,
+                hostname: None,
                 addr: "10.0.0.3:7777".parse().unwrap(),
                 fingerprint: None,
             }],
@@ -1386,11 +1444,13 @@ mod tests {
             peers: vec![
                 crate::events::DiscoveredPeer {
                     name: None,
+                    hostname: None,
                     addr: "10.0.0.3:7777".parse().unwrap(),
                     fingerprint: None,
                 },
                 crate::events::DiscoveredPeer {
                     name: None,
+                    hostname: None,
                     addr: "10.0.0.4:7777".parse().unwrap(),
                     fingerprint: None,
                 },
@@ -1408,6 +1468,7 @@ mod tests {
             peer_id: [0u8; 16],
             keypair: crate::crypto::Keypair::generate(),
             name: "alice".into(),
+            hostname: "test-host".into(),
         };
         let mut s = UiState::from_identity(&id);
         let mk = |pid: u8, name: &str, state: PeerState| UiPeer {
@@ -1437,6 +1498,7 @@ mod tests {
             peer_id: [0u8; 16],
             keypair: crate::crypto::Keypair::generate(),
             name: "alice".into(),
+            hostname: "test-host".into(),
         };
         let mut s = UiState::from_identity(&id);
         let mk = |pid: u8, name: &str, state: PeerState| UiPeer {

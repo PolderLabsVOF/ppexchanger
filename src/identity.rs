@@ -17,6 +17,9 @@ pub struct Identity {
     pub peer_id: [u8; 16],
     pub keypair: Keypair,
     pub name: String,
+    /// Machine hostname for discovery identification.
+    /// Loaded from config if set, otherwise falls back to system hostname.
+    pub hostname: String,
 }
 
 impl Identity {
@@ -56,10 +59,15 @@ fn fresh(name_override: Option<String>) -> io::Result<Identity> {
             "name length out of range",
         ));
     }
+    // Get system hostname for discovery identification
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_default();
     Ok(Identity {
         peer_id: pid,
         keypair: kp,
         name,
+        hostname,
     })
 }
 
@@ -82,29 +90,56 @@ fn load(path: &Path) -> io::Result<Identity> {
     let mut secret = [0u8; 32];
     secret.copy_from_slice(&bytes[20..52]);
     let name_len = u16::from_le_bytes([bytes[52], bytes[53]]) as usize;
-    if 54 + name_len != bytes.len() {
+    let mut pos = 54;
+    if pos + name_len > bytes.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "name length mismatch",
         ));
     }
-    let name = std::str::from_utf8(&bytes[54..])
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "identity name not utf-8"))?;
+    let name = std::str::from_utf8(&bytes[pos..pos + name_len])
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "identity name not utf-8"))?
+        .to_string();
+    pos += name_len;
+
+    // hostname is optional - try to read it if present (v2 format)
+    let hostname = if pos + 2 <= bytes.len() {
+        let hostname_len = u16::from_le_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+        pos += 2;
+        if pos + hostname_len <= bytes.len() && hostname_len > 0 {
+            std::str::from_utf8(&bytes[pos..pos + hostname_len])
+                .map(|h| h.to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
     Ok(Identity {
         peer_id: pid,
         keypair: Keypair::from_bytes(secret),
-        name: name.to_string(),
+        name,
+        hostname,
     })
 }
 
 fn save(path: &Path, id: &Identity) -> io::Result<()> {
     let secret = id.secret_bytes();
-    let mut buf = Vec::with_capacity(4 + 16 + 32 + 2 + id.name.len());
+    let hostname_bytes = id.hostname.as_bytes();
+    let mut buf = Vec::with_capacity(
+        4 + 16 + 32 + 2 + id.name.len() + 2 + hostname_bytes.len(),
+    );
     buf.extend_from_slice(MAGIC);
     buf.extend_from_slice(&id.peer_id);
     buf.extend_from_slice(&secret);
     let name_len = id.name.len() as u16;
     buf.extend_from_slice(&name_len.to_le_bytes());
     buf.extend_from_slice(id.name.as_bytes());
+    // Include hostname in v2 format
+    let hostname_len = id.hostname.len() as u16;
+    buf.extend_from_slice(&hostname_len.to_le_bytes());
+    buf.extend_from_slice(hostname_bytes);
     std::fs::write(path, &buf)
 }

@@ -71,11 +71,25 @@ pub fn render(
             )));
         } else {
             for p in &method.peers {
-                let label = match (&p.name, &p.fingerprint) {
-                    (Some(n), Some(fp)) => format!("    {}  {}  {}", n, p.addr, short_fp(fp)),
-                    (Some(n), None) => format!("    {}  {}", n, p.addr),
-                    (None, Some(fp)) => format!("    {}  {}", p.addr, short_fp(fp)),
-                    (None, None) => format!("    {}", p.addr),
+                // Show hostname and name if available
+                let label = match (&p.hostname, &p.name, &p.fingerprint) {
+                    (Some(h), Some(n), Some(fp)) if !h.is_empty() => {
+                        format!("    {} ({})  {}  {}", n, h, p.addr, short_fp(fp))
+                    }
+                    (Some(h), Some(n), None) if !h.is_empty() => {
+                        format!("    {} ({})  {}", n, h, p.addr)
+                    }
+                    (Some(h), None, Some(fp)) if !h.is_empty() => {
+                        format!("    {}  {}  {}", h, p.addr, short_fp(fp))
+                    }
+                    (Some(h), None, None) if !h.is_empty() => {
+                        format!("    {}  {}", h, p.addr)
+                    }
+                    (None, Some(n), Some(fp)) => format!("    {}  {}  {}", n, p.addr, short_fp(fp)),
+                    (None, Some(n), None) => format!("    {}  {}", n, p.addr),
+                    (None, None, Some(fp)) => format!("    {}  {}", p.addr, short_fp(fp)),
+                    (None, None, None) => format!("    {}", p.addr),
+                    _ => format!("    {}  (unknown)", p.addr),
                 };
                 lines.push(Line::from(Span::styled(
                     label,

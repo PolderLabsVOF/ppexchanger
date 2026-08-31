@@ -14,8 +14,16 @@ use std::convert::TryInto;
 
 /// UDP beacon magic: `"LANC"` in ASCII.
 pub const BEACON_MAGIC: [u8; 4] = [0x4C, 0x41, 0x4E, 0x43];
-pub const BEACON_VERSION: u8 = 1;
+pub const BEACON_VERSION: u8 = 2;
 pub const BEACON_MSG_TYPE: u8 = 1;
+
+/// TCP connection request magic: sent after PPXP probe to indicate connection request.
+/// If listener sees this, it should prompt user for accept/deny instead of auto-accept.
+pub const PPXP_REQUEST: [u8; 4] = [0x50, 0x50, 0x58, 0x50]; // "PPXP" in ASCII
+/// TCP connection response magic: sent after PPXP_REQUEST to accept the connection.
+pub const PPXP_ACCEPT: [u8; 4] = [0x41, 0x43, 0x43, 0x45]; // "ACCE"
+/// TCP connection response magic: sent after PPXP_REQUEST to deny the connection.
+pub const PPXP_DENY: [u8; 4] = [0x44, 0x45, 0x4E, 0x59]; // "DENY"
 
 /// Hard cap on beacon body — keeps malformed packets from chewing CPU.
 pub const BEACON_MAX_BYTES: usize = 256;
@@ -48,6 +56,8 @@ pub struct Beacon {
     pub public_key: [u8; 32],
     pub tcp_port: u16,
     pub name: String,
+    /// Machine hostname for identification (may be empty for v1 beacons)
+    pub hostname: String,
 }
 
 /// 16-byte random transfer identifier. Generated sender-side with
@@ -78,23 +88,29 @@ pub fn encode_beacon(b: &Beacon) -> Option<Vec<u8>> {
         return None;
     }
     let name_bytes = b.name.as_bytes();
-    let mut out = Vec::with_capacity(4 + 1 + 1 + 2 + 16 + 32 + 2 + name_bytes.len() + 4);
+    let hostname_bytes = b.hostname.as_bytes();
+    let mut out = Vec::with_capacity(
+        4 + 1 + 1 + 2 + 16 + 32 + 2 + 2 + name_bytes.len() + 2 + hostname_bytes.len() + 4,
+    );
     out.extend_from_slice(&BEACON_MAGIC);
     out.push(BEACON_VERSION);
     out.push(BEACON_MSG_TYPE);
-    let payload_len = (16 + 32 + 2 + 2 + name_bytes.len()) as u16;
+    let payload_len = (16 + 32 + 2 + 2 + name_bytes.len() + 2 + hostname_bytes.len()) as u16;
     out.extend_from_slice(&payload_len.to_be_bytes());
     out.extend_from_slice(&b.peer_id);
     out.extend_from_slice(&b.public_key);
     out.extend_from_slice(&b.tcp_port.to_be_bytes());
     out.extend_from_slice(&(name_bytes.len() as u16).to_be_bytes());
     out.extend_from_slice(name_bytes);
+    out.extend_from_slice(&(hostname_bytes.len() as u16).to_be_bytes());
+    out.extend_from_slice(hostname_bytes);
     let crc = crc32(&out);
     out.extend_from_slice(&crc.to_be_bytes());
     Some(out)
 }
 
 /// Decode a beacon from bytes. Returns `None` on any structural or CRC failure.
+/// Handles both v1 (no hostname) and v2 (with hostname) beacons.
 pub fn decode_beacon(bytes: &[u8]) -> Option<Beacon> {
     if bytes.len() < 4 + 1 + 1 + 2 + 16 + 32 + 2 + 2 + 4 {
         return None;
@@ -105,7 +121,10 @@ pub fn decode_beacon(bytes: &[u8]) -> Option<Beacon> {
     if bytes[0..4] != BEACON_MAGIC {
         return None;
     }
-    if bytes[4] != BEACON_VERSION || bytes[5] != BEACON_MSG_TYPE {
+    let version = bytes[4];
+    let msg_type = bytes[5];
+    // Accept v1 (version=1) or v2 (version=2) beacons
+    if (version != 1 && version != 2) || msg_type != BEACON_MSG_TYPE {
         return None;
     }
     let payload_len = u16::from_be_bytes(bytes[6..8].try_into().ok()?) as usize;
@@ -131,18 +150,36 @@ pub fn decode_beacon(bytes: &[u8]) -> Option<Beacon> {
     p += 2;
     let name_len = u16::from_be_bytes(bytes[p..p + 2].try_into().ok()?) as usize;
     p += 2;
-    if p + name_len + 4 > total_len {
+    if p + name_len > total_len - 4 {
         return None;
     }
     let name = std::str::from_utf8(&bytes[p..p + name_len]).ok()?.to_string();
     if name.is_empty() {
         return None;
     }
+    p += name_len;
+
+    // v2 beacons have hostname after name, v1 beacons end here
+    let hostname = if version >= 2 && p + 2 <= total_len - 4 {
+        let hostname_len = u16::from_be_bytes(bytes[p..p + 2].try_into().ok()?) as usize;
+        p += 2;
+        if p + hostname_len > total_len - 4 {
+            return None;
+        }
+        std::str::from_utf8(&bytes[p..p + hostname_len])
+            .ok()?
+            .to_string()
+        // hostname can be empty string
+    } else {
+        String::new()
+    };
+
     Some(Beacon {
         peer_id,
         public_key,
         tcp_port,
         name,
+        hostname,
     })
 }
 
@@ -421,6 +458,7 @@ mod tests {
             public_key: [9u8; 32],
             tcp_port: 4242,
             name: "alice".into(),
+            hostname: "test-host".into(),
         };
         let enc = encode_beacon(&b).unwrap();
         let dec = decode_beacon(&enc).unwrap();
@@ -434,6 +472,7 @@ mod tests {
             public_key: [2u8; 32],
             tcp_port: 1,
             name: "x".into(),
+            hostname: "test-host".into(),
         };
         let mut enc = encode_beacon(&b).unwrap();
         let last = enc.len() - 1;
@@ -448,6 +487,7 @@ mod tests {
             public_key: [0u8; 32],
             tcp_port: 1,
             name: "x".into(),
+            hostname: "test-host".into(),
         })
         .unwrap();
         b[0] = 0;

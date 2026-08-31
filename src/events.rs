@@ -34,8 +34,25 @@ pub enum Event {
     PeerSeen {
         peer_id: PeerId,
         name: String,
+        hostname: String,
         public_key: [u8; 32],
         fingerprint: String,
+        addr: SocketAddr,
+    },
+    /// An inbound connection request that requires user accept/deny.
+    ConnectionRequest {
+        addr: SocketAddr,
+        name: String,
+        hostname: String,
+        fingerprint: String,
+    },
+    /// Our connection request was accepted.
+    ConnectionAccepted {
+        peer_id: PeerId,
+        name: String,
+    },
+    /// Our connection request was denied.
+    ConnectionDenied {
         addr: SocketAddr,
     },
     /// We have a fresh encrypted session with a peer (either inbound or outbound).
@@ -109,6 +126,7 @@ pub struct FileOffer {
 #[derive(Debug, Clone)]
 pub struct DiscoveredPeer {
     pub name: Option<String>,
+    pub hostname: Option<String>,
     pub addr: SocketAddr,
     pub fingerprint: Option<String>,
 }
@@ -128,6 +146,10 @@ pub enum Action {
     /// pending transfer state.
     RejectFile { from_peer: PeerId, id: FileId },
     Connect { addr: SocketAddr, name_hint: String, public_key: [u8; 32] },
+    /// Accept an inbound connection request after user confirms.
+    AcceptConnection { addr: SocketAddr },
+    /// Deny an inbound connection request after user declines.
+    DenyConnection { addr: SocketAddr },
     Disconnect { peer_id: PeerId },
     Trust { peer_id: PeerId },
     Revoke { peer_id: PeerId },

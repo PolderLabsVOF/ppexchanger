@@ -60,6 +60,7 @@ pub fn connect(
     let display_name = name_hint.clone().unwrap_or_else(|| format!("peer@{}", addr));
     let discovered = DiscoveredPeer {
         name: Some(display_name.clone()),
+        hostname: None,
         addr,
         fingerprint: Some(fingerprint.clone()),
     };

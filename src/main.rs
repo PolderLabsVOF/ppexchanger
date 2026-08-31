@@ -275,6 +275,27 @@ fn start_tui(
     // it without cloning the inner struct (Keypair is intentionally not Clone).
     let static_kp: Arc<ppexchanger::crypto::Keypair> = Arc::new(id.keypair);
 
+    // Announcer thread: continuously broadcasts our presence so peers running
+    // `/discover` can find us even if we haven't initiated discovery ourselves.
+    // This allows one-sided discovery: only the initiator needs to run `/discover`.
+    let announcer_stop = Arc::clone(&stop);
+    let announcer_beacon = announce_beacon.clone();
+    std::thread::spawn(move || {
+        let mut d = match ppexchanger::net::discovery::Discovery::bind(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("announcer bind failed: {}", e);
+                return;
+            }
+        };
+        while !announcer_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Err(e) = d.announce_both(&announcer_beacon) {
+                eprintln!("announcer error: {}", e);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+    });
+
     // Listener thread: accepts inbound TCP, runs responder handshake,
     // hands the outbound sender to the action thread via RegistryMsg,
     // and spawns the per-connection session driver.
@@ -423,6 +444,14 @@ fn start_tui(
                         let mut db = PeerDb::default();
                         db.trust(&peer_id);
                         let _ = db.save();
+                    }
+                    Ok(Action::AcceptConnection { addr: _ }) => {
+                        // TODO: implement connection request prompts
+                        // For now, auto-accept
+                    }
+                    Ok(Action::DenyConnection { addr: _ }) => {
+                        // TODO: implement connection request prompts
+                        // For now, nothing to do
                     }
                     Ok(Action::Disconnect { peer_id }) => {
                         // Drop our reference to the outbound sender; the
@@ -1049,6 +1078,7 @@ fn make_beacon(id: &ppexchanger::identity::Identity, tcp_port: u16) -> Beacon {
         public_key: id.keypair.public_bytes(),
         tcp_port,
         name: id.name.clone(),
+        hostname: id.hostname.clone(),
     }
 }
 
@@ -1108,6 +1138,7 @@ fn do_discover(
             .into_iter()
             .map(|a| ppexchanger::events::DiscoveredPeer {
                 name: None,
+                hostname: None,
                 addr: std::net::SocketAddr::V4(a),
                 fingerprint: None,
             })
@@ -1147,6 +1178,7 @@ fn multicast_scan(
             let tcp_addr: SocketAddr = (src.ip(), b.tcp_port).into();
             seen.entry(b.peer_id).or_insert(ppexchanger::events::DiscoveredPeer {
                 name: if b.name.is_empty() { None } else { Some(b.name) },
+                hostname: if b.hostname.is_empty() { None } else { Some(b.hostname) },
                 addr: tcp_addr,
                 fingerprint: Some(pubkey_fingerprint(&b.public_key)),
             });

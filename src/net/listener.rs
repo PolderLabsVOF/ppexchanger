@@ -7,8 +7,7 @@ use crate::net::handshake::{run_responder, PROBE_MAGIC};
 use crate::net::session::Session;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 /// What the listener hands back to the caller for each accepted peer.
 pub struct AcceptedPeer {
