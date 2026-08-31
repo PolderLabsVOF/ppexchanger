@@ -1032,23 +1032,38 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
 
 fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
     let active = state.focus == Focus::Chat;
-    let selected_name = state.selected().map(|p| p.name.clone()).unwrap_or_default();
+    let selected = state.selected();
+    let selected_name = selected.map(|p| p.name.clone()).unwrap_or_default();
+
+    // Build title with peer status indicator
     let title = if selected_name.is_empty() {
-        format!(" {} ppexchanger — {} ", glyphs.cursor, state.self_name)
+        Line::from(vec![Span::styled(
+            format!(" {} ppexchanger — {} ", glyphs.cursor, state.self_name),
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        )])
     } else {
-        format!(
-            " {} {} {} {} ",
-            glyphs.cursor,
-            state.self_name,
-            glyphs.arrow,
-            selected_name
-        )
+        // Show status dot for selected peer with appropriate color
+        let (dot, dot_color) = match selected.map(|p| p.state) {
+            Some(PeerState::Connected) => (glyphs.dot_connected, theme.status_online),
+            Some(PeerState::Seen) => (glyphs.dot_seen, theme.status_seen),
+            Some(PeerState::Gone) | None => (glyphs.dot_gone, theme.status_offline),
+        };
+        Line::from(vec![
+            Span::styled(
+                format!(" {} ", dot),
+                Style::default().fg(dot_color),
+            ),
+            Span::styled(
+                format!("{}{} {} {} ", glyphs.cursor, state.self_name, glyphs.arrow, selected_name),
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            ),
+        ])
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
         .border_style(theme.border_style(active))
-        .title(Span::styled(title, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)));
+        .title(title);
 
     // Apply scroll: when scrolled back, show messages ending at
     // `len - scroll`. Slice to whatever fits in the area.

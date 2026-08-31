@@ -71,30 +71,38 @@ pub fn render(
             )));
         } else {
             for p in &method.peers {
+                // Status dot: yellow for "seen" (discovered via beacon/scan)
+                let status_dot = Span::styled(
+                    "\u{25CF} ", // filled circle
+                    Style::default().fg(theme.status_seen),
+                );
                 // Show hostname and name if available
                 let label = match (&p.hostname, &p.name, &p.fingerprint) {
                     (Some(h), Some(n), Some(fp)) if !h.is_empty() => {
-                        format!("    {} ({})  {}  {}", n, h, p.addr, short_fp(fp))
+                        format!("{} ({})  {}  {}", n, h, p.addr, short_fp(fp))
                     }
                     (Some(h), Some(n), None) if !h.is_empty() => {
-                        format!("    {} ({})  {}", n, h, p.addr)
+                        format!("{} ({})  {}", n, h, p.addr)
                     }
                     (Some(h), None, Some(fp)) if !h.is_empty() => {
-                        format!("    {}  {}  {}", h, p.addr, short_fp(fp))
+                        format!("{}  {}  {}", h, p.addr, short_fp(fp))
                     }
                     (Some(h), None, None) if !h.is_empty() => {
-                        format!("    {}  {}", h, p.addr)
+                        format!("{}  {}", h, p.addr)
                     }
-                    (None, Some(n), Some(fp)) => format!("    {}  {}  {}", n, p.addr, short_fp(fp)),
-                    (None, Some(n), None) => format!("    {}  {}", n, p.addr),
-                    (None, None, Some(fp)) => format!("    {}  {}", p.addr, short_fp(fp)),
-                    (None, None, None) => format!("    {}", p.addr),
-                    _ => format!("    {}  (unknown)", p.addr),
+                    (None, Some(n), Some(fp)) => format!("{}  {}  {}", n, p.addr, short_fp(fp)),
+                    (None, Some(n), None) => format!("{}  {}", n, p.addr),
+                    (None, None, Some(fp)) => format!("{}  {}", p.addr, short_fp(fp)),
+                    (None, None, None) => format!("{}", p.addr),
+                    _ => format!("{}  (unknown)", p.addr),
                 };
-                lines.push(Line::from(Span::styled(
-                    label,
-                    Style::default().fg(theme.peer_text).bg(theme.bg),
-                )));
+                lines.push(Line::from(vec![
+                    status_dot,
+                    Span::styled(
+                        label,
+                        Style::default().fg(theme.peer_text).bg(theme.bg),
+                    ),
+                ]));
             }
         }
     }

@@ -61,6 +61,10 @@ pub struct Theme {
     pub status_fg: Color,
     pub gauge_filled: Color,
     pub gauge_unfilled: Color,
+    /// Peer status indicator colors
+    pub status_online: Color,  // Green - peer is connected
+    pub status_seen: Color,    // Yellow - peer seen via beacon
+    pub status_offline: Color, // Gray - peer unreachable
 }
 
 impl Theme {
@@ -93,6 +97,9 @@ impl Theme {
             status_fg: Color::White,
             gauge_filled: Color::Cyan,
             gauge_unfilled: Color::DarkGray,
+            status_online: Color::Green,
+            status_seen: Color::Yellow,
+            status_offline: Color::DarkGray,
         }
     }
 
@@ -115,6 +122,9 @@ impl Theme {
             status_fg: Color::Rgb(147, 161, 161),
             gauge_filled: Color::Rgb(133, 153, 0),
             gauge_unfilled: Color::Rgb(7, 54, 66),
+            status_online: Color::Rgb(0, 255, 136),
+            status_seen: Color::Rgb(181, 137, 0),
+            status_offline: Color::Rgb(88, 110, 117),
         }
     }
 
@@ -137,6 +147,9 @@ impl Theme {
             status_fg: Color::White,
             gauge_filled: Color::White,
             gauge_unfilled: Color::DarkGray,
+            status_online: Color::Green,
+            status_seen: Color::Yellow,
+            status_offline: Color::DarkGray,
         }
     }
 
@@ -159,6 +172,9 @@ impl Theme {
             status_fg: Color::Rgb(0, 255, 255),
             gauge_filled: Color::Rgb(255, 0, 255),
             gauge_unfilled: Color::Rgb(80, 80, 80),
+            status_online: Color::Rgb(0, 255, 136),
+            status_seen: Color::Rgb(255, 200, 0),
+            status_offline: Color::Rgb(100, 100, 100),
         }
     }
 
@@ -183,6 +199,9 @@ impl Theme {
             status_fg: Color::Rgb(0xff, 0xb0, 0x00),
             gauge_filled: Color::Rgb(0xff, 0xb0, 0x00),
             gauge_unfilled: Color::Rgb(0x33, 0x22, 0x00),
+            status_online: Color::Rgb(0x66, 0xff, 0x66),
+            status_seen: Color::Rgb(0xff, 0xb0, 0x00),
+            status_offline: Color::Rgb(0x55, 0x32, 0x00),
         }
     }
 
