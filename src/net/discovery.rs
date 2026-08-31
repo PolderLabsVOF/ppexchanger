@@ -5,10 +5,13 @@
 //! `protocol::Beacon`. Received beacons (from other peers) are yielded to
 //! callers via `recv_beacons`.
 //!
-//! Note: some consumer WiFi routers block multicast between associated
-//! clients. If discovery doesn't work on your network, the only stdlib-side
-//! fix is to switch from multicast to broadcast (255.255.255.255) — see the
-//! `broadcast_fallback_enabled` flag.
+//! ## Broadcast fallback
+//!
+//! Consumer WiFi routers often block multicast between associated clients.
+//! When multicast fails to find peers, we fall back to UDP broadcast on the
+//! local subnet. The `announce_both` method sends to BOTH the multicast
+//! group AND the local subnet's broadcast address, maximizing discovery
+//! chances regardless of network configuration.
 
 use crate::protocol::{decode_beacon, encode_beacon, Beacon};
 use std::io;
@@ -27,6 +30,9 @@ pub const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(2);
 pub struct Discovery {
     socket: UdpSocket,
     group_addr: SocketAddr,
+    /// Optional local IP for broadcast fallback. Computed on demand via
+    /// `local_subnet_broadcast()` when `announce_both` is called.
+    local_ip: Option<Ipv4Addr>,
 }
 
 impl Discovery {
@@ -44,7 +50,7 @@ impl Discovery {
         socket.join_multicast_v4(&MULTICAST_GROUP, &Ipv4Addr::UNSPECIFIED)?;
         socket.set_read_timeout(Some(Duration::from_millis(500)))?;
         let group_addr = SocketAddr::V4(SocketAddrV4::new(MULTICAST_GROUP, MULTICAST_PORT));
-        Ok(Self { socket, group_addr })
+        Ok(Self { socket, group_addr, local_ip: None })
     }
 
     /// The local UDP port the socket is bound to.
@@ -58,6 +64,51 @@ impl Discovery {
             io::Error::new(io::ErrorKind::InvalidInput, "beacon encode failed")
         })?;
         self.socket.send_to(&bytes, self.group_addr)?;
+        Ok(())
+    }
+
+    /// Compute the local subnet's broadcast address (assumes /24 subnet).
+    /// Uses the same trick as `scan::local_outbound_ipv4`: bind a UDP socket
+    /// to an external address and read back our local IP.
+    pub fn local_subnet_broadcast() -> io::Result<Ipv4Addr> {
+        let probe: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 80);
+        let sock = UdpSocket::bind("0.0.0.0:0")?;
+        sock.connect(probe)?;
+        match sock.local_addr()? {
+            std::net::SocketAddr::V4(v4) => {
+                // Assume /24 — broadcast is x.x.x.255
+                let ip = *v4.ip();
+                let mut octets = ip.octets();
+                octets[3] = 255;
+                Ok(Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]))
+            }
+            std::net::SocketAddr::V6(_) => Err(io::Error::other("no IPv4 outbound interface")),
+        }
+    }
+
+    /// Send one beacon to the given address. Used for broadcast fallback.
+    fn send_to(&self, addr: SocketAddr, beacon: &Beacon) -> io::Result<()> {
+        let bytes = encode_beacon(beacon).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "beacon encode failed")
+        })?;
+        self.socket.send_to(&bytes, addr)?;
+        Ok(())
+    }
+
+    /// Announce via BOTH multicast group AND local subnet broadcast.
+    /// This maximizes discovery chances on networks where multicast may be
+    /// blocked by consumer routers.
+    pub fn announce_both(&mut self, beacon: &Beacon) -> io::Result<()> {
+        // Always send to multicast group.
+        self.send_to(self.group_addr, beacon)?;
+        // Also try local subnet broadcast if available.
+        if self.local_ip.is_none() {
+            self.local_ip = Self::local_subnet_broadcast().ok();
+        }
+        if let Some(local_ip) = self.local_ip {
+            let broadcast_addr = SocketAddr::V4(SocketAddrV4::new(local_ip, MULTICAST_PORT));
+            let _ = self.send_to(broadcast_addr, beacon);
+        }
         Ok(())
     }
 
@@ -80,20 +131,20 @@ impl Discovery {
     /// Convenience: announce periodically in a loop until the stop signal
     /// is set. The caller is responsible for spawning this on its own thread.
     pub fn announce_loop(
-        &self,
+        &mut self,
         beacon: Beacon,
         stop: &std::sync::atomic::AtomicBool,
     ) -> io::Result<()> {
         use std::sync::atomic::Ordering;
         // Send one immediately so the UI is non-empty.
-        let _ = self.announce(&beacon);
+        let _ = self.announce_both(&beacon);
         let mut last = Instant::now();
         loop {
             if stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
             if last.elapsed() >= ANNOUNCE_INTERVAL {
-                self.announce(&beacon)?;
+                self.announce_both(&beacon)?;
                 last = Instant::now();
             }
             std::thread::sleep(Duration::from_millis(100));

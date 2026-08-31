@@ -1134,8 +1134,8 @@ fn multicast_scan(
     stop: &Arc<AtomicBool>,
     window: Duration,
 ) -> std::io::Result<Vec<ppexchanger::events::DiscoveredPeer>> {
-    let d = Discovery::bind(0)?;
-    let _ = d.announce(beacon);
+    let mut d = Discovery::bind(0)?;
+    let _ = d.announce_both(beacon);
     let deadline = std::time::Instant::now() + window;
     let mut seen: std::collections::HashMap<ppexchanger::events::PeerId, ppexchanger::events::DiscoveredPeer> =
         std::collections::HashMap::new();

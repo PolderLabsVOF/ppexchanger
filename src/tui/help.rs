@@ -10,7 +10,7 @@ use ratatui::Frame;
 /// Width / height of the help popup. Picked to fit comfortably in a 80x24
 /// terminal with room to spare on each side.
 const POPUP_W: u16 = 56;
-const POPUP_H: u16 = 18;
+const POPUP_H: u16 = 24;
 
 pub fn render(f: &mut Frame, theme: &super::theme::Theme, glyphs: &super::theme::Glyphs) {
     let area = f.area();
@@ -47,9 +47,20 @@ pub fn render(f: &mut Frame, theme: &super::theme::Theme, glyphs: &super::theme:
         Line::from("  Ctrl-T      toggle trust on selected peer"),
         Line::from("  Ctrl-R      revoke selected peer"),
         Line::from("  Ctrl-L      clear input"),
+        Line::from("  Ctrl-,      open settings"),
         Line::from("  Esc         cancel / clear"),
         Line::from("  Ctrl-C / Q  quit"),
         Line::from("  ?           toggle this help"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Commands",
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  /discover   find peers on the local network"),
+        Line::from("  /theme      cycle theme (default/solarized/monochrome/neon/amber)"),
+        Line::from("  /settings   open settings dialog"),
+        Line::from("  /trust <n>  trust a peer by name"),
+        Line::from("  /revoke <n> revoke a peer's trust"),
     ];
     let para = Paragraph::new(lines)
         .block(block)

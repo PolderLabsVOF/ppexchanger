@@ -239,6 +239,11 @@ impl Theme {
     pub fn gauge_unfilled_style(&self) -> Style {
         Style::default().fg(self.gauge_unfilled).bg(self.bg)
     }
+
+    /// Style for secondary/placeholder text (e.g., empty state messages).
+    pub fn dim_style(&self) -> Style {
+        Style::default().fg(self.fg).bg(self.bg).add_modifier(Modifier::DIM)
+    }
 }
 
 /// Glyph set. The terminal width() check tells us whether the runtime can

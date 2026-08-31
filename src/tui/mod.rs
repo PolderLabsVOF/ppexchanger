@@ -936,43 +936,51 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
             Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         ));
 
-    let items: Vec<ListItem> = state
-        .peers
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let dot = match p.state {
-                PeerState::Connected => glyphs.dot_connected,
-                PeerState::Seen => glyphs.dot_seen,
-                PeerState::Gone => glyphs.dot_gone,
-            };
-            let trust = if p.trusted { glyphs.trusted } else { glyphs.untrusted };
-            let style = if p.trusted {
-                theme.trusted_style()
-            } else {
-                theme.untrusted_style()
-            };
-            let name_style = if p.state == PeerState::Connected {
-                theme.self_message_style()
-            } else {
-                theme.peer_message_style()
-            };
-            let label = if i == state.selected_peer {
-                Line::from(vec![
-                    Span::styled(
-                        format!("{} {} {}", dot, trust, p.name),
-                        name_style.add_modifier(Modifier::BOLD),
-                    ),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::styled(format!("{} {} ", dot, trust), style),
-                    Span::styled(p.name.clone(), name_style),
-                ])
-            };
-            ListItem::new(label)
-        })
-        .collect();
+    let items: Vec<ListItem> = if state.peers.is_empty() {
+        // Empty state: show helpful message
+        vec![ListItem::new(Line::from(vec![Span::styled(
+            "no peers — run /discover",
+            theme.dim_style(),
+        )]))]
+    } else {
+        state
+            .peers
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let dot = match p.state {
+                    PeerState::Connected => glyphs.dot_connected,
+                    PeerState::Seen => glyphs.dot_seen,
+                    PeerState::Gone => glyphs.dot_gone,
+                };
+                let trust = if p.trusted { glyphs.trusted } else { glyphs.untrusted };
+                let style = if p.trusted {
+                    theme.trusted_style()
+                } else {
+                    theme.untrusted_style()
+                };
+                let name_style = if p.state == PeerState::Connected {
+                    theme.self_message_style()
+                } else {
+                    theme.peer_message_style()
+                };
+                let label = if i == state.selected_peer {
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{} {} {}", dot, trust, p.name),
+                            name_style.add_modifier(Modifier::BOLD),
+                        ),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::styled(format!("{} {} ", dot, trust), style),
+                        Span::styled(p.name.clone(), name_style),
+                    ])
+                };
+                ListItem::new(label)
+            })
+            .collect()
+    };
 
     f.render_widget(List::new(items).block(block), area);
 }
@@ -1004,38 +1012,52 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
     let end = total.saturating_sub(state.scroll);
     let start = end.saturating_sub(visible_n);
     let dim_phase = state.scanline_tick; // flips each frame for CRT effect
-    let visible: Vec<Line> = state
-        .messages
-        .iter()
-        .skip(start)
-        .take(end - start)
-        .enumerate()
-        .map(|(i, m)| {
-            let who_style = if m.outgoing {
-                theme.self_message_style()
-            } else {
-                theme.peer_message_style()
-            };
-            let who = if m.outgoing {
-                state.self_name.clone()
-            } else {
-                m.from_name.clone()
-            };
-            let mut body_style =
-                Style::default().fg(theme.fg).bg(theme.bg);
-            // CRT scanline: every 4th row gets a DIM modifier so the
-            // text appears to scan downward, alternating each frame via
-            // `scanline_tick`. The coarser band (4 rows instead of 2)
-            // keeps messages legible while preserving the CRT vibe.
-            if dim_phase ^ (i % 4 == 0) {
-                body_style = body_style.add_modifier(Modifier::DIM);
-            }
-            Line::from(vec![
-                Span::styled(format!("{}: ", who), who_style.add_modifier(Modifier::BOLD)),
-                Span::styled(m.body.clone(), body_style),
-            ])
-        })
-        .collect();
+
+    // Empty state: show welcome message
+    let visible: Vec<Line> = if state.messages.is_empty() {
+        let welcome = if selected_name.is_empty() {
+            "connect to a peer to start chatting"
+        } else {
+            "no messages yet — say hello!"
+        };
+        vec![Line::from(vec![Span::styled(
+            welcome,
+            theme.dim_style(),
+        )])]
+    } else {
+        state
+            .messages
+            .iter()
+            .skip(start)
+            .take(end - start)
+            .enumerate()
+            .map(|(i, m)| {
+                let who_style = if m.outgoing {
+                    theme.self_message_style()
+                } else {
+                    theme.peer_message_style()
+                };
+                let who = if m.outgoing {
+                    state.self_name.clone()
+                } else {
+                    m.from_name.clone()
+                };
+                let mut body_style =
+                    Style::default().fg(theme.fg).bg(theme.bg);
+                // CRT scanline: every 4th row gets a DIM modifier so the
+                // text appears to scan downward, alternating each frame via
+                // `scanline_tick`. The coarser band (4 rows instead of 2)
+                // keeps messages legible while preserving the CRT vibe.
+                if dim_phase ^ (i % 4 == 0) {
+                    body_style = body_style.add_modifier(Modifier::DIM);
+                }
+                Line::from(vec![
+                    Span::styled(format!("{}: ", who), who_style.add_modifier(Modifier::BOLD)),
+                    Span::styled(m.body.clone(), body_style),
+                ])
+            })
+            .collect()
+    };
 
     let para = Paragraph::new(visible)
         .block(block)
