@@ -59,6 +59,7 @@ pub fn render(
         )));
     }
 
+    let mut peer_index = 0usize;
     for method in &state.results {
         lines.push(Line::from(Span::styled(
             format!(" {}", method.name),
@@ -96,13 +97,18 @@ pub fn render(
                     (None, None, None) => format!("{}", p.addr),
                     _ => format!("{}  (unknown)", p.addr),
                 };
+                let selected = peer_index == state.selected;
                 lines.push(Line::from(vec![
                     status_dot,
                     Span::styled(
                         label,
-                        Style::default().fg(theme.peer_text).bg(theme.bg),
+                        Style::default()
+                            .fg(theme.peer_text)
+                            .bg(if selected { theme.status_bg } else { theme.bg })
+                            .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
                     ),
                 ]));
+                peer_index += 1;
             }
         }
     }
@@ -122,7 +128,7 @@ pub fn render(
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  press Esc to close",
+            "  ↑/↓ select · Enter connect · click a peer · Esc close",
             Style::default().fg(theme.info).bg(theme.bg),
         )));
     }
@@ -136,6 +142,29 @@ pub fn render(
 
 pub fn rect(area: Rect) -> Rect {
     centered(area)
+}
+
+/// Translate a click in the list popup to the flattened result index. This
+/// mirrors the row construction above: summary, blank line, then each method
+/// heading followed by its peer rows.
+pub fn peer_at(area: Rect, col: u16, row: u16, state: &super::DiscoveryState) -> Option<usize> {
+    let popup = centered(area);
+    if col < popup.x || col >= popup.right() || row < popup.y || row >= popup.bottom() {
+        return None;
+    }
+    let mut y = popup.y.saturating_add(3); // border + summary + blank + first method header
+    let mut index = 0usize;
+    for method in &state.results {
+        y = y.saturating_add(1); // skip method title
+        for _ in &method.peers {
+            if row == y {
+                return Some(index);
+            }
+            y = y.saturating_add(1);
+            index += 1;
+        }
+    }
+    None
 }
 
 fn short_fp(fp: &str) -> String {

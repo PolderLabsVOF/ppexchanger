@@ -907,6 +907,32 @@ fn start_tui(
                                     }
                                     continue;
                                 }
+                                let discovered = {
+                                    let s = state.lock().unwrap();
+                                    s.discovery.as_ref().and_then(|discovery| {
+                                        ppexchanger::tui::discovery_popup::peer_at(
+                                            rect, m.column, m.row, discovery,
+                                        )
+                                    })
+                                };
+                                if let Some(index) = discovered {
+                                    let peer = {
+                                        let mut s = state.lock().unwrap();
+                                        if let Some(discovery) = s.discovery.as_mut() {
+                                            discovery.selected = index;
+                                        }
+                                        s.selected_discovery_peer()
+                                    };
+                                    if let Some(peer) = peer {
+                                        let name = peer.name.unwrap_or_else(|| format!("peer@{}", peer.addr));
+                                        let _ = bus.tx_actions.send(Action::Connect {
+                                            addr: peer.addr,
+                                            name_hint: name,
+                                            public_key: [0u8; 32],
+                                        });
+                                    }
+                                    continue;
+                                }
                                 let dismiss_overlay = {
                                     let s = state.lock().unwrap();
                                     (s.show_help && tui::point_in_rect(tui::help::rect(rect), m.column, m.row))
@@ -1019,6 +1045,35 @@ fn start_tui(
                                 }
                             }
                             let _ = dirty;
+                        }
+                    }
+                } else if state.lock().unwrap().discovery.is_some() {
+                    // Discovery is a selectable dialog: keyboard users can
+                    // navigate results and connect without reaching for the
+                    // mouse.
+                    if let crossterm::event::Event::Key(k) = &ev {
+                        if k.kind == crossterm::event::KeyEventKind::Press {
+                            match k.code {
+                                crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
+                                    state.lock().unwrap().move_discovery_selection(-1);
+                                }
+                                crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
+                                    state.lock().unwrap().move_discovery_selection(1);
+                                }
+                                crossterm::event::KeyCode::Enter => {
+                                    let peer = state.lock().unwrap().selected_discovery_peer();
+                                    if let Some(peer) = peer {
+                                        let name = peer.name.unwrap_or_else(|| format!("peer@{}", peer.addr));
+                                        let _ = bus.tx_actions.send(Action::Connect {
+                                            addr: peer.addr,
+                                            name_hint: name,
+                                            public_key: [0u8; 32],
+                                        });
+                                    }
+                                }
+                                crossterm::event::KeyCode::Esc => state.lock().unwrap().close_discovery(),
+                                _ => {}
+                            }
                         }
                     }
                 } else {

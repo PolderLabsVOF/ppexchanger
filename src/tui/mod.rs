@@ -187,6 +187,8 @@ pub struct DiscoveryState {
     /// firewall blocking inbound). Stays `None` if the scan is still
     /// running or found peers.
     pub hint: Option<String>,
+    /// Selected flattened peer row in the discovery result list.
+    pub selected: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -533,11 +535,33 @@ impl UiState {
             },
             view_map: false,
             hint: None,
+            selected: 0,
         });
     }
 
     pub fn close_discovery(&mut self) {
         self.discovery = None;
+    }
+
+    pub fn move_discovery_selection(&mut self, delta: i32) {
+        let Some(discovery) = self.discovery.as_mut() else { return; };
+        let count = discovery.results.iter().map(|method| method.peers.len()).sum::<usize>();
+        if count == 0 {
+            discovery.selected = 0;
+            return;
+        }
+        discovery.selected = (discovery.selected as i32 + delta)
+            .clamp(0, count as i32 - 1) as usize;
+    }
+
+    pub fn selected_discovery_peer(&self) -> Option<DiscoveredPeer> {
+        let discovery = self.discovery.as_ref()?;
+        discovery
+            .results
+            .iter()
+            .flat_map(|method| method.peers.iter())
+            .nth(discovery.selected)
+            .cloned()
     }
 }
 
