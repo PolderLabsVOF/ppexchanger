@@ -452,16 +452,11 @@ impl UiState {
                     ts_unix: now_unix(),
                 });
             }
-            Event::PeerGone { peer_id, name } => {
+            Event::PeerGone { peer_id, name: _ } => {
+                // Connection-state changes are surfaced through the peer
+                // list's status indicator; we deliberately do not push an
+                // inline chat message for them.
                 self.peer_name_overrides.remove(peer_id);
-                self.push_message(UiMessage {
-                    from_peer: *peer_id,
-                    from_name: "[net]".into(),
-                    body: format!("{} disconnected", name),
-                    outgoing: false,
-                    pending: false,
-                    ts_unix: now_unix(),
-                });
                 if let Some(p) = self.peers.iter_mut().find(|p| &p.peer_id == peer_id) {
                     p.state = PeerState::Gone;
                 }
@@ -1376,7 +1371,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
                             who_style.add_modifier(Modifier::BOLD),
                         ),
                         Span::styled("  │  ", divider),
-                        Span::styled(format!(" {} ", m.body), bubble),
+                        Span::styled(m.body.clone(), bubble),
                         Span::styled(
                             format!(" {} ", delivery),
                             if m.pending {
@@ -1398,7 +1393,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
                             who_style.add_modifier(Modifier::BOLD),
                         ),
                         Span::styled("  │  ", divider),
-                        Span::styled(format!(" {} ", m.body), bubble),
+                        Span::styled(m.body.clone(), bubble),
                     ])
                 }
             })
