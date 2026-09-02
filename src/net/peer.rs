@@ -171,7 +171,8 @@ pub fn spawn_session_driver_with_reg(
         };
         loop {
             if !hello_sent {
-                if sess.send(&FrameBody::Hello { name: local_name.clone(), hostname: local_hostname.clone() }).is_err() {
+                if let Err(e) = sess.send(&FrameBody::Hello { name: local_name.clone(), hostname: local_hostname.clone() }) {
+                    let _ = tx.send(Event::Info(format!("session hello send failed for {}: {}", display, e)));
                     exit(&tx, &reg_tx, &display);
                     return;
                 }
@@ -181,7 +182,8 @@ pub fn spawn_session_driver_with_reg(
             loop {
                 match outbound_rx.try_recv() {
                     Ok(body) => {
-                        if sess.send(&body).is_err() {
+                        if let Err(e) = sess.send(&body) {
+                            let _ = tx.send(Event::Info(format!("session send failed for {}: {}", display, e)));
                             exit(&tx, &reg_tx, &display);
                             return;
                         }
@@ -201,6 +203,7 @@ pub fn spawn_session_driver_with_reg(
                         FrameBody::Hello { name, hostname } => {
                             let display_name = if hostname.is_empty() { name } else { format!("{} ({})", name, hostname) };
                             display = display_name.clone();
+                            let _ = tx.send(Event::Info(format!("authenticated peer identity: {}", display_name)));
                             let _ = tx.send(Event::PeerNamed { peer_id, name: display_name });
                         }
                         FrameBody::Text(s) => {
@@ -253,7 +256,8 @@ pub fn spawn_session_driver_with_reg(
                     }
                 }
                 Ok(None) => continue,
-                Err(_e) => {
+                Err(e) => {
+                    let _ = tx.send(Event::Info(format!("session receive failed for {}: {}", display, e)));
                     exit(&tx, &reg_tx, &display);
                     return;
                 }

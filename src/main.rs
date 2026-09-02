@@ -408,7 +408,12 @@ fn start_tui(
                                         local_hostname,
                                     );
                                 }
-                                Err(_e) => {}
+                                Err(e) => {
+                                    let _ = tx2.send(Event::Info(format!(
+                                        "inbound handshake from {} failed: {}",
+                                        addr, e
+                                    )));
+                                }
                             }
                         });
                     }
