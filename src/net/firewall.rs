@@ -22,6 +22,7 @@ use std::io;
 /// user can `netsh advfirewall firewall show rule name=ppx` to inspect.
 pub const RULE_NAME: &str = "ppexchanger (TCP/7777)";
 pub const CONTROL_RULE_NAME: &str = "ppexchanger (UDP/7778)";
+const SETUP_MARKER: &str = ".firewall-rules";
 
 /// Default TCP port the rule covers. Pass `0` to substitute the bind port.
 pub const DEFAULT_PORT: u16 = crate::net::discovery::MULTICAST_PORT;
@@ -56,70 +57,106 @@ pub fn ensure_rules(tcp_port: u16, control_port: u16) -> io::Result<Option<Strin
 
 #[cfg(target_os = "linux")]
 fn ensure_ufw_rules(tcp_port: u16, control_port: u16) -> io::Result<Option<String>> {
-    // UFW requires root even for `status` on many distributions. Reuse the
-    // same elevation decision for status and rule writes so the first sudo
-    // prompt can be answered while the terminal is still in normal mode.
+    let marker = crate::config::config_dir()
+        .ok()
+        .map(|dir| dir.join(SETUP_MARKER));
+    if marker
+        .as_ref()
+        .map(|path| marker_matches(path, tcp_port, control_port))
+        .unwrap_or(false)
+    {
+        // A successful first-run setup is remembered for this exact port
+        // pair, so normal restarts never invoke sudo again.
+        return Ok(None);
+    }
+
+    // Probe the executable without elevation. We deliberately do not run
+    // `ufw status` here: on many distributions that would trigger a sudo
+    // prompt before the actual rule write and could prompt twice.
+    match std::process::Command::new("ufw")
+        .arg("--version")
+        .output()
+    {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            return Err(io::Error::other(format!(
+                "ufw probe failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
     let is_root = std::process::Command::new("id")
         .arg("-u")
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
         .unwrap_or(false);
-    let mut status_cmd = if is_root {
-        std::process::Command::new("ufw")
-    } else {
-        let mut c = std::process::Command::new("sudo");
-        c.arg("-p").arg("ppexchanger firewall permission: ");
-        c.arg("ufw");
-        c
-    };
-    let status = status_cmd.arg("status").output();
-    let status = match status {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            return Err(io::Error::other(format!(
-                "ufw status failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    let text = String::from_utf8_lossy(&status.stdout);
     let tcp_spec = format!("{}/tcp", tcp_port);
     let udp_spec = format!("{}/udp", control_port);
-    let mut added = Vec::new();
-    for (spec, label) in [(&tcp_spec, "TCP"), (&udp_spec, "UDP")] {
-        if text.lines().any(|line| line.split_whitespace().next() == Some(spec)) {
-            continue;
+    let rules = [(tcp_spec, "TCP"), (udp_spec, "UDP")];
+    if is_root {
+        for (spec, label) in &rules {
+            let output = std::process::Command::new("ufw")
+                .args(["allow", spec, "comment"])
+                .arg(format!("ppexchanger {}", label))
+                .output()?;
+            if !output.status.success() {
+                return Err(io::Error::other(format!(
+                    "could not add UFW rule {}: {}",
+                    spec,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
         }
-        let mut cmd = if is_root {
-            std::process::Command::new("ufw")
-        } else {
-            let mut c = std::process::Command::new("sudo");
-            c.arg("-p").arg("ppexchanger firewall permission: ");
-            c.arg("ufw");
-            c
-        };
-        let output = cmd
-            .arg("allow")
-            .arg(spec)
-            .arg("comment")
-            .arg(format!("ppexchanger {}", label))
-            .output()?;
+    } else {
+        // Apply both idempotent rules under one sudo process. This keeps
+        // startup to one password prompt even when sudo credential caching is
+        // disabled, and avoids a separate privileged status probe.
+        let script = "ufw allow \"$1\" comment \"$2\" && ufw allow \"$3\" comment \"$4\"";
+        let mut cmd = std::process::Command::new("sudo");
+        cmd.arg("-p")
+            .arg("ppexchanger firewall permission: ")
+            .args(["sh", "-c", script, "ppexchanger"]);
+        for (spec, label) in &rules {
+            cmd.arg(spec).arg(format!("ppexchanger {}", label));
+        }
+        let output = cmd.output()?;
         if !output.status.success() {
             return Err(io::Error::other(format!(
-                "could not add UFW rule {}: {}",
-                spec,
+                "could not add UFW rules: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
-        added.push(spec.clone());
     }
-    if added.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(format!("firewall rules ready ({})", added.join(", "))))
+    if let Some(path) = marker {
+        // The marker is only an optimization. If it cannot be written, the
+        // next launch will safely re-check the rules.
+        let _ = write_marker(&path, tcp_port, control_port);
     }
+    Ok(Some(format!(
+        "firewall rules ready ({}, {})",
+        rules[0].0, rules[1].0
+    )))
+}
+
+fn marker_matches(path: &std::path::Path, tcp_port: u16, control_port: u16) -> bool {
+    let expected = format!("tcp={}\nudp={}\n", tcp_port, control_port);
+    std::fs::read_to_string(path)
+        .map(|contents| contents == expected)
+        .unwrap_or(false)
+}
+
+fn write_marker(path: &std::path::Path, tcp_port: u16, control_port: u16) -> io::Result<()> {
+    std::fs::write(path, format!("tcp={}\nudp={}\n", tcp_port, control_port))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
 }
 
 /// Run a side-effect: probe whether the inbound rule is currently in place.

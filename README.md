@@ -276,7 +276,7 @@ on how you invoke it:
 | `curl … \| bash -s --` (Windows, non-interactive)     | Skips silently. Prints the manual `netsh` one-liner as a warning so you can finish it. |
 | `curl … \| bash -s -- --firewall` (Windows)           | Always runs the UAC-elevated `netsh` add — no prompt.                                   |
 | `curl … \| bash -s -- --no-firewall` (Windows)        | Suppresses both the prompt and the warning. Use this if you manage rules out-of-band.  |
-| Linux                                                 | On startup, adds idempotent UFW rules for the TCP listener and UDP control port (sudo may prompt). |
+| Linux                                                 | On the first startup, adds idempotent UFW rules for the TCP listener and UDP control port (sudo prompts once per port pair). |
 | macOS                                                 | No automatic pf changes; the flag is silently ignored.                                  |
 
 The rule written:
