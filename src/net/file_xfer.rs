@@ -63,7 +63,18 @@ pub struct OutboundTransfer {
 }
 
 impl OutboundTransfer {
-    pub fn open(peer: PeerId, to_name: String, path: PathBuf) -> std::io::Result<Self> {
+    /// Open a fresh outbound transfer. The caller-supplied metadata
+    /// (`mime`, `width`, `height`) is forwarded to the peer in the
+    /// `FileOffer` so receivers can render in-terminal previews
+    /// without re-decoding.
+    pub fn open(
+        peer: PeerId,
+        to_name: String,
+        path: PathBuf,
+        mime: Option<String>,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> std::io::Result<Self> {
         let meta = fs::metadata(&path)?;
         if !meta.is_file() {
             return Err(std::io::Error::new(
@@ -82,7 +93,9 @@ impl OutboundTransfer {
             id,
             name,
             size,
-            mime: None,
+            mime,
+            width,
+            height,
         };
         let file = File::open(&path)?;
         Ok(Self {
@@ -237,10 +250,12 @@ impl OutboundMap {
                 }
                 Ok(Some(ChunkOutcome::Complete)) => {
                     out.push(StepResult::Completed {
+                        id,
                         peer: t.peer,
                         to_name: t.to_name.clone(),
                         name: t.offer.name.clone(),
                         bytes: t.bytes_sent,
+                        source_path: t.path.clone(),
                     });
                 }
                 Ok(Some(ChunkOutcome::Error(reason))) => {
@@ -277,10 +292,15 @@ impl OutboundMap {
 
 pub enum StepResult {
     Completed {
+        id: FileId,
         peer: PeerId,
         to_name: String,
         name: String,
         bytes: u64,
+        /// Source path on disk so the action thread can move/copy
+        /// the bytes to a persistent location after a successful
+        /// send (clipboard-image flow).
+        source_path: PathBuf,
     },
     Aborted(AbortInfo),
 }
@@ -608,7 +628,7 @@ mod tests {
     #[test]
     fn outbound_open_rejects_directory() {
         let dir = tmp();
-        assert!(OutboundTransfer::open([0u8; 16], "x".into(), dir).is_err());
+        assert!(OutboundTransfer::open([0u8; 16], "x".into(), dir, None, None, None).is_err());
     }
 
     #[test]
@@ -616,7 +636,7 @@ mod tests {
         let dir = tmp();
         let p = dir.join("hello.txt");
         fs::write(&p, b"hi").unwrap();
-        let t = OutboundTransfer::open([1u8; 16], "peer".into(), p).unwrap();
+        let t = OutboundTransfer::open([1u8; 16], "peer".into(), p, None, None, None).unwrap();
         assert_eq!(t.offer.name, "hello.txt");
         assert_eq!(t.offer.size, 2);
         let _ = fs::remove_dir_all(dir);
@@ -635,6 +655,8 @@ mod tests {
             name: "blob.bin".into(),
             size: 6,
             mime: None,
+            width: None,
+            height: None,
         };
         let mut t = InboundTransfer::new([2u8; 16], "alice".into(), offer.clone());
 
@@ -667,6 +689,8 @@ mod tests {
                 name: "x".into(),
                 size: 10,
                 mime: None,
+                width: None,
+                height: None,
             },
         );
         t.path = dest.clone();

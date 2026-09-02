@@ -1,5 +1,6 @@
 //! `ppexchanger` library crate.
 
+pub mod clipboard;
 pub mod config;
 pub mod chat_history;
 pub mod crypto;

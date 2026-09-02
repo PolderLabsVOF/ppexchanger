@@ -149,6 +149,8 @@ fn file_offer_accept_chunk_done_roundtrip() {
         name: offer_name.clone(),
         size: 5,
         mime: Some("application/pdf".into()),
+        width: None,
+        height: None,
     })
     .unwrap();
     alice.send(&FrameBody::FileAccept { id }).unwrap();
@@ -169,6 +171,8 @@ fn file_offer_accept_chunk_done_roundtrip() {
             name: offer_name,
             size: 5,
             mime: Some("application/pdf".into()),
+            width: None,
+            height: None,
         }
     );
 

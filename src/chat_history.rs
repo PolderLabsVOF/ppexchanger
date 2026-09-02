@@ -8,7 +8,7 @@
 
 use crate::crypto::{hkdf_sha256, Aead, ChaCha20Poly1305, Key, KeyInit, Nonce, Payload};
 use crate::events::PeerId;
-use crate::tui::UiMessage;
+use crate::tui::{ImageMeta, UiMessage};
 use rand_core::{OsRng, RngCore};
 use std::collections::VecDeque;
 use std::io;
@@ -157,6 +157,33 @@ fn encode(messages: &VecDeque<UiMessage>) -> io::Result<Vec<u8>> {
         out.extend_from_slice(&(body.len() as u32).to_be_bytes());
         out.extend_from_slice(name);
         out.extend_from_slice(body);
+        // Optional trailing image descriptor. Presence byte is 0/1
+        // so older histories (which didn't have this trailing
+        // section) still decode — they hit `cursor.is_empty()` and
+        // return cleanly.
+        match &message.image {
+            Some(img) => {
+                let mime = img.mime.as_bytes();
+                let path = img.path.as_os_str().as_encoded_bytes();
+                if mime.len() > MAX_FIELD_LEN || path.len() > MAX_FIELD_LEN {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "chat message image field is too large",
+                    ));
+                }
+                out.push(1u8);
+                out.extend_from_slice(&(mime.len() as u32).to_be_bytes());
+                out.extend_from_slice(mime);
+                out.extend_from_slice(&img.width.to_be_bytes());
+                out.extend_from_slice(&img.height.to_be_bytes());
+                out.extend_from_slice(&img.bytes.to_be_bytes());
+                out.extend_from_slice(&(path.len() as u32).to_be_bytes());
+                out.extend_from_slice(path);
+            }
+            None => {
+                out.push(0u8);
+            }
+        }
     }
     if out.len() > MAX_PLAINTEXT_LEN {
         return Err(io::Error::new(
@@ -214,6 +241,57 @@ fn decode(bytes: &[u8], has_pending: bool) -> io::Result<VecDeque<UiMessage>> {
         }
         let from_name = cursor.string(name_len)?;
         let body = cursor.string(body_len)?;
+        // Optional trailing image descriptor. Old histories (which
+        // didn't include this section) hit `cursor.is_empty()` and
+        // gracefully skip — no version bump required.
+        let image = if !cursor.is_empty() {
+            let has_image = cursor.byte()?;
+            if has_image == 1 {
+                let mime_len = cursor.u32()? as usize;
+                if mime_len > MAX_FIELD_LEN {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "chat history image mime too large",
+                    ));
+                }
+                let mime = cursor.string(mime_len)?;
+                let width = cursor.u32()?;
+                let height = cursor.u32()?;
+                let bytes = cursor.u64()?;
+                let path_len = cursor.u32()? as usize;
+                if path_len > MAX_FIELD_LEN {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "chat history image path too large",
+                    ));
+                }
+                let path_bytes = cursor.take(path_len)?.to_vec();
+                let path = std::path::PathBuf::from(
+                    String::from_utf8(path_bytes).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "chat history image path is not utf-8",
+                        )
+                    })?,
+                );
+                Some(ImageMeta {
+                    path,
+                    mime,
+                    width,
+                    height,
+                    bytes,
+                })
+            } else if has_image == 0 {
+                None
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "chat history image flag is invalid",
+                ));
+            }
+        } else {
+            None
+        };
         messages.push_back(UiMessage {
             from_peer,
             from_name,
@@ -221,6 +299,7 @@ fn decode(bytes: &[u8], has_pending: bool) -> io::Result<VecDeque<UiMessage>> {
             outgoing,
             pending,
             ts_unix,
+            image,
         });
     }
     if !cursor.is_empty() {
@@ -315,6 +394,7 @@ mod tests {
             outgoing: true,
             pending: true,
             ts_unix: 42,
+            image: None,
         });
         save(&path, &secret, &peer_id, &messages).unwrap();
         let raw = std::fs::read(&path).unwrap();
@@ -323,6 +403,48 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert!(loaded.front().unwrap().pending);
         assert!(load(&path, &[8u8; 32], &peer_id).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn roundtrip_image_message_preserves_descriptor() {
+        let path = temp_path("image");
+        let secret = [7u8; 32];
+        let peer_id = [9u8; 16];
+        let mut messages = VecDeque::new();
+        let img = ImageMeta {
+            path: std::path::PathBuf::from("/tmp/example.png"),
+            mime: "image/png".to_string(),
+            width: 320,
+            height: 240,
+            bytes: 12345,
+        };
+        messages.push_back(UiMessage {
+            from_peer: peer_id,
+            from_name: "alice".into(),
+            body: format!("[image {}x{} ...]", img.width, img.height),
+            outgoing: true,
+            pending: false,
+            ts_unix: 100,
+            image: Some(img.clone()),
+        });
+        // Also a plain (non-image) message to ensure the trailing
+        // presence byte round-trips cleanly when the next message
+        // has no image.
+        messages.push_back(UiMessage {
+            from_peer: peer_id,
+            from_name: "alice".into(),
+            body: "plain follow-up".into(),
+            outgoing: false,
+            pending: false,
+            ts_unix: 101,
+            image: None,
+        });
+        save(&path, &secret, &peer_id, &messages).unwrap();
+        let loaded = load(&path, &secret, &peer_id).unwrap().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].image.as_ref().unwrap(), &img);
+        assert!(loaded[1].image.is_none());
         let _ = std::fs::remove_file(path);
     }
 }
