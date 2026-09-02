@@ -47,6 +47,8 @@ pub fn render(f: &mut Frame, theme: &super::theme::Theme, glyphs: &super::theme:
         Line::from("  Ctrl-N      start a new chat with selected peer"),
         Line::from("  Ctrl-T      toggle trust on selected peer"),
         Line::from("  Ctrl-R      revoke selected peer"),
+        Line::from("  Ctrl-B      toggle the peer sidebar"),
+        Line::from("  Ctrl-P      open the peer picker overlay"),
         Line::from("  Ctrl-L      clear input"),
         Line::from("  Ctrl-,      open settings"),
         Line::from("  Esc         cancel / clear"),

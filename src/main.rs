@@ -1189,7 +1189,7 @@ fn start_tui(
                                 }
                                 let pending_click = {
                                     let s = state.lock().unwrap();
-                                    let sidebar = tui::compute_layout(rect).sidebar;
+                                    let sidebar = tui::compute_layout(rect, !s.sidebar_hidden).sidebar;
                                     s.pending_connection.as_ref().and_then(|request| {
                                         (m.column >= sidebar.x
                                             && m.column < sidebar.right()
@@ -1254,7 +1254,7 @@ fn start_tui(
                                 }
                                 let command = {
                                     let s = state.lock().unwrap();
-                                    let chat = tui::compute_layout(rect).chat;
+                                    let chat = tui::compute_layout(rect, !s.sidebar_hidden).chat;
                                     tui::command_palette_hit(chat, &s.composer, m.column, m.row)
                                 };
                                 if let Some(command) = command {
@@ -1501,6 +1501,14 @@ fn start_tui(
                     ppexchanger::tui::EditorEvent::OpenSettings => {
                         let mut s = state.lock().unwrap();
                         s.open_settings(&live_cfg);
+                    }
+                    ppexchanger::tui::EditorEvent::ToggleSidebar => {
+                        let mut s = state.lock().unwrap();
+                        s.sidebar_hidden = !s.sidebar_hidden;
+                    }
+                    ppexchanger::tui::EditorEvent::OpenPeerPicker => {
+                        let mut s = state.lock().unwrap();
+                        s.show_peer_picker = !s.show_peer_picker;
                     }
                     ppexchanger::tui::EditorEvent::PageUp => {
                         let mut s = state.lock().unwrap();
@@ -1770,7 +1778,7 @@ fn handle_mouse(
 ) -> Option<ppexchanger::tui::EditorEvent> {
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut s = state.lock().unwrap();
-    let areas = tui::compute_layout(size);
+    let areas = tui::compute_layout(size, !s.sidebar_hidden);
     let modal_open = s.file_offer.is_some() || s.show_help || s.discovery.is_some() || s.settings.is_some();
     let hit = tui::hit_test(
         size,
