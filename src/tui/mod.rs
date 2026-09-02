@@ -985,10 +985,13 @@ fn draw_menu(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, _glyphs:
         .count();
     let known = state.peers.len();
     let health = if known == 0 { 0 } else { (online * 100 / known) as u16 };
+    let identity = truncate_tail(&state.self_name, 20);
+    let fingerprint = truncate_tail(&state.self_fingerprint, 12);
     let title = Line::from(vec![
         Span::styled(" PPX ", Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD)),
         Span::styled("  secure local exchange", Style::default().fg(theme.fg).bg(theme.bg).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("  ·  {} online", online), theme.dim_style()),
+        Span::styled(format!("  ·  {} online", online), theme.self_message_style()),
+        Span::styled(format!("  ·  {}  {}", identity, fingerprint), theme.dim_style()),
     ]);
     let button = |label: &str, style: Style| {
         Span::styled(
@@ -1006,11 +1009,11 @@ fn draw_menu(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, _glyphs:
     // Fixed-width, filled controls read as buttons in every color theme and
     // stay exactly aligned with the mouse hit regions below.
     let nav = Line::from(vec![
-        button("o PEERS", if state.focus == Focus::Sidebar { active_button } else { quiet_button }),
+        button("1 PEERS", if state.focus == Focus::Sidebar { active_button } else { quiet_button }),
         Span::raw(" "),
         button("/ DISCOVER", info_button),
         Span::raw(" "),
-        button("* SETTINGS", quiet_button),
+        button("3 SETTINGS", quiet_button),
         Span::raw(" "),
         button("? HELP", quiet_button),
         Span::raw(" "),
@@ -1080,16 +1083,20 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
         .border_type(BorderType::Rounded)
         .border_style(title_style)
         .title(Span::styled(
-            format!(" {} PEERS · {} ", glyphs.cursor, state.peers.len()),
+            format!(" {} PEERS · {}/{} ", glyphs.cursor, online_count(state), state.peers.len()),
             Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
-        ));
+        ))
+        .title_bottom(
+            Line::from(Span::styled(" ↑↓ navigate · click select ", theme.dim_style()))
+                .right_aligned(),
+        );
 
     let items: Vec<ListItem> = if state.peers.is_empty() {
         // Empty state: show helpful message
-        vec![ListItem::new(Line::from(vec![Span::styled(
-            "no peers — run /discover",
-            theme.dim_style(),
-        )]))]
+        vec![ListItem::new(vec![
+            Line::from(Span::styled("no connected peers", theme.dim_style())),
+            Line::from(Span::styled("run /discover to find someone nearby", theme.info_style())),
+        ])]
     } else {
         state
             .peers
@@ -1151,10 +1158,19 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
     f.render_stateful_widget(
         List::new(items)
             .block(block)
-            .highlight_style(Style::default().bg(theme.status_bg)),
+            .highlight_style(Style::default().bg(theme.status_bg).add_modifier(Modifier::BOLD))
+            .highlight_symbol("› "),
         peer_area,
         &mut list_state,
     );
+}
+
+fn online_count(state: &UiState) -> usize {
+    state
+        .peers
+        .iter()
+        .filter(|peer| peer.state == PeerState::Connected)
+        .count()
 }
 
 fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
@@ -1171,6 +1187,11 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
         )])
     } else {
         // Show status dot and peer hostname with connection status
+        let fp = selected
+            .map(|peer| peer.fingerprint.as_str())
+            .filter(|fingerprint| !fingerprint.is_empty())
+            .map(|fingerprint| format!("  · {}", truncate_tail(fingerprint, 12)))
+            .unwrap_or_default();
         let (dot, dot_color, status_text) = match selected.map(|p| p.state) {
             Some(PeerState::Connected) => (glyphs.dot_connected, theme.status_online, "[connected]"),
             Some(PeerState::Seen) => (glyphs.dot_seen, theme.status_seen, "[seen]"),
@@ -1189,6 +1210,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
                 format!("  · {}", status_text.trim_matches(&['[', ']'][..])),
                 Style::default().fg(dot_color),
             ),
+            Span::styled(fp, theme.dim_style()),
         ])
     };
     let block = Block::default()
@@ -1229,12 +1251,11 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
                 let timestamp = chrono_timestamp(&Some(m.ts_unix));
                 let timestamp_style = theme.dim_style();
 
-                let marker = if m.outgoing { " YOU " } else { " PEER " };
+                let marker = if m.outgoing { "›" } else { "‹" };
                 Line::from(vec![
-                    Span::styled(marker, who_style.add_modifier(Modifier::BOLD).bg(theme.status_bg)),
-                    Span::styled(format!(" {}  ", who), who_style.add_modifier(Modifier::BOLD)),
-                    Span::styled(timestamp, timestamp_style),
-                    Span::raw("  "),
+                    Span::styled(format!(" {} ", marker), who_style.add_modifier(Modifier::BOLD).bg(theme.status_bg)),
+                    Span::styled(format!("{}", who), who_style.add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("  {}  ", timestamp), timestamp_style),
                     Span::styled(m.body.clone(), Style::default().fg(theme.fg).bg(theme.bg)),
                 ])
             })
@@ -1296,18 +1317,23 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs
         return;
     }
     let composer_area = Rect::new(area.x, area.y, area.width, 3);
+    let target = state.selected().map(|p| p.name.as_str()).unwrap_or("no recipient");
+    let target_label = truncate_tail(target, 18);
+    let composer_title = if target == "no recipient" {
+        " message · choose a peer "
+    } else {
+        " message · encrypted "
+    };
     let composer_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme.border_style(state.focus == Focus::Chat))
         .title(Span::styled(
-            " message ",
+            composer_title,
             Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         ));
     let input_area = composer_block.inner(composer_area);
     f.render_widget(composer_block, composer_area);
-    let target = state.selected().map(|p| p.name.as_str()).unwrap_or("no recipient");
-    let target_label = truncate_tail(target, 18);
     let chip = format!(" TO {} ", target_label);
     let prefix = format!(" {} ", glyphs.arrow);
     let available = input_area
@@ -1318,7 +1344,7 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs
     let draft = truncate_tail(&state.composer, available);
     let is_empty = state.composer.is_empty();
     let input = Line::from(vec![
-        Span::styled(chip, Style::default().fg(theme.status_fg).bg(theme.status_bg)),
+        Span::styled(chip, Style::default().fg(theme.status_fg).bg(theme.status_bg).add_modifier(Modifier::BOLD)),
         Span::styled(prefix.clone(), theme.highlight_style()),
         Span::styled(if is_empty { glyphs.cursor } else { "" }, theme.highlight_style()),
         Span::styled(
@@ -1350,17 +1376,27 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs
         truncate_tail(&state.status, area.width.saturating_sub(28) as usize)
     };
     let status_style = status_style(&status, theme);
+    let status_icon = if ["failed", "denied", "error", "aborted"]
+        .iter()
+        .any(|needle| status.to_ascii_lowercase().contains(needle))
+    {
+        "!"
+    } else if status.to_ascii_lowercase().contains("connected") {
+        "✓"
+    } else {
+        "·"
+    };
     let meta = Line::from(vec![
-        Span::styled(" STATUS ", status_style.bg(theme.status_bg).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {} ", status_icon), status_style.add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {}", status), status_style),
         Span::raw("  "),
         Span::styled(
-            " ENTER SEND ",
+            " Enter send ",
             Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD),
         ),
         Span::styled("  Esc clear", theme.dim_style()),
-        Span::styled("   ? Help", Style::default().fg(theme.info).bg(theme.bg)),
-        Span::styled("   Tab switch pane", theme.dim_style()),
+        Span::styled("   Tab focus", theme.dim_style()),
+        Span::styled("   ? help", Style::default().fg(theme.info).bg(theme.bg)),
     ]);
     f.render_widget(
         Paragraph::new(meta),

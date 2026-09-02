@@ -33,6 +33,7 @@ pub fn render(f: &mut Frame, theme: &super::theme::Theme, glyphs: &super::theme:
             Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         )),
         Line::from("  Tab         cycle focus (sidebar <-> chat)"),
+        Line::from("  Click       select peers, focus chat, use buttons"),
         Line::from("  Up/Down     in sidebar: move selection"),
         Line::from("               in empty input: history recall"),
         Line::from("  PageUp/Dn   scroll chat scrollback"),
@@ -51,6 +52,7 @@ pub fn render(f: &mut Frame, theme: &super::theme::Theme, glyphs: &super::theme:
         Line::from("  Esc         cancel / clear"),
         Line::from("  Ctrl-C / Q  quit"),
         Line::from("  ?           toggle this help"),
+        Line::from("  Pending     click / Enter to accept, Esc to decline"),
         Line::from(""),
         Line::from(Span::styled(
             "Commands",
