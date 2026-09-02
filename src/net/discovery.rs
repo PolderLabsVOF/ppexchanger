@@ -34,6 +34,7 @@ pub const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(2);
 /// configured to send announcements back to the group.
 pub struct Discovery {
     socket: UdpSocket,
+    send_socket: UdpSocket,
     group_addr: SocketAddr,
     /// Optional local IP for broadcast fallback. Computed on demand via
     /// `local_subnet_broadcast()` when `announce_both` is called.
@@ -44,18 +45,32 @@ impl Discovery {
     /// Bind a UDP socket on the given local port (use `0` for ephemeral) and
     /// join the multicast group on all available IPv4 interfaces.
     pub fn bind(local_port: u16) -> io::Result<Self> {
+        let interface = Self::local_outbound_ipv4().ok();
         let bind: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, local_port));
         let socket = UdpSocket::bind(bind)?;
+        // Keep the receive socket wildcard-bound for multicast delivery, but
+        // use a separate LAN-bound sender so macOS does not select an
+        // inactive bridge/VPN interface for multicast egress.
+        let send_bind = SocketAddr::V4(SocketAddrV4::new(
+            interface.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            0,
+        ));
+        let send_socket = UdpSocket::bind(send_bind)?;
         // Permit others on the host to also bind (different processes).
         socket.set_broadcast(true)?;
+        send_socket.set_broadcast(true)?;
+        // On multi-homed hosts (notably macOS with VPN/awdl/bridge
+        // interfaces), the kernel may otherwise choose an unroutable
+        // multicast interface and return `No route to host`. Pin multicast
+        // egress to the same LAN interface used by the subnet scanner.
         // Join the multicast group on every interface std knows about.
         // `join_multicast_v4` on the unspecified addr joins on the default
         // interface, which is enough for the common case. Loopback-only
         // setups will need to bind to 127.0.0.1 explicitly.
-        socket.join_multicast_v4(&MULTICAST_GROUP, &Ipv4Addr::UNSPECIFIED)?;
+        socket.join_multicast_v4(&MULTICAST_GROUP, &interface.unwrap_or(Ipv4Addr::UNSPECIFIED))?;
         socket.set_read_timeout(Some(Duration::from_millis(500)))?;
         let group_addr = SocketAddr::V4(SocketAddrV4::new(MULTICAST_GROUP, MULTICAST_PORT));
-        Ok(Self { socket, group_addr, local_ip: None })
+        Ok(Self { socket, send_socket, group_addr, local_ip: None })
     }
 
     /// The local UDP port the socket is bound to.
@@ -68,27 +83,31 @@ impl Discovery {
         let bytes = encode_beacon(beacon).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "beacon encode failed")
         })?;
-        self.socket.send_to(&bytes, self.group_addr)?;
+        self.send_socket.send_to(&bytes, self.group_addr)?;
         Ok(())
     }
 
     /// Compute the local subnet's broadcast address (assumes /24 subnet).
     /// Uses the same trick as `scan::local_outbound_ipv4`: bind a UDP socket
     /// to an external address and read back our local IP.
-    pub fn local_subnet_broadcast() -> io::Result<Ipv4Addr> {
+    fn local_outbound_ipv4() -> io::Result<Ipv4Addr> {
         let probe: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 80);
         let sock = UdpSocket::bind("0.0.0.0:0")?;
         sock.connect(probe)?;
         match sock.local_addr()? {
             std::net::SocketAddr::V4(v4) => {
-                // Assume /24 — broadcast is x.x.x.255
-                let ip = *v4.ip();
-                let mut octets = ip.octets();
-                octets[3] = 255;
-                Ok(Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]))
+                Ok(*v4.ip())
             }
             std::net::SocketAddr::V6(_) => Err(io::Error::other("no IPv4 outbound interface")),
         }
+    }
+
+    pub fn local_subnet_broadcast() -> io::Result<Ipv4Addr> {
+        let ip = Self::local_outbound_ipv4()?;
+        // Assume /24 — broadcast is x.x.x.255
+        let mut octets = ip.octets();
+        octets[3] = 255;
+        Ok(Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]))
     }
 
     /// Send one beacon to the given address. Used for broadcast fallback.
@@ -96,7 +115,7 @@ impl Discovery {
         let bytes = encode_beacon(beacon).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "beacon encode failed")
         })?;
-        self.socket.send_to(&bytes, addr)?;
+        self.send_socket.send_to(&bytes, addr)?;
         Ok(())
     }
 
@@ -104,17 +123,26 @@ impl Discovery {
     /// This maximizes discovery chances on networks where multicast may be
     /// blocked by consumer routers.
     pub fn announce_both(&mut self, beacon: &Beacon) -> io::Result<()> {
-        // Always send to multicast group.
-        self.send_to(self.group_addr, beacon)?;
+        let mut last_error = None;
+        // Always try multicast, but don't prevent the broadcast fallback if
+        // a host route/firewall rejects this particular destination.
+        if let Err(e) = self.send_to(self.group_addr, beacon) {
+            last_error = Some(e);
+        }
         // Also try local subnet broadcast if available.
         if self.local_ip.is_none() {
             self.local_ip = Self::local_subnet_broadcast().ok();
         }
         if let Some(local_ip) = self.local_ip {
             let broadcast_addr = SocketAddr::V4(SocketAddrV4::new(local_ip, MULTICAST_PORT));
-            let _ = self.send_to(broadcast_addr, beacon);
+            if let Err(e) = self.send_to(broadcast_addr, beacon) {
+                last_error = Some(e);
+            }
         }
-        Ok(())
+        match last_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Read one beacon from the multicast group. Returns `Ok(None)` on
