@@ -810,6 +810,44 @@ fn chrono_timestamp(ts: &Option<u64>) -> String {
     }
 }
 
+const SECS_PER_DAY: u64 = 86_400;
+
+/// Calendar-day bucket (UTC days since 1970-01-01) for a Unix timestamp.
+/// Used to detect day boundaries for the chat day-separator labels.
+fn day_bucket(ts: u64) -> u64 {
+    ts / SECS_PER_DAY
+}
+
+/// Build the label for a chat day separator. Today and yesterday read
+/// naturally; older days collapse to "Mon DD" using an inline civil-from-
+/// days conversion so we don't pull in a date library just for a label.
+fn day_separator_label(bucket: u64, today_bucket: u64) -> String {
+    if bucket == today_bucket {
+        return "today".into();
+    }
+    if bucket + 1 == today_bucket {
+        return "yesterday".into();
+    }
+    // Howard Hinnant's civil_from_days (days-since-1970 → y/m/d) — works
+    // for the entire signed range using only integer arithmetic.
+    let z = bucket as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 9]
+    let d_signed = (doy as i64) - ((153 * mp as i64 + 2) / 5) + 1; // [1, 31]
+    let m_signed = if mp < 10 { mp as i64 + 3 } else { mp as i64 - 9 }; // [1, 12]
+    // Year is computed (March-based year adjustment) but not rendered
+    // since labels collapse to "Mon DD" for days older than yesterday.
+    let _y = (yoe as i64) + era * 400 + if m_signed <= 2 { 1 } else { 0 };
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let month = MONTHS[((m_signed - 1) as usize).min(11)];
+    format!("{} {}", month, d_signed)
+}
+
 /// Compute the three rectangles that the TUI is split into. Used by
 /// `render()` (to lay out widgets) and `hit_test()` (to map clicks
 /// back to panes). Returns the same shape regardless of caller, so a
@@ -1331,73 +1369,140 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
     let visible: Vec<Line> = if empty {
         Vec::new()
     } else {
-        state
+        // Build grouped + separated chat rows. Same-author turns within a
+        // short window share a header (first message of the group shows
+        // `name · HH:MM`); a calendar-day change inserts a centred label.
+        // This is the modern messenger look: clean attribution that
+        // doesn't repeat per message, with day seams where the eye
+        // expects them.
+        let bubble = Style::default().fg(theme.fg).bg(theme.status_bg);
+        let gutter = Line::from("");
+        let today_bucket = day_bucket(now_unix());
+        // Break a group after a noticeable silence so a reply "ten
+        // minutes later" doesn't visually merge into the previous turn.
+        const GROUP_GAP_SECS: u64 = 120;
+
+        let resolve_who = |m: &UiMessage| -> String {
+            if m.outgoing {
+                state.self_name.clone()
+            } else {
+                // Resolve at render time so a provisional `peer@IP`
+                // label is replaced in already-rendered chat history as
+                // soon as the encrypted Hello supplies the real name.
+                state
+                    .peers
+                    .iter()
+                    .find(|peer| peer.peer_id == m.from_peer)
+                    .map(|peer| peer.name.clone())
+                    .unwrap_or_else(|| m.from_name.clone())
+            }
+        };
+        let who_style_for = |m: &UiMessage| -> Style {
+            if m.outgoing {
+                theme.self_message_style()
+            } else {
+                theme.peer_message_style_for(&m.from_peer)
+            }
+        };
+
+        let slice: Vec<&UiMessage> = state
             .messages
             .iter()
             .skip(start)
             .take(end - start)
-            .map(|m| {
-                let who = if m.outgoing {
-                    state.self_name.clone()
-                } else {
-                    // Resolve at render time so a provisional `peer@IP`
-                    // label is replaced in already-rendered chat history as
-                    // soon as the encrypted Hello supplies the real name.
-                    state
-                        .peers
-                        .iter()
-                        .find(|peer| peer.peer_id == m.from_peer)
-                        .map(|peer| peer.name.clone())
-                        .unwrap_or_else(|| m.from_name.clone())
-                };
-                let who_style = if m.outgoing {
-                    theme.self_message_style()
-                } else {
-                    theme.peer_message_style_for(&m.from_peer)
-                };
-                // Format timestamp as HH:MM
-                let timestamp = chrono_timestamp(&Some(m.ts_unix));
-                let delivery = if m.pending { "⏳ pending" } else { "✓ sent" };
-                let divider = Style::default().fg(theme.border_inactive).bg(theme.bg);
-                let bubble = Style::default().fg(theme.fg).bg(theme.status_bg);
+            .collect();
 
-                if m.outgoing {
-                    // Right-align the entire local row and keep delivery as
-                    // the final span, putting the checkmark at the chat edge
-                    // even when the message itself is short.
-                    Line::from(vec![
-                        Span::styled(
-                            format!("{}  {}", who, timestamp),
-                            who_style.add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled("  │  ", divider),
-                        Span::styled(m.body.clone(), bubble),
-                        Span::styled(
-                            format!(" {} ", delivery),
-                            if m.pending {
-                                theme.info_style().bg(theme.status_bg)
-                            } else {
-                                theme.self_message_style().bg(theme.status_bg)
-                            },
-                        ),
-                    ])
-                    .right_aligned()
-                } else {
-                    // Incoming rows stay left-aligned. The colored peer
-                    // rail, muted metadata, and contrasting bubble make the
-                    // two directions readable at a glance.
-                    Line::from(vec![
-                        Span::styled(" ‹ ", who_style.add_modifier(Modifier::BOLD).bg(theme.status_bg)),
-                        Span::styled(
-                            format!("{}  {}", who, timestamp),
-                            who_style.add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled("  │  ", divider),
-                        Span::styled(m.body.clone(), bubble),
-                    ])
+        let mut rows: Vec<Line> = Vec::with_capacity(slice.len() * 2);
+        let mut prev: Option<&UiMessage> = None;
+        for m in &slice {
+            // Day separator — fires on the first message of a new
+            // calendar day, and always implies a fresh group, so the
+            // group header below fires naturally.
+            let mb = day_bucket(m.ts_unix);
+            let prev_bucket = prev.map(|p| day_bucket(p.ts_unix)).unwrap_or(mb);
+            if mb != prev_bucket {
+                rows.push(gutter.clone());
+                let label = day_separator_label(mb, today_bucket);
+                rows.push(
+                    Line::from(Span::styled(
+                        format!("─── {} ───", label),
+                        theme.dim_style(),
+                    ))
+                    .centered(),
+                );
+                rows.push(gutter.clone());
+            }
+
+            // New group header whenever the previous message is from a
+            // different direction, a different peer, or far enough away
+            // in time that the reader would lose the thread.
+            let new_group = match prev {
+                None => true,
+                Some(p) => {
+                    p.outgoing != m.outgoing
+                        || p.from_peer != m.from_peer
+                        || m.ts_unix.saturating_sub(p.ts_unix) > GROUP_GAP_SECS
                 }
-            })
-            .collect()
+            };
+            if new_group {
+                rows.push(gutter.clone());
+                let who = resolve_who(m);
+                let who_style = who_style_for(m).add_modifier(Modifier::BOLD);
+                let ts = chrono_timestamp(&Some(m.ts_unix));
+                if m.outgoing {
+                    // Caption sits flush-right above the first bubble
+                    // of the local turn, with a subtle dot to separate
+                    // name and time without an extra heavy rail.
+                    rows.push(
+                        Line::from(Span::styled(
+                            format!("{} · {}", who, ts),
+                            who_style,
+                        ))
+                        .right_aligned(),
+                    );
+                } else {
+                    // Incoming caption is a coloured bar so the source
+                    // is identifiable even when no peer list highlight
+                    // is in view.
+                    rows.push(Line::from(vec![
+                        Span::styled(" ", who_style.bg(theme.status_bg)),
+                        Span::styled(format!("{} · {}", who, ts), who_style),
+                    ]));
+                }
+            }
+
+            // Bubble body.
+            if m.outgoing {
+                // Delivery chip (⏳ / ✓) sits flush-right at the row edge
+                // so the reader always knows the local turn's state
+                // without scanning the message body for it.
+                let chip_style = if m.pending {
+                    theme.info_style().bg(theme.status_bg)
+                } else {
+                    theme.self_message_style().bg(theme.status_bg)
+                };
+                let chip = if m.pending { " ⏳" } else { " ✓" };
+                rows.push(
+                    Line::from(vec![
+                        Span::styled(m.body.clone(), bubble),
+                        Span::styled(chip, chip_style),
+                    ])
+                    .right_aligned(),
+                );
+            } else {
+                // Incoming bubble: small coloured padding on each side
+                // visually anchors the bubble against the right-aligned
+                // outgoing rows without needing per-message borders.
+                let who_style = who_style_for(m).add_modifier(Modifier::BOLD);
+                rows.push(Line::from(vec![
+                    Span::styled(" ", who_style.bg(theme.status_bg)),
+                    Span::styled(m.body.clone(), bubble),
+                    Span::styled(" ", who_style.bg(theme.status_bg)),
+                ]));
+            }
+            prev = Some(m);
+        }
+        rows
     };
 
     let para = Paragraph::new(visible)
