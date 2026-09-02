@@ -80,7 +80,32 @@ pub fn connect(
     let sess = match dial(addr, static_kp) {
         Ok(s) => s,
         Err(e) => {
-            let _ = tx.send(Event::Info(format!("could not connect to {}: {}", addr, e)));
+            // The peer is just not reachable (host offline, no listener,
+            // network unreachable, dial timeout). The status bar used to
+            // surface the raw `io::Error` here, which read as a hard
+            // failure even though pending_text already retains queued
+            // messages for the reconnect. Downgrade to a friendly
+            // offline notice; the peer list still reflects PeerState::Seen
+            // so the user can see the contact exists.
+            let offline_kind = matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::AddrNotAvailable
+                    | std::io::ErrorKind::TimedOut
+            ) || e.to_string().contains("connection attempts exhausted");
+            let label = name_hint
+                .clone()
+                .unwrap_or_else(|| addr.ip().to_string());
+            let message = if offline_kind {
+                format!("{} offline", label)
+            } else {
+                format!("could not connect to {}: {}", addr, e)
+            };
+            let _ = tx.send(Event::Info(message));
             return None;
         }
     };
