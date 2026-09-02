@@ -799,20 +799,19 @@ impl UiState {
     }
 
     pub fn scroll_back(&mut self, lines: usize) {
-        // Cap at `messages.len() - (visible_chat_rows - 1)` so the
-        // viewport at the top of history stays full of the oldest
-        // bubbles. The chat interior reserves one row for the sticky
-        // group header, so only `visible_chat_rows - 1` bubbles fit per
-        // page. Falling back to `messages.len() - 1` (the old cap)
-        // when visible_chat_rows has not been set yet keeps single-
-        // frame callers safe; the value is refreshed by `draw_chat`
-        // before any scroll input can land.
+        // Cap so the viewport at the top of history stays full of the
+        // oldest content. With inline group headers, total rendered
+        // rows = `messages.len()` bubbles + one header per sender
+        // group. Falling back to `messages.len() - 1` when
+        // `visible_chat_rows` has not been set yet (single-frame
+        // callers before the first draw) keeps the cap sane; the
+        // value is refreshed by `draw_chat` before any scroll input
+        // can land.
         let max_scroll = if self.visible_chat_rows <= 1 {
             self.messages.len().saturating_sub(1)
         } else {
-            self.messages
-                .len()
-                .saturating_sub(self.visible_chat_rows.saturating_sub(1))
+            let total_rows = self.messages.len() + count_groups(&self.messages);
+            total_rows.saturating_sub(self.visible_chat_rows)
         };
         self.scroll = (self.scroll + lines).min(max_scroll);
     }
@@ -869,6 +868,30 @@ const SECS_PER_DAY: u64 = 86_400;
 /// Used to detect day boundaries for the chat day-separator labels.
 fn day_bucket(ts: u64) -> u64 {
     ts / SECS_PER_DAY
+}
+
+/// Count how many sender groups the message deque contains. A group is a
+/// maximal run of consecutive messages with the same `outgoing` flag (each
+/// per-peer chat has only two parties, so the flag alone partitions the
+/// history). The first message starts a new group by definition. Each
+/// group emits exactly one header row during rendering, so this count
+/// plus `messages.len()` equals the total rendered content rows — used
+/// by `scroll_back` to keep the viewport full at the top of history.
+fn count_groups(messages: &VecDeque<UiMessage>) -> usize {
+    if messages.is_empty() {
+        return 0;
+    }
+    let mut count = 1;
+    for i in 1..messages.len() {
+        // SAFETY: i is bounded by messages.len(), which is also the
+        // valid index range for both get(i) and get(i - 1).
+        if messages.get(i - 1).map(|m| m.outgoing)
+            != messages.get(i).map(|m| m.outgoing)
+        {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Build the label for a chat day separator. Today and yesterday read
@@ -1427,16 +1450,16 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
     let visible: Vec<Line> = if empty {
         Vec::new()
     } else {
-        // Forward walk: oldest → newest. Each message is rendered as a
-        // chunk containing only its day separator (if it crosses a day
-        // boundary from the previous message) and the bubble row. The
-        // group header is NOT emitted per-message — instead it is
-        // rendered ONCE at the very top of the viewport as a sticky
-        // label for the first visible message's group. Anchoring the
-        // header to the top of the viewport (instead of attaching it to
-        // the oldest visible message of each group) keeps it in place
-        // while the reader scrolls within a group and avoids chasing
-        // the newest message as more bubbles arrive.
+        // Forward walk: oldest → newest. Each message becomes a chunk
+        // whose rows are: optional group header (only when the sender
+        // switches from the previous bubble in the slice), optional day
+        // separator (only when the calendar day changes), then the
+        // bubble itself. Headers are inline at every group boundary so
+        // the reader sees "Alice · 14:02" before Alice's run and
+        // "Bob · 14:05" before Bob's run, even mid-scroll — the
+        // header is anchored to its group's first message, so it does
+        // not chase the newest message as more bubbles arrive within
+        // the same group.
         let bubble = Style::default().fg(theme.fg).bg(theme.status_bg);
         let gutter = Line::from("");
         let today_bucket = day_bucket(now_unix());
@@ -1466,6 +1489,24 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
                 theme.peer_message_style_for(&m.from_peer)
             }
         };
+        // Build a single header line for a bubble that opens a new
+        // sender group. Outgoing groups right-align the label so it
+        // sits flush against the outgoing bubble column; incoming
+        // groups pad the left edge with the sender's accent color so
+        // the header visually anchors to the incoming bubble below.
+        let build_header = |m: &UiMessage| -> Line<'_> {
+            let who = resolve_who(m);
+            let who_style = who_style_for(m).add_modifier(Modifier::BOLD);
+            let ts = chrono_timestamp(&Some(m.ts_unix));
+            if m.outgoing {
+                Line::from(Span::styled(format!("{} · {}", who, ts), who_style)).right_aligned()
+            } else {
+                Line::from(vec![
+                    Span::styled(" ", who_style.bg(theme.status_bg)),
+                    Span::styled(format!("{} · {}", who, ts), who_style),
+                ])
+            }
+        };
 
         // Respect the user's scroll anchor: when scrolled back, only
         // consider messages at or before the scroll window so we don't
@@ -1482,22 +1523,37 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         let slice: &[UiMessage] = &slice;
 
         // Build per-message chunks oldest → newest. Each chunk carries
-        // only its day separator (if it crosses a calendar boundary
-        // from the previous message) and the bubble row — the group
-        // header is rendered separately as a sticky top-of-viewport
-        // label once chunks have been finalised.
+        // an optional group header (when the sender switches from the
+        // previous bubble in the slice), an optional day separator (when
+        // the calendar day changes), and the bubble row.
         struct Chunk<'a> {
             rows: Vec<Line<'a>>,
-            slice_idx: usize,
         }
         let mut chunks: Vec<Chunk<'_>> = Vec::new();
         let mut lines_used: usize = 0;
         let mut prev: Option<&UiMessage> = None;
+        // Tracks the sender of the previous bubble in the slice so a
+        // header is emitted exactly at the start of each new sender
+        // group. `None` for the very first bubble in the slice — it
+        // opens a group by definition since there is no earlier bubble
+        // to continue.
+        let mut prev_outgoing: Option<bool> = None;
 
         for (i, m) in slice.iter().enumerate() {
-            // Lines for this single message: optional day separator +
-            // bubble. No per-message header.
+            // Lines for this single message: optional group header +
+            // optional day separator + bubble.
             let mut m_lines: Vec<Line> = Vec::new();
+
+            // Inline group header: emit when the sender differs from
+            // the previous bubble in the slice, or when this is the
+            // very first bubble (which always opens a new group).
+            let is_group_start = match prev_outgoing {
+                Some(prev) => prev != m.outgoing,
+                None => true,
+            };
+            if is_group_start {
+                m_lines.push(build_header(m));
+            }
 
             // Day boundary: prepend [gutter, separator, gutter] when
             // the previous (older) message in the deque crosses into a
@@ -1575,39 +1631,9 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
                 }
             }
             lines_used += m_lines.len();
-            chunks.push(Chunk {
-                rows: m_lines,
-                slice_idx: i,
-            });
+            chunks.push(Chunk { rows: m_lines });
             prev = Some(m);
-        }
-
-        // Sticky header: emit ONE header line at the top of the
-        // viewport for the first remaining chunk's group. The header
-        // is anchored to the viewport (not to any individual message)
-        // so it stays in place while the reader scrolls within a group
-        // and doesn't chase the latest message as more bubbles arrive.
-        if let Some(first) = chunks.first() {
-            let first_msg = &slice[first.slice_idx];
-            let who = resolve_who(first_msg);
-            let who_style = who_style_for(first_msg).add_modifier(Modifier::BOLD);
-            let ts = chrono_timestamp(&Some(first_msg.ts_unix));
-            let header_line: Line = if first_msg.outgoing {
-                Line::from(Span::styled(format!("{} · {}", who, ts), who_style)).right_aligned()
-            } else {
-                Line::from(vec![
-                    Span::styled(" ", who_style.bg(theme.status_bg)),
-                    Span::styled(format!("{} · {}", who, ts), who_style),
-                ])
-            };
-            chunks.insert(
-                0,
-                Chunk {
-                    rows: vec![header_line],
-                    slice_idx: first.slice_idx,
-                },
-            );
-            lines_used += 1;
+            prev_outgoing = Some(m.outgoing);
         }
 
         // Flatten chunks into the final row buffer in display order
@@ -1652,12 +1678,12 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
     }
     // The chat's scroll position is discoverable at a glance, including
     // when mouse-wheel or PageUp navigation moves away from the newest
-    // item. The viewport now reserves one row for the sticky group
-    // header, so `visible_n - 1` messages fit per page. Reporting that
-    // to ratatui keeps the thumb flush with the bottom edge of the
-    // track when the viewport is at the latest content (scroll == 0).
+    // item. `total` is the bubble count; the actual rendered rows
+    // include inline group headers (counted by `scroll_back` for the
+    // cap), but ratatui's ScrollbarState positions by row count, so we
+    // feed it the same row budget the renderer uses.
     if total > visible_n && area.width > 2 && area.height > 2 {
-        let viewport_rows = visible_n.saturating_sub(1).max(1);
+        let viewport_rows = visible_n;
         let mut scrollbar_state = ScrollbarState::new(total)
             .position(total.saturating_sub(viewport_rows.saturating_add(state.scroll)))
             .viewport_content_length(viewport_rows);
@@ -2012,10 +2038,10 @@ mod tests {
     #[test]
     fn scroll_back_clamps_to_visible_rows() {
         // With `visible_chat_rows` set to the chat block's interior
-        // height (rows available for bubbles + sticky header), the
-        // scroll cap becomes `messages.len() - visible_chat_rows + 1`
-        // so scrolling all the way back fills the viewport with the
-        // oldest messages instead of leaving empty rows at the bottom.
+        // height, the scroll cap is `total_rows - visible_chat_rows`
+        // where `total_rows` includes one inline header per sender
+        // group. Twenty bubbles from a single sender is one group, so
+        // total_rows = 21 and the cap is 21 - 8 = 13.
         let id = Identity {
             peer_id: [0u8; 16],
             keypair: crate::crypto::Keypair::generate(),
@@ -2032,8 +2058,6 @@ mod tests {
         }
         s.visible_chat_rows = 8;
         s.scroll_back(99);
-        // 20 messages minus an 8-row viewport (1 sticky header + 7
-        // bubbles) caps the scroll at 13.
         assert_eq!(s.scroll, 13);
         s.scroll_back(2);
         assert_eq!(s.scroll, 13);
@@ -2041,6 +2065,72 @@ mod tests {
         assert_eq!(s.scroll, 8);
         s.scroll_forward(99);
         assert_eq!(s.scroll, 0);
+    }
+
+    #[test]
+    fn scroll_back_caps_per_group_with_alternating_senders() {
+        // Twenty bubbles alternating between Alice (outgoing) and Bob
+        // (incoming) make twenty sender groups. Total rendered rows =
+        // 20 bubbles + 20 headers = 40. With an 8-row viewport the cap
+        // is 32.
+        let id = Identity {
+            peer_id: [0u8; 16],
+            keypair: crate::crypto::Keypair::generate(),
+            name: "alice".into(),
+            hostname: "test-host".into(),
+        };
+        let mut s = UiState::from_identity(&id);
+        for i in 0..20 {
+            if i % 2 == 0 {
+                s.push_outgoing_message([1u8; 16], format!("out{}", i));
+            } else {
+                s.apply(&Event::TextMessage {
+                    from_peer: [1u8; 16],
+                    from_name: "bob".into(),
+                    body: format!("in{}", i),
+                });
+            }
+        }
+        s.visible_chat_rows = 8;
+        s.scroll_back(99);
+        assert_eq!(s.scroll, 32);
+    }
+
+    #[test]
+    fn count_groups_partitions_by_outgoing_flag() {
+        let id = Identity {
+            peer_id: [0u8; 16],
+            keypair: crate::crypto::Keypair::generate(),
+            name: "alice".into(),
+            hostname: "test-host".into(),
+        };
+        let mut s = UiState::from_identity(&id);
+        assert_eq!(count_groups(&s.messages), 0);
+        // Two incoming bubbles: one group.
+        s.apply(&Event::TextMessage {
+            from_peer: [1u8; 16],
+            from_name: "bob".into(),
+            body: "a".into(),
+        });
+        s.apply(&Event::TextMessage {
+            from_peer: [1u8; 16],
+            from_name: "bob".into(),
+            body: "b".into(),
+        });
+        assert_eq!(count_groups(&s.messages), 1);
+        // Add one outgoing: switch, now two groups.
+        s.push_outgoing_message([1u8; 16], "c".into());
+        assert_eq!(count_groups(&s.messages), 2);
+        // Another outgoing: no switch, still two groups.
+        s.push_outgoing_message([1u8; 16], "d".into());
+        assert_eq!(count_groups(&s.messages), 2);
+        // One more incoming: switch, three groups.
+        s.apply(&Event::TextMessage {
+            from_peer: [1u8; 16],
+            from_name: "bob".into(),
+            body: "e".into(),
+        });
+        assert_eq!(count_groups(&s.messages), 3);
     }
 
     #[test]
