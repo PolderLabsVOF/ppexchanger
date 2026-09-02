@@ -332,6 +332,9 @@ fn start_tui(
                         let inbound_tx_for_driver = inbound_tx_for_listener.clone();
                         thread::spawn(move || {
                             let mut s = stream;
+                            let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+                            let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
+                            let _ = s.set_nodelay(true);
                             // Probe gate: peek for the 4-byte PPXP magic. If it
                             // matches, echo it back and proceed to the handshake.
                             let mut head = [0u8; 4];

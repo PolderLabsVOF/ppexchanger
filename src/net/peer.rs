@@ -28,11 +28,30 @@ use std::time::Duration;
 /// fallback instead of leaving the UI waiting on the operating system's TCP
 /// timeout (which can be a minute or more).
 const DIAL_TIMEOUT: Duration = Duration::from_secs(2);
+const DIAL_ATTEMPTS: usize = 3;
 
 /// Connect to a peer via TCP + Noise_XX. Returns the freshly minted session.
 pub fn dial(addr: SocketAddr, static_kp: &Keypair) -> std::io::Result<Session<TcpStream>> {
-    let stream = TcpStream::connect_timeout(&addr, DIAL_TIMEOUT)?;
-    let mut s = stream;
+    let mut stream = None;
+    let mut last_error = None;
+    for attempt in 0..DIAL_ATTEMPTS {
+        match TcpStream::connect_timeout(&addr, DIAL_TIMEOUT) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(e) => {
+                last_error = Some(e);
+                if attempt + 1 < DIAL_ATTEMPTS {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+            }
+        }
+    }
+    let mut s = stream.ok_or_else(|| {
+        last_error.unwrap_or_else(|| std::io::Error::other("connection attempts exhausted"))
+    })?;
+    s.set_nodelay(true)?;
     s.set_read_timeout(Some(DIAL_TIMEOUT))?;
     s.set_write_timeout(Some(DIAL_TIMEOUT))?;
     let res = run_initiator(&mut s, static_kp)

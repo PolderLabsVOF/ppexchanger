@@ -330,7 +330,15 @@ impl UiState {
                 hostname,
                 fingerprint,
             } => {
-                // Show connection request popup
+                // Coalesce repeated reverse-connect retries from the same
+                // requester. Keep the card visible while the user decides.
+                if self
+                    .pending_connection
+                    .as_ref()
+                    .is_some_and(|pending| pending.addr == *addr)
+                {
+                    return;
+                }
                 let display_name = if hostname.is_empty() {
                     name.clone()
                 } else {
@@ -338,9 +346,10 @@ impl UiState {
                 };
                 self.pending_connection = Some(crate::tui::ConnectionRequest {
                     addr: *addr,
-                    name: display_name,
+                    name: display_name.clone(),
                     fingerprint: fingerprint.clone(),
                 });
+                self.status = format!("incoming connection request from {}", display_name);
             }
             Event::ConnectionAccepted { .. } => {
                 // Handled by PeerConnected event that follows
