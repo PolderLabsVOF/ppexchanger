@@ -34,6 +34,13 @@ use std::time::{Duration, Instant};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// How often the reconnect supervisor asks the action consumer to
+/// sweep the contact database and dial any saved peer we are not
+/// currently connected to. Long enough to avoid hammering a peer
+/// that has gone away permanently, short enough that a one-sided
+/// restart feels responsive when the other side comes back online.
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut name: Option<String> = None;
@@ -233,11 +240,18 @@ fn start_tui(
         s
     }));
 
-    // Load persistent contacts and seed the UI.
-    let mut db = PeerDb::load_or_default().unwrap_or_default();
+    // Load persistent contacts and seed the UI. Wrapped in
+    // `Arc<Mutex<_>>` so the reconnect supervisor and the action
+    // consumer can iterate contacts off the UI thread without
+    // snapshotting the whole DB on every tick.
+    let db = std::sync::Arc::new(std::sync::Mutex::new(
+        PeerDb::load_or_default().unwrap_or_default(),
+    ));
     {
         let mut s = state.lock().unwrap();
-        tui::merge_contacts(&mut s, &db);
+        let db_snapshot = db.lock().unwrap();
+        tui::merge_contacts(&mut s, &db_snapshot);
+        drop(db_snapshot);
         s.status = format!(
             "identity: {} ({})",
             id.name,
@@ -481,6 +495,8 @@ fn start_tui(
     let act_bus_rx = bus.rx_actions; // moved in
     let act_inbound_rx = bus.rx_inbound_files; // moved in
     let act_state = Arc::clone(&state);
+    let act_db = Arc::clone(&db);
+    let act_actions_tx = bus.tx_actions.clone();
     let act_thread = {
         let kp = Arc::clone(&static_kp);
         let act_reg_tx = reg_tx.clone();
@@ -704,6 +720,40 @@ fn start_tui(
                         act_stop.store(true, Ordering::Relaxed);
                         break;
                     }
+                    Ok(Action::ReconnectTick) => {
+                        // One-sided restarts recover automatically: peer B
+                        // coming back online is detected on the next tick
+                        // without the user having to click Connect or
+                        // restart peer A. We only dial peers we previously
+                        // knew about (saved contact) that aren't already
+                        // connected, so this stays cheap.
+                        let connected: std::collections::HashSet<PeerId> =
+                            outbound.keys().copied().collect();
+                        let candidates: Vec<(SocketAddr, String, [u8; 32])> = {
+                            let db_guard = act_db.lock().unwrap();
+                            db_guard
+                                .iter()
+                                .filter_map(|contact| {
+                                    if connected.contains(&contact.peer_id) {
+                                        return None;
+                                    }
+                                    let addr = contact.last_addr?;
+                                    if addr.port() == 0 || addr.ip().is_unspecified() {
+                                        return None;
+                                    }
+                                    Some((addr, contact.name.clone(), contact.public_key))
+                                })
+                                .collect()
+                        };
+                        for (addr, name_hint, public_key) in candidates {
+                            let _ = act_actions_tx.send(Action::Connect {
+                                addr,
+                                name_hint,
+                                public_key,
+                                reverse: None,
+                            });
+                        }
+                    }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     Err(_) => break,
                 }
@@ -904,17 +954,40 @@ fn start_tui(
         })
     };
 
+    // Periodic reconnect supervisor. One-sided restarts recover automatically:
+    // peer B coming back online is detected on the next tick without the user
+    // having to click Connect or restart peer A. The action consumer handles
+    // `Action::ReconnectTick` by scanning the saved contact DB for peers we
+    // know about but are not currently connected to, and dispatching a
+    // bounded connect attempt for each.
+    let reconnect_stop = Arc::clone(&stop);
+    let reconnect_tx = bus.tx_actions.clone();
+    let reconnect_thread = thread::spawn(move || {
+        while !reconnect_stop.load(Ordering::Relaxed) {
+            std::thread::sleep(RECONNECT_INTERVAL);
+            if reconnect_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            if reconnect_tx.send(Action::ReconnectTick).is_err() {
+                break;
+            }
+        }
+    });
+
     // Restore every previously connected contact that has a usable last
     // address. The action thread performs the bounded TCP retries off the UI
     // thread, so a sleeping laptop or stale DHCP lease cannot stall startup.
-    let reconnect_targets: Vec<_> = db
-        .iter()
-        .filter_map(|contact| {
-            let addr = contact.last_addr?;
-            (addr.port() != 0 && !addr.ip().is_unspecified())
-                .then(|| (addr, contact.name.clone(), contact.public_key))
-        })
-        .collect();
+    let reconnect_targets: Vec<_> = {
+        let db_guard = db.lock().unwrap();
+        db_guard
+            .iter()
+            .filter_map(|contact| {
+                let addr = contact.last_addr?;
+                (addr.port() != 0 && !addr.ip().is_unspecified())
+                    .then(|| (addr, contact.name.clone(), contact.public_key))
+            })
+            .collect()
+    };
     if !reconnect_targets.is_empty() {
         let _ = bus.tx_events.send(Event::Info(format!(
             "reconnecting to {} saved peer{}…",
@@ -950,11 +1023,14 @@ fn start_tui(
             let mut s = state.lock().unwrap();
             let text_count = tui::drain_events(&bus.rx_events, &mut s);
             if s.contacts_need_save() {
-                tui::sync_to_db(&s, &mut db);
-                match db.save() {
-                    Ok(()) => s.mark_contacts_saved(),
-                    Err(error) => {
-                        s.status = format!("peer list save failed: {}", error);
+                {
+                    let mut db_guard = db.lock().unwrap();
+                    tui::sync_to_db(&s, &mut db_guard);
+                    match db_guard.save() {
+                        Ok(()) => s.mark_contacts_saved(),
+                        Err(error) => {
+                            s.status = format!("peer list save failed: {}", error);
+                        }
                     }
                 }
             }
@@ -1532,6 +1608,7 @@ fn start_tui(
     // their handles here. Listener and action-consumer threads are joined.
     let _ = listener_t.join();
     let _ = act_thread.join();
+    let _ = reconnect_thread.join();
 }
 
 fn make_beacon(id: &ppexchanger::identity::Identity, tcp_port: u16) -> Beacon {

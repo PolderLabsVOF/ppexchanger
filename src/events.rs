@@ -166,6 +166,13 @@ pub enum Action {
     Disconnect { peer_id: PeerId },
     Trust { peer_id: PeerId },
     Revoke { peer_id: PeerId },
+    /// Periodic nudge from the reconnect supervisor. The action
+    /// consumer reads the contact database and dials any saved peer
+    /// we know about but are not currently connected to. This lets
+    /// one-sided restarts recover automatically: peer B coming back
+    /// online is detected by peer A on the next tick without the user
+    /// having to click Connect or restart A.
+    ReconnectTick,
     Quit,
 }
 
