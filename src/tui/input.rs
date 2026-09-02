@@ -145,6 +145,16 @@ impl LineEditor {
         }
 
         // Ctrl-modified shortcuts first.
+        // Terminals commonly encode Ctrl+Backspace as Ctrl-H (ASCII
+        // backspace), so handle both representations before the printable
+        // character branch below. Ctrl-W is accepted as the familiar shell
+        // word-delete alternative as well.
+        if modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(code, KeyCode::Backspace | KeyCode::Char('h') | KeyCode::Char('w'))
+        {
+            self.delete_word_backwards();
+            return EditorEvent::Edited;
+        }
         if *modifiers == KeyModifiers::CONTROL {
             match code {
                 KeyCode::Char('c') => {
@@ -217,6 +227,23 @@ impl LineEditor {
                 EditorEvent::Edited
             }
             _ => EditorEvent::None,
+        }
+    }
+
+    /// Delete the word immediately before the insertion point. The editor
+    /// currently appends at the end of the buffer, so this operates from the
+    /// end while respecting UTF-8 character boundaries.
+    fn delete_word_backwards(&mut self) {
+        while self.buffer.chars().last().is_some_and(char::is_whitespace) {
+            self.buffer.pop();
+        }
+        while self
+            .buffer
+            .chars()
+            .last()
+            .is_some_and(|character| !character.is_whitespace())
+        {
+            self.buffer.pop();
         }
     }
 
@@ -396,5 +423,23 @@ mod tests {
         assert_eq!(ev, EditorEvent::None);
         // Buffer is untouched (no partial state).
         assert_eq!(ed.buffer.len(), PASTE_MAX - 10);
+    }
+
+    #[test]
+    fn ctrl_backspace_deletes_a_word_without_inserting_h() {
+        let mut ed = LineEditor::new();
+        ed.buffer = "hello world".into();
+        assert_eq!(
+            ed.on_key(&press(KeyCode::Backspace, KeyModifiers::CONTROL)),
+            EditorEvent::Edited
+        );
+        assert_eq!(ed.buffer, "hello ");
+
+        // Some terminals report Ctrl+Backspace as Ctrl-H.
+        assert_eq!(
+            ed.on_key(&press(KeyCode::Char('h'), KeyModifiers::CONTROL)),
+            EditorEvent::Edited
+        );
+        assert!(ed.buffer.is_empty());
     }
 }

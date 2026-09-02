@@ -1362,23 +1362,45 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
                 };
                 // Format timestamp as HH:MM
                 let timestamp = chrono_timestamp(&Some(m.ts_unix));
-                let timestamp_style = theme.dim_style();
-                let delivery = if m.outgoing && m.pending {
-                    Span::styled("  ⏳ pending", theme.info_style())
-                } else if m.outgoing {
-                    Span::styled("  ✓ sent", theme.self_message_style())
-                } else {
-                    Span::raw("")
-                };
+                let delivery = if m.pending { "⏳ pending" } else { "✓ sent" };
+                let divider = Style::default().fg(theme.border_inactive).bg(theme.bg);
+                let bubble = Style::default().fg(theme.fg).bg(theme.status_bg);
 
-                let marker = if m.outgoing { "›" } else { "‹" };
-                Line::from(vec![
-                    Span::styled(format!(" {} ", marker), who_style.add_modifier(Modifier::BOLD).bg(theme.status_bg)),
-                    Span::styled(format!("{}", who), who_style.add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("  {}  ", timestamp), timestamp_style),
-                    delivery,
-                    Span::styled(m.body.clone(), Style::default().fg(theme.fg).bg(theme.bg)),
-                ])
+                if m.outgoing {
+                    // Right-align the entire local row and keep delivery as
+                    // the final span, putting the checkmark at the chat edge
+                    // even when the message itself is short.
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{}  {}", who, timestamp),
+                            who_style.add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled("  │  ", divider),
+                        Span::styled(format!(" {} ", m.body), bubble),
+                        Span::styled(
+                            format!(" {} ", delivery),
+                            if m.pending {
+                                theme.info_style().bg(theme.status_bg)
+                            } else {
+                                theme.self_message_style().bg(theme.status_bg)
+                            },
+                        ),
+                    ])
+                    .right_aligned()
+                } else {
+                    // Incoming rows stay left-aligned. The colored peer
+                    // rail, muted metadata, and contrasting bubble make the
+                    // two directions readable at a glance.
+                    Line::from(vec![
+                        Span::styled(" ‹ ", who_style.add_modifier(Modifier::BOLD).bg(theme.status_bg)),
+                        Span::styled(
+                            format!("{}  {}", who, timestamp),
+                            who_style.add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled("  │  ", divider),
+                        Span::styled(format!(" {} ", m.body), bubble),
+                    ])
+                }
             })
             .collect()
     };

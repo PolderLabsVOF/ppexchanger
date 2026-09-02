@@ -1779,10 +1779,17 @@ fn resolve_target(state: &Arc<Mutex<UiState>>, text: &str) -> Option<PeerId> {
         }
         return s.peers.iter().find(|p| p.name == name).map(|p| p.peer_id);
     }
-    s.peers
-        .iter()
-        .find(|p| p.state == tui::PeerState::Connected)
+    // Keep the selected contact routable even while it is Seen/Gone. This
+    // lets the action thread retain the message in its offline queue instead
+    // of rejecting the submit with "no peer selected" after a disconnect.
+    s.selected()
         .map(|p| p.peer_id)
+        .or_else(|| {
+            s.peers
+                .iter()
+                .find(|p| p.state == tui::PeerState::Connected)
+                .map(|p| p.peer_id)
+        })
 }
 
 /// Strip the leading `@<name>` from a routed message, leaving just the body.
