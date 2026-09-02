@@ -374,6 +374,7 @@ On first run, ppx generates an identity keypair and stores it under
 - `identity` — 32-byte X25519 secret, 16-byte peer_id, display name
 - `peerdb` — known contacts (name, public key, last seen, trust flag)
 - `config.toml` — UI config (theme, scrollback, mouse, footer)
+- `history` — authenticated ChaCha20-Poly1305 encrypted chat history
 
 ## Commands
 

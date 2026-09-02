@@ -11,7 +11,7 @@
 //!   * `--no-mouse`          disable mouse capture
 //!   * no flags              start the TUI
 
-use ppexchanger::config::{config_dir, identity_path};
+use ppexchanger::config::{config_dir, history_path, identity_path};
 use ppexchanger::tui::config::StatusFormat;
 use ppexchanger::events::{Action, Bus, Event, PeerId, RegistryMsg};
 use ppexchanger::identity::load_or_create;
@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -224,6 +224,9 @@ fn start_tui(
     let glyphs = ppexchanger::tui::detect_glyphs();
 
     let bus = Bus::new();
+    let history_path = history_path().ok();
+    let history_secret = id.secret_bytes();
+    let history_peer_id = id.peer_id;
     let state = Arc::new(Mutex::new({
         let mut s = UiState::from_identity(&id);
         s.max_scrollback = ui_cfg.scrollback;
@@ -240,6 +243,15 @@ fn start_tui(
             id.name,
             pubkey_fingerprint(&id.keypair.public_bytes())
         );
+        if let Some(path) = history_path.as_ref() {
+            match ppexchanger::chat_history::load(path, &history_secret, &history_peer_id) {
+                Ok(Some(history)) => s.restore_history(history),
+                Ok(None) => {}
+                Err(error) => {
+                    s.status = format!("chat history unavailable: {}", error);
+                }
+            }
+        }
     }
 
     // Bind TCP listener on the requested port.
@@ -855,11 +867,39 @@ fn start_tui(
     let received_dir_str = config_dir()
         .map(|d| d.join("received").display().to_string())
         .unwrap_or_else(|_| "<no config dir>".to_string());
+    let mut last_history_save_attempt = Instant::now() - Duration::from_secs(2);
+    let mut history_save_backoff = false;
 
     loop {
         {
             let mut s = state.lock().unwrap();
             let text_count = tui::drain_events(&bus.rx_events, &mut s);
+            // Persist after each batch of newly-arrived messages. Keep the
+            // state lock while serializing so a concurrent optimistic echo
+            // cannot be marked clean without being included in the snapshot.
+            if history_path.is_some()
+                && s.history_needs_save()
+                && (!history_save_backoff
+                    || last_history_save_attempt.elapsed() >= Duration::from_secs(2))
+            {
+                last_history_save_attempt = Instant::now();
+                let save_result = ppexchanger::chat_history::save(
+                    history_path.as_ref().unwrap(),
+                    &history_secret,
+                    &history_peer_id,
+                    &s.messages,
+                );
+                match save_result {
+                    Ok(()) => {
+                        s.mark_history_saved();
+                        history_save_backoff = false;
+                    }
+                    Err(error) => {
+                        history_save_backoff = true;
+                        s.status = format!("chat history save failed: {}", error);
+                    }
+                }
+            }
             // Stable sidebar ordering: Connected > Seen > Gone, then name.
             s.sort_peers();
             // Notify-bell: when a fresh chat message arrived and the
@@ -1385,6 +1425,24 @@ fn start_tui(
         }
     }
 
+    // Flush the final in-memory batch before stopping worker threads. This
+    // covers a message received just before the user exits or a save retry
+    // that was waiting on the short backoff timer.
+    if let Some(path) = history_path.as_ref() {
+        let mut s = state.lock().unwrap();
+        if s.history_needs_save() {
+            if let Err(error) = ppexchanger::chat_history::save(
+                path,
+                &history_secret,
+                &history_peer_id,
+                &s.messages,
+            ) {
+                s.status = format!("chat history save failed: {}", error);
+            } else {
+                s.mark_history_saved();
+            }
+        }
+    }
     stop.store(true, Ordering::Relaxed);
     // Discovery threads self-terminate on the stop flag; we don't track
     // their handles here. Listener and action-consumer threads are joined.

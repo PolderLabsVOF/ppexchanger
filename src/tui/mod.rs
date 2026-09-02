@@ -173,6 +173,7 @@ pub struct UiState {
     /// pinned to bottom (latest).
     pub scroll: usize,
     pub max_scrollback: usize,
+    history_dirty: bool,
 }
 
 /// Snapshot of an in-flight `/discover` scan.
@@ -269,6 +270,7 @@ impl UiState {
             bound_port: 0,
             scroll: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
+            history_dirty: false,
         }
     }
 
@@ -634,6 +636,7 @@ fn discovery_empty_hint(bound_port: u16) -> String {
 impl UiState {
     fn push_message(&mut self, m: UiMessage) {
         self.messages.push_back(m);
+        self.history_dirty = true;
         while self.messages.len() > self.max_scrollback {
             self.messages.pop_front();
         }
@@ -653,6 +656,25 @@ impl UiState {
             outgoing: true,
             ts_unix: now_unix(),
         });
+    }
+
+    /// Replace the in-memory ring with history loaded from disk. Loading is
+    /// not itself a mutation, so the first render does not rewrite the file.
+    pub fn restore_history(&mut self, history: VecDeque<UiMessage>) {
+        self.messages = history;
+        while self.messages.len() > self.max_scrollback {
+            self.messages.pop_front();
+        }
+        self.scroll = 0;
+        self.history_dirty = false;
+    }
+
+    pub fn history_needs_save(&self) -> bool {
+        self.history_dirty
+    }
+
+    pub fn mark_history_saved(&mut self) {
+        self.history_dirty = false;
     }
 
     /// Currently selected peer, if any.

@@ -39,6 +39,12 @@ pub fn contacts_path() -> io::Result<PathBuf> {
     Ok(config_dir()?.join("contacts"))
 }
 
+/// Encrypted local chat history. The file contains no plaintext and is keyed
+/// from the persisted identity secret by `chat_history`.
+pub fn history_path() -> io::Result<PathBuf> {
+    Ok(config_dir()?.join("history"))
+}
+
 /// Resolve the parent directory of the app folder (XDG / APPDATA / ~/.config).
 /// Shared by both the new and legacy lookups so they always agree on the
 /// parent root.
