@@ -1429,7 +1429,7 @@ fn start_tui(
                     ppexchanger::tui::EditorEvent::PageUp => {
                         let mut s = state.lock().unwrap();
                         if s.focus == tui::Focus::Chat {
-                            s.scroll_back(5);
+                            s.scroll_back(2);
                         } else {
                             s.move_selection(-1);
                         }
@@ -1437,7 +1437,7 @@ fn start_tui(
                     ppexchanger::tui::EditorEvent::PageDown => {
                         let mut s = state.lock().unwrap();
                         if s.focus == tui::Focus::Chat {
-                            s.scroll_forward(5);
+                            s.scroll_forward(2);
                         } else {
                             s.move_selection(1);
                         }
@@ -1684,7 +1684,7 @@ fn multicast_scan(
 /// Translate one mouse event into a UI mutation. Reads the current state
 /// under the lock and writes it back in one short critical section. Scroll
 /// wheels in the chat pane use the same `scroll_back` / `scroll_forward`
-/// increments as PageUp/PageDown (5 lines per notch) so the two input
+/// increments as PageUp/PageDown (2 lines per notch) so the two input
 /// modes feel identical.
 fn handle_mouse(
     m: crossterm::event::MouseEvent,
@@ -1731,8 +1731,8 @@ fn handle_mouse(
                 return Some(ppexchanger::tui::EditorEvent::MenuAction(action));
             }
         },
-        MouseEventKind::ScrollUp if s.focus == tui::Focus::Chat => s.scroll_back(5),
-        MouseEventKind::ScrollDown if s.focus == tui::Focus::Chat => s.scroll_forward(5),
+        MouseEventKind::ScrollUp if s.focus == tui::Focus::Chat => s.scroll_back(2),
+        MouseEventKind::ScrollDown if s.focus == tui::Focus::Chat => s.scroll_forward(2),
         _ => {}
     }
     None
