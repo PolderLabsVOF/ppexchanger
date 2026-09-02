@@ -1855,6 +1855,15 @@ fn handle_command(
                 )));
             }
         }
+        "/clear" => {
+            // Wipe the in-memory chat history. The render loop persists
+            // `state.messages` to the encrypted on-disk history whenever
+            // `history_dirty` is set, so clearing + marking dirty is
+            // enough — no direct write here.
+            let mut s = state.lock().unwrap();
+            s.clear_messages();
+            let _ = tx_events.send(Event::Info("chat cleared".into()));
+        }
         "/trust" => {
             if let Some(name) = it.next() {
                 let pid = {

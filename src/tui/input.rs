@@ -80,6 +80,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/theme", "change the color theme"),
     ("/send", "send a file: /send <path>"),
     ("/settings", "open settings"),
+    ("/clear", "clear all chat messages"),
     ("/quit", "quit ppexchanger"),
 ];
 
