@@ -135,11 +135,36 @@ impl Session<std::net::TcpStream> {
     pub fn try_recv(&mut self) -> std::io::Result<Option<PlainFrame>> {
         use std::time::Duration;
         self.stream.set_read_timeout(Some(Duration::from_millis(50)))?;
-        let result = self.recv();
+        // Never call `recv` until a complete frame is available. A timed
+        // `read_exact` can consume a length prefix or part of a ciphertext
+        // before returning `TimedOut`; retrying then starts in the middle of
+        // the frame and produces the misleading "failed to fill whole
+        // buffer" disconnect seen on real Wi-Fi links. `peek` is
+        // non-consuming, so partial network packets remain intact.
+        let mut len_buf = [0u8; 4];
+        let ready = match self.stream.peek(&mut len_buf) {
+            Ok(n) if n < len_buf.len() => false,
+            Ok(_) => {
+                let len = u32::from_be_bytes(len_buf) as usize;
+                if len == 0 || len > 64 * 1024 + 16 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "frame length out of bounds",
+                    ));
+                }
+                let mut frame = vec![0u8; 4 + len];
+                matches!(self.stream.peek(&mut frame), Ok(n) if n == frame.len())
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => false,
+            Err(e) => return Err(e),
+        };
+        let result = if ready { self.recv().map(Some) } else { Ok(None) };
         // Reset to blocking so a long-lived idle connection doesn't hang.
         self.stream.set_read_timeout(None)?;
         match result {
-            Ok(f) => Ok(Some(f)),
+            Ok(f) => Ok(f),
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>

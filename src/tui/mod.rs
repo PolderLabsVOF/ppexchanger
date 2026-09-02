@@ -35,6 +35,7 @@ pub use theme::{detect_glyphs, Glyphs, Theme, ThemeName};
 use crate::events::{Event, PeerId};
 use crate::identity::Identity;
 use crate::peerdb::{Contact, PeerDb};
+use std::collections::HashMap;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
@@ -121,6 +122,10 @@ pub struct UiState {
     pub self_fingerprint: String,
     pub self_peer_id: PeerId,
     pub peers: Vec<UiPeer>,
+    /// Authenticated greetings can race the UI's `PeerConnected` event on
+    /// outbound connections. Hold those names briefly so the peer never
+    /// falls back permanently to `peer@IP`.
+    peer_name_overrides: HashMap<PeerId, String>,
     /// Bounded message ring; older entries are dropped when full.
     pub messages: VecDeque<UiMessage>,
     pub status: String,
@@ -245,6 +250,7 @@ impl UiState {
             self_fingerprint: fp,
             self_peer_id: id.peer_id,
             peers: Vec::new(),
+            peer_name_overrides: HashMap::new(),
             messages: VecDeque::new(),
             status: "starting…".into(),
             composer: String::new(),
@@ -364,15 +370,19 @@ impl UiState {
                 trusted,
                 addr,
             } => {
+                let display_name = self
+                    .peer_name_overrides
+                    .remove(peer_id)
+                    .unwrap_or_else(|| name.clone());
                 if let Some(p) = self.peers.iter_mut().find(|p| &p.peer_id == peer_id) {
-                    p.name = name.clone();
+                    p.name = display_name.clone();
                     p.fingerprint = fingerprint.clone();
                     p.trusted = *trusted;
                     p.state = PeerState::Connected;
                 } else {
                     self.peers.push(UiPeer {
                         peer_id: *peer_id,
-                        name: name.clone(),
+                        name: display_name.clone(),
                         fingerprint: fingerprint.clone(),
                         trusted: *trusted,
                         state: PeerState::Connected,
@@ -382,12 +392,14 @@ impl UiState {
                     .pending_connection
                     .take()
                     .filter(|pending| pending.addr != *addr);
-                self.status = format!("connected to {}", name);
+                self.status = format!("connected to {}", display_name);
             }
             Event::PeerNamed { peer_id, name } => {
                 if let Some(peer) = self.peers.iter_mut().find(|peer| peer.peer_id == *peer_id) {
                     peer.name = name.clone();
                     self.status = format!("connected to {}", name);
+                } else {
+                    self.peer_name_overrides.insert(*peer_id, name.clone());
                 }
             }
             Event::TextMessage {
@@ -411,14 +423,15 @@ impl UiState {
                     ts_unix: now_unix(),
                 });
             }
-            Event::PeerGone { name, .. } => {
+            Event::PeerGone { peer_id, name } => {
+                self.peer_name_overrides.remove(peer_id);
                 self.push_message(UiMessage {
                     from_name: "[net]".into(),
                     body: format!("{} disconnected", name),
                     outgoing: false,
                     ts_unix: now_unix(),
                 });
-                if let Some(p) = self.peers.iter_mut().find(|p| &p.name == name) {
+                if let Some(p) = self.peers.iter_mut().find(|p| &p.peer_id == peer_id) {
                     p.state = PeerState::Gone;
                 }
             }
@@ -1766,6 +1779,30 @@ mod tests {
         // Esc-equivalent: close_discovery drops the modal.
         s.close_discovery();
         assert!(s.discovery.is_none());
+    }
+
+    #[test]
+    fn authenticated_name_is_kept_when_it_arrives_before_connected_event() {
+        let id = Identity {
+            peer_id: [0u8; 16],
+            keypair: crate::crypto::Keypair::generate(),
+            name: "alice".into(),
+            hostname: "test-host".into(),
+        };
+        let mut s = UiState::from_identity(&id);
+        let peer_id = [9u8; 16];
+        s.apply(&Event::PeerNamed {
+            peer_id,
+            name: "macbook (berks)".into(),
+        });
+        s.apply(&Event::PeerConnected {
+            peer_id,
+            name: "peer@10.0.0.95:7777".into(),
+            fingerprint: "abcd".into(),
+            trusted: false,
+            addr: "10.0.0.95:7777".parse().unwrap(),
+        });
+        assert_eq!(s.peers[0].name, "macbook (berks)");
     }
 
     #[test]
