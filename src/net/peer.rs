@@ -293,10 +293,10 @@ pub fn spawn_session_driver_with_reg(
                         // channel so the action thread owns the per-peer
                         // transfer state. The driver only decodes and
                         // forwards — no state lives here.
-                        FrameBody::FileOffer { id, name, size, mime } => {
+                        FrameBody::FileOffer { id, name, size, mime, width, height } => {
                             let _ = tx_inbound.send(InboundFileEvent::Offer {
                                 peer: peer_id,
-                                offer: FileOffer { id, name, size, mime },
+                                offer: FileOffer { id, name, size, mime, width, height },
                             });
                         }
                         FrameBody::FileAccept { id } => {

@@ -117,13 +117,17 @@ pub enum Event {
 
 /// One file offer carried over the wire. Mirrors the encoded payload
 /// of `FrameBody::FileOffer`. `mime` may be absent when the sender
-/// didn't supply one.
+/// didn't supply one. `width`/`height` are populated for image
+/// transfers so the receiver can render an in-terminal preview
+/// without re-decoding the bytes.
 #[derive(Debug, Clone)]
 pub struct FileOffer {
     pub id: FileId,
     pub name: String,
     pub size: u64,
     pub mime: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 /// One peer discovered by a scan. Mirrors the public struct in
@@ -145,7 +149,22 @@ pub enum Action {
     /// Send a file at `path` to a peer. The action thread opens the
     /// file, generates a `FileId`, sends `FileOffer`, and waits for
     /// `FileAccept` / `FileReject` before streaming chunks.
-    SendFile { to: PeerId, path: PathBuf },
+    ///
+    /// `mime`, `width`, and `height` are optional metadata that ride
+    /// along on the wire for receivers that want to render previews
+    /// (e.g. clipboard images). `persist_to` instructs the action
+    /// thread to copy the source file to `<config_dir>/sent/` after
+    /// the transfer completes successfully — this keeps clipboard
+    /// images accessible after a reboot, since the original lives
+    /// in `/tmp` and would otherwise be wiped.
+    SendFile {
+        to: PeerId,
+        path: PathBuf,
+        mime: Option<String>,
+        width: Option<u32>,
+        height: Option<u32>,
+        persist_to: Option<PathBuf>,
+    },
     /// Accept an inbound file offer. The action thread creates the
     /// destination file under `<config_dir>/received/` and replies
     /// with a `FileAccept` frame.

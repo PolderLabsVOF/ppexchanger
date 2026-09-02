@@ -219,7 +219,12 @@ pub const FRAME_HEADER_LEN: usize = 12;
 /// Tags:
 ///   0 = Bye
 ///   1 = Text
-///   2 = FileOffer  `[id:16][name_len:2][name][size:8][mime_len:2][mime]`
+///   2 = FileOffer  `[id:16][name_len:2][name][size:8][mime_len:2][mime]
+///                   [has_dims:1][w:4][h:4]?`
+///                   The trailing `has_dims` byte is `0` for backwards
+///                   compatibility with peers that don't speak the
+///                   clipboard-image preview extension. When `1`, four
+///                   bytes of width and four of height follow.
 ///   3 = FileAccept `[id:16]`
 ///   4 = FileReject `[id:16]`
 ///   5 = FileChunk  `[id:16][offset:8][data_len:4][data]`
@@ -235,6 +240,11 @@ pub enum FrameBody {
         name: String,
         size: u64,
         mime: Option<String>,
+        /// Optional pixel dimensions for image previews. When both are
+        /// `Some`, the receiver can render an in-terminal preview
+        /// without having to decode the file again.
+        width: Option<u32>,
+        height: Option<u32>,
     },
     FileAccept {
         id: FileId,
@@ -301,11 +311,16 @@ pub fn encode_plain_frame(seq: u64, body: &FrameBody) -> Vec<u8> {
             v
         }
         FrameBody::Bye => vec![0u8],
-        FrameBody::FileOffer { id, name, size, mime } => {
+        FrameBody::FileOffer { id, name, size, mime, width, height } => {
             let name_bytes = name.as_bytes();
             // mime is optional; emit 0-length when None.
             let mime_bytes = mime.as_ref().map(|m| m.as_bytes()).unwrap_or(&[]);
-            let cap = 1 + 16 + 2 + name_bytes.len() + 8 + 2 + mime_bytes.len();
+            // Optional dimensions: 1 presence byte + 4 + 4 bytes when present.
+            let dims_tail = match (width, height) {
+                (Some(_), Some(_)) => 1 + 4 + 4,
+                _ => 1,
+            };
+            let cap = 1 + 16 + 2 + name_bytes.len() + 8 + 2 + mime_bytes.len() + dims_tail;
             let mut v = Vec::with_capacity(cap);
             v.push(TAG_FILE_OFFER);
             v.extend_from_slice(&id.0);
@@ -314,6 +329,16 @@ pub fn encode_plain_frame(seq: u64, body: &FrameBody) -> Vec<u8> {
             v.extend_from_slice(&size.to_be_bytes());
             v.extend_from_slice(&(mime_bytes.len() as u16).to_be_bytes());
             v.extend_from_slice(mime_bytes);
+            match (width, height) {
+                (Some(w), Some(h)) => {
+                    v.push(1u8);
+                    v.extend_from_slice(&w.to_be_bytes());
+                    v.extend_from_slice(&h.to_be_bytes());
+                }
+                _ => {
+                    v.push(0u8);
+                }
+            }
             v
         }
         FrameBody::FileAccept { id } => {
@@ -430,6 +455,7 @@ fn decode_file_id_only(payload: &[u8], tag: u8) -> Result<FrameBody, DecodeError
 
 fn decode_file_offer(payload: &[u8]) -> Result<FrameBody, DecodeError> {
     // [id:16][name_len:2][name][size:8][mime_len:2][mime]
+    // optional trailing [has_dims:1][w:4][h:4]?
     if payload.len() < 16 + 2 + 8 + 2 {
         return Err(DecodeError::Malformed);
     }
@@ -460,7 +486,29 @@ fn decode_file_offer(payload: &[u8]) -> Result<FrameBody, DecodeError> {
                 .to_string(),
         )
     };
-    Ok(FrameBody::FileOffer { id, name, size, mime })
+    p += mime_len;
+    // Optional pixel dimensions. Older peers stop here; the trailing
+    // bytes (if any) will simply not be present and we leave
+    // `width`/`height` as `None`.
+    let (width, height) = if p < payload.len() {
+        let has_dims = payload[p];
+        p += 1;
+        if has_dims == 1 {
+            if p + 8 != payload.len() {
+                return Err(DecodeError::Malformed);
+            }
+            let w = u32::from_be_bytes(payload[p..p + 4].try_into().unwrap());
+            let h = u32::from_be_bytes(payload[p + 4..p + 8].try_into().unwrap());
+            (Some(w), Some(h))
+        } else if has_dims == 0 {
+            (None, None)
+        } else {
+            return Err(DecodeError::Malformed);
+        }
+    } else {
+        (None, None)
+    };
+    Ok(FrameBody::FileOffer { id, name, size, mime, width, height })
 }
 
 fn decode_file_chunk(payload: &[u8]) -> Result<FrameBody, DecodeError> {
@@ -582,6 +630,8 @@ mod tests {
             name: "report.pdf".into(),
             size: 123456,
             mime: Some("application/pdf".into()),
+            width: None,
+            height: None,
         };
         let buf = encode_plain_frame(7, &body);
         let dec = decode_plain_frame(&buf).unwrap();
@@ -597,10 +647,103 @@ mod tests {
             name: "blob".into(),
             size: 0,
             mime: None,
+            width: None,
+            height: None,
         };
         let buf = encode_plain_frame(0, &body);
         let dec = decode_plain_frame(&buf).unwrap();
         assert_eq!(dec.body, body);
+    }
+
+    #[test]
+    fn frame_roundtrip_file_offer_with_dims() {
+        let id = FileId([0xCDu8; 16]);
+        let body = FrameBody::FileOffer {
+            id,
+            name: "shot.png".into(),
+            size: 4096,
+            mime: Some("image/png".into()),
+            width: Some(800),
+            height: Some(600),
+        };
+        let buf = encode_plain_frame(11, &body);
+        let dec = decode_plain_frame(&buf).unwrap();
+        assert_eq!(dec.body, body);
+    }
+
+    #[test]
+    fn frame_roundtrip_file_offer_with_dims_no_mime() {
+        let id = FileId([0xEFu8; 16]);
+        let body = FrameBody::FileOffer {
+            id,
+            name: "raw.bin".into(),
+            size: 1,
+            mime: None,
+            width: Some(2),
+            height: Some(3),
+        };
+        let buf = encode_plain_frame(2, &body);
+        let dec = decode_plain_frame(&buf).unwrap();
+        assert_eq!(dec.body, body);
+    }
+
+    #[test]
+    fn frame_old_offer_without_dims_still_decodes() {
+        // An older peer encodes a FileOffer without the optional dims
+        // trailing bytes. The decoder must accept it (returning
+        // `width: None, height: None`) so the v1 wire format stays
+        // backward-compatible.
+        let id = FileId([0x55u8; 16]);
+        let mut buf = encode_plain_frame(
+            0,
+            &FrameBody::FileOffer {
+                id,
+                name: "legacy.bin".into(),
+                size: 9,
+                mime: None,
+                width: None,
+                height: None,
+            },
+        );
+        // Truncate off the trailing `has_dims` byte to simulate a
+        // pre-extension peer. Also decrement the length prefix by 1
+        // so the decoder's `buf.len() == FRAME_HEADER_LEN + len`
+        // check still holds.
+        buf.pop();
+        let len = u32::from_be_bytes(buf[8..12].try_into().unwrap());
+        buf[8..12].copy_from_slice(&(len - 1).to_be_bytes());
+        let dec = decode_plain_frame(&buf).unwrap();
+        assert_eq!(
+            dec.body,
+            FrameBody::FileOffer {
+                id,
+                name: "legacy.bin".into(),
+                size: 9,
+                mime: None,
+                width: None,
+                height: None,
+            }
+        );
+    }
+
+    #[test]
+    fn frame_offer_rejects_bad_has_dims_flag() {
+        let id = FileId([0x77u8; 16]);
+        let mut buf = encode_plain_frame(
+            0,
+            &FrameBody::FileOffer {
+                id,
+                name: "x".into(),
+                size: 0,
+                mime: None,
+                width: Some(1),
+                height: Some(1),
+            },
+        );
+        // Flip the has_dims flag from 1 to 7 — invalid.
+        let last = buf.len() - 1;
+        buf[last - 8] = 7;
+        assert_eq!(decode_plain_frame(&buf), Err(DecodeError::Malformed));
     }
 
     #[test]

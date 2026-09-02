@@ -59,6 +59,8 @@ pub fn render(f: &mut Frame, theme: &super::theme::Theme, glyphs: &super::theme:
             Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         )),
         Line::from("  /discover   find peers on the local network"),
+        Line::from("  /send       send the typed path as a file to the active peer"),
+        Line::from("  /paste-image  send clipboard image (PNG/JPEG) with preview"),
         Line::from("  /theme      cycle theme (default/solarized/monochrome/neon/amber)"),
         Line::from("  /settings   open settings dialog"),
         Line::from("  /trust <n>  trust a peer by name"),

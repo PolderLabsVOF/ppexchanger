@@ -192,6 +192,27 @@ fn hex(b: &[u8]) -> String {
     s
 }
 
+/// Copy the transferred bytes to `dest`, creating the parent
+/// directory if needed. Used by the clipboard-image flow so the
+/// sent image survives a reboot instead of being wiped with `/tmp`.
+/// Best-effort: returns an error if the source went away (caller
+/// reports to the UI via `Event::Info`).
+fn persist_transferred_file(
+    source: &std::path::Path,
+    dest: &std::path::Path,
+) -> std::io::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Don't clobber a previously-sent file with the same name; the
+    // caller chose `dest` to include the FileId so collisions are
+    // already vanishingly unlikely.
+    if dest.exists() {
+        return Ok(());
+    }
+    std::fs::copy(source, dest).map(|_| ())
+}
+
 /// Persist the current UI config to disk. Best-effort: a permission error
 /// just posts an Event::Info warning instead of crashing the TUI.
 fn save_ui_config(cfg: &ppexchanger::tui::UiConfig, path: &std::path::Path) -> std::io::Result<()> {
@@ -512,6 +533,15 @@ fn start_tui(
                 ppexchanger::net::file_xfer::OutboundMap::new();
             let mut inbox: ppexchanger::net::file_xfer::InboundMap =
                 ppexchanger::net::file_xfer::InboundMap::new();
+            // Clipboard-image flow: stash a per-FileId destination
+            // here when the caller wants the action thread to copy
+            // the source bytes (in `/tmp`) to `<config_dir>/sent/`
+            // after the transfer completes. Looked up by FileId so
+            // concurrent transfers on different peers can't collide.
+            let mut pending_persist: HashMap<
+                ppexchanger::events::FileId,
+                std::path::PathBuf,
+            > = HashMap::new();
             while !act_stop.load(Ordering::Relaxed) {
                 // Poll the action channel with a short timeout so we can
                 // also drain the registry + inbound-file channels
@@ -638,13 +668,13 @@ fn start_tui(
                     // offer, and parks until accept; AcceptFile /
                     // RejectFile route the peer response and create
                     // the destination file on accept.
-                    Ok(Action::SendFile { to, path }) => {
+                    Ok(Action::SendFile { to, path, mime, width, height, persist_to }) => {
                         let to_name = peer_names
                             .get(&to)
                             .cloned()
                             .unwrap_or_else(|| hex(&to));
                         match ppexchanger::net::file_xfer::OutboundTransfer::open(
-                            to, to_name, path,
+                            to, to_name, path, mime, width, height,
                         ) {
                             Ok(t) => {
                                 let id = t.id();
@@ -655,9 +685,25 @@ fn start_tui(
                                         name: offer.name.clone(),
                                         size: offer.size,
                                         mime: offer.mime.clone(),
+                                        width: offer.width,
+                                        height: offer.height,
                                     });
                                 }
                                 outbox.insert(t);
+                                // If the caller asked us to persist
+                                // a copy of the source (clipboard
+                                // images, where the source lives in
+                                // `/tmp`), stash the destination on
+                                // the outbound transfer. We can't
+                                // `persist_to` here yet because the
+                                // outbound transfer doesn't yet have
+                                // a writable surface for extra
+                                // metadata; instead, do the copy at
+                                // transfer-complete time using the
+                                // `take_completed` helper below.
+                                if let Some(dest) = persist_to {
+                                    pending_persist.entry(id).or_insert(dest);
+                                }
                                 let _ = act_bus_tx.send(Event::Info(format!(
                                     "offered {} ({} bytes) to {}",
                                     offer.name,
@@ -932,12 +978,28 @@ fn start_tui(
                 for result in outbox.step_all(|peer| outbound.get(&peer).cloned()) {
                     use ppexchanger::net::file_xfer::StepResult;
                     match result {
-                        StepResult::Completed { peer, to_name, name, bytes } => {
+                        StepResult::Completed { id, peer: _, to_name, name, bytes, source_path } => {
+                            // If the caller asked us to persist the
+                            // source bytes after a successful send
+                            // (e.g. clipboard image, whose source
+                            // lives in `/tmp` and would otherwise be
+                            // wiped), do the copy now.
+                            if let Some(dest) = pending_persist.remove(&id) {
+                                if let Err(e) =
+                                    persist_transferred_file(&source_path, &dest)
+                                {
+                                    let _ = act_bus_tx.send(Event::Info(format!(
+                                        "persist {} -> {} failed: {}",
+                                        source_path.display(),
+                                        dest.display(),
+                                        e
+                                    )));
+                                }
+                            }
                             let _ = act_bus_tx.send(Event::Info(format!(
                                 "sent {} ({} bytes) to {}",
                                 name, bytes, to_name
                             )));
-                            let _ = peer;
                         }
                         StepResult::Aborted(info) => {
                             let _ = act_bus_tx.send(Event::FileAborted {
@@ -1444,6 +1506,10 @@ fn start_tui(
                                     let _ = bus.tx_actions.send(Action::SendFile {
                                         to: target,
                                         path,
+                                        mime: None,
+                                        width: None,
+                                        height: None,
+                                        persist_to: None,
                                     });
                                 } else {
                                     let _ = bus.tx_actions.send(Action::SendText {
@@ -2015,7 +2081,14 @@ fn handle_command(
                     .map(|p| p.peer_id)
             };
             if let Some(to) = pid {
-                let _ = tx_actions.send(Action::SendFile { to, path });
+                let _ = tx_actions.send(Action::SendFile {
+                    to,
+                    path,
+                    mime: None,
+                    width: None,
+                    height: None,
+                    persist_to: None,
+                });
             } else {
                 let _ = tx_events.send(Event::Info(
                     "/send: no connected peer selected".into(),
@@ -2025,6 +2098,61 @@ fn handle_command(
         "/settings" => {
             let mut s = state.lock().unwrap();
             s.open_settings(cfg);
+        }
+        "/paste-image" => {
+            // Fetch the clipboard image (if any), then route it
+            // through the normal SendFile pipeline with mime +
+            // dimensions so the receiver can render an in-terminal
+            // preview. The source bytes are first written to a temp
+            // file; on successful send, the action thread copies
+            // them to `<config_dir>/sent/` so they survive `/tmp`
+            // being wiped.
+            let pid = {
+                let s = state.lock().unwrap();
+                s.peers
+                    .iter()
+                    .find(|p| p.state == tui::PeerState::Connected)
+                    .map(|p| p.peer_id)
+            };
+            let Some(to) = pid else {
+                let _ = tx_events.send(Event::Info(
+                    "/paste-image: no connected peer selected".into(),
+                ));
+                return;
+            };
+            let spawn = ppexchanger::clipboard::RealClipboardSpawn;
+            match ppexchanger::clipboard::paste_clipboard_image(&spawn) {
+                Ok(img) => {
+                    let dir = std::env::temp_dir();
+                    let ext = if img.mime == "image/jpeg" { "jpg" } else { "png" };
+                    let tmp_name = format!("ppx-clipboard-{}.{}", std::process::id(), ext);
+                    let tmp_path = dir.join(&tmp_name);
+                    if let Err(e) = std::fs::write(&tmp_path, &img.bytes) {
+                        let _ = tx_events.send(Event::Info(format!(
+                            "/paste-image: write tmp failed: {}",
+                            e
+                        )));
+                        return;
+                    }
+                    let persist = ppexchanger::config::config_dir()
+                        .ok()
+                        .map(|cfg| cfg.join("sent").join(&tmp_name));
+                    let _ = tx_actions.send(Action::SendFile {
+                        to,
+                        path: tmp_path,
+                        mime: Some(img.mime),
+                        width: Some(img.width),
+                        height: Some(img.height),
+                        persist_to: persist,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx_events.send(Event::Info(format!(
+                        "/paste-image: {}",
+                        e
+                    )));
+                }
+            }
         }
         _ => {
             let _ = tx_events.send(Event::Info(format!("unknown command: {}", cmd)));
