@@ -124,10 +124,12 @@ impl Discovery {
     /// blocked by consumer routers.
     pub fn announce_both(&mut self, beacon: &Beacon) -> io::Result<()> {
         let mut last_error = None;
+        let mut sent_any = false;
         // Always try multicast, but don't prevent the broadcast fallback if
         // a host route/firewall rejects this particular destination.
-        if let Err(e) = self.send_to(self.group_addr, beacon) {
-            last_error = Some(e);
+        match self.send_to(self.group_addr, beacon) {
+            Ok(()) => sent_any = true,
+            Err(e) => last_error = Some(e),
         }
         // Also try local subnet broadcast if available.
         if self.local_ip.is_none() {
@@ -135,13 +137,15 @@ impl Discovery {
         }
         if let Some(local_ip) = self.local_ip {
             let broadcast_addr = SocketAddr::V4(SocketAddrV4::new(local_ip, MULTICAST_PORT));
-            if let Err(e) = self.send_to(broadcast_addr, beacon) {
-                last_error = Some(e);
+            match self.send_to(broadcast_addr, beacon) {
+                Ok(()) => sent_any = true,
+                Err(e) => last_error = Some(e),
             }
         }
-        match last_error {
-            Some(e) => Err(e),
-            None => Ok(()),
+        if sent_any {
+            Ok(())
+        } else {
+            Err(last_error.unwrap_or_else(|| io::Error::other("discovery announce failed")))
         }
     }
 
