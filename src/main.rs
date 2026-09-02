@@ -22,7 +22,7 @@ use ppexchanger::net::session::Session;
 use ppexchanger::peerdb::PeerDb;
 use ppexchanger::protocol::{fingerprint as pubkey_fingerprint, Beacon, FrameBody};
 use ppexchanger::tui::{self, PeerState, UiConfig, UiState};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -253,6 +253,14 @@ fn start_tui(
             }
         }
     }
+    let initial_pending_text: Vec<(PeerId, String)> = state
+        .lock()
+        .unwrap()
+        .messages
+        .iter()
+        .filter(|message| message.outgoing && message.pending)
+        .map(|message| (message.from_peer, message.body.clone()))
+        .collect();
 
     // Bind TCP listener on the requested port.
     let listener = match listener::bind(port) {
@@ -476,9 +484,14 @@ fn start_tui(
     let act_thread = {
         let kp = Arc::clone(&static_kp);
         let act_reg_tx = reg_tx.clone();
+        let initial_pending_text = initial_pending_text;
         thread::spawn(move || {
             let mut outbound: HashMap<PeerId, mpsc::Sender<FrameBody>> = HashMap::new();
             let mut peer_names: HashMap<PeerId, String> = HashMap::new();
+            let mut pending_text: HashMap<PeerId, VecDeque<String>> = HashMap::new();
+            for (peer_id, body) in initial_pending_text {
+                pending_text.entry(peer_id).or_default().push_back(body);
+            }
             let mut outbox: ppexchanger::net::file_xfer::OutboundMap =
                 ppexchanger::net::file_xfer::OutboundMap::new();
             let mut inbox: ppexchanger::net::file_xfer::InboundMap =
@@ -587,11 +600,21 @@ fn start_tui(
                             let mut s = act_state.lock().unwrap();
                             s.push_outgoing_message(to, body.clone());
                         }
-                        // Push the actual encrypted frame through the
-                        // session driver. If the peer is no longer
-                        // registered (disconnected mid-send), drop it.
-                        if let Some(tx) = outbound.get(&to) {
-                            let _ = tx.send(FrameBody::Text(body));
+                        pending_text.entry(to).or_default().push_back(body.clone());
+                        // Push immediately when a live driver exists. The
+                        // queue remains until the driver confirms the write,
+                        // so a broken pipe cannot lose the user's message.
+                        if let Some(tx) = outbound.get(&to).cloned() {
+                            if tx.send(FrameBody::Text(body)).is_err() {
+                                outbound.remove(&to);
+                                let _ = act_bus_tx.send(Event::Info(
+                                    "peer is offline; message queued for reconnect".into(),
+                                ));
+                            }
+                        } else {
+                            let _ = act_bus_tx.send(Event::Info(
+                                "peer is offline; message queued for reconnect".into(),
+                            ));
                         }
                     }
                     // File actions drive the state machines in
@@ -694,10 +717,39 @@ fn start_tui(
                             sender,
                         } => {
                             peer_names.insert(peer_id, name);
-                            outbound.insert(peer_id, sender);
+                            outbound.insert(peer_id, sender.clone());
+                            // Flush messages accumulated while this peer was
+                            // offline. Keep each entry until its driver emits
+                            // TextDelivered, allowing a failed reconnect to
+                            // be retried by the next connection.
+                            if let Some(queue) = pending_text.get(&peer_id) {
+                                let mut failed = false;
+                                for body in queue {
+                                    if sender.send(FrameBody::Text(body.clone())).is_err() {
+                                        failed = true;
+                                        break;
+                                    }
+                                }
+                                if failed {
+                                    outbound.remove(&peer_id);
+                                }
+                            }
                         }
                         RegistryMsg::Rename { peer_id, name } => {
                             peer_names.insert(peer_id, name);
+                        }
+                        RegistryMsg::TextDelivered { peer_id, body } => {
+                            if let Some(queue) = pending_text.get_mut(&peer_id) {
+                                if let Some(index) = queue.iter().position(|queued| queued == &body) {
+                                    queue.remove(index);
+                                }
+                                if queue.is_empty() {
+                                    pending_text.remove(&peer_id);
+                                }
+                            }
+                        }
+                        RegistryMsg::TextSendFailed { peer_id, .. } => {
+                            outbound.remove(&peer_id);
                         }
                         RegistryMsg::Unregister { peer_id } => {
                             outbound.remove(&peer_id);

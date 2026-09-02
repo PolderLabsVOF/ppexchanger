@@ -14,7 +14,8 @@ use std::collections::VecDeque;
 use std::io;
 use std::path::Path;
 
-const MAGIC: &[u8; 4] = b"PCH1";
+const MAGIC: &[u8; 4] = b"PCH2";
+const LEGACY_MAGIC: &[u8; 4] = b"PCH1";
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 const MAX_MESSAGES: usize = 10_000;
@@ -87,12 +88,18 @@ pub fn load(
             "chat history file is truncated",
         ));
     }
-    if &bytes[..MAGIC.len()] != MAGIC {
+    let file_magic = &bytes[..MAGIC.len()];
+    let has_pending = if file_magic == MAGIC {
+        true
+    } else if file_magic == LEGACY_MAGIC {
+        false
+    } else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "chat history format mismatch",
         ));
-    }
+    };
+    let aad = if has_pending { MAGIC } else { LEGACY_MAGIC };
     if bytes.len() > MAGIC.len() + NONCE_LEN + TAG_LEN + MAX_PLAINTEXT_LEN {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -106,7 +113,7 @@ pub fn load(
             nonce,
             Payload {
                 msg: &bytes[MAGIC.len() + NONCE_LEN..],
-                aad: MAGIC,
+                aad,
             },
         )
         .map_err(|_| {
@@ -121,7 +128,7 @@ pub fn load(
             "chat history is too large",
         ));
     }
-    decode(&plaintext).map(Some)
+    decode(&plaintext, has_pending).map(Some)
 }
 
 fn encode(messages: &VecDeque<UiMessage>) -> io::Result<Vec<u8>> {
@@ -144,6 +151,7 @@ fn encode(messages: &VecDeque<UiMessage>) -> io::Result<Vec<u8>> {
         }
         out.extend_from_slice(&message.from_peer);
         out.push(u8::from(message.outgoing));
+        out.push(u8::from(message.pending));
         out.extend_from_slice(&message.ts_unix.to_be_bytes());
         out.extend_from_slice(&(name.len() as u32).to_be_bytes());
         out.extend_from_slice(&(body.len() as u32).to_be_bytes());
@@ -159,7 +167,7 @@ fn encode(messages: &VecDeque<UiMessage>) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn decode(bytes: &[u8]) -> io::Result<VecDeque<UiMessage>> {
+fn decode(bytes: &[u8], has_pending: bool) -> io::Result<VecDeque<UiMessage>> {
     let mut cursor = Cursor::new(bytes);
     let count = cursor.u32()? as usize;
     if count > MAX_MESSAGES {
@@ -181,6 +189,20 @@ fn decode(bytes: &[u8]) -> io::Result<VecDeque<UiMessage>> {
                 ));
             }
         };
+        let pending = if has_pending {
+            match cursor.byte()? {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "chat history pending flag is invalid",
+                    ));
+                }
+            }
+        } else {
+            false
+        };
         let ts_unix = cursor.u64()?;
         let name_len = cursor.u32()? as usize;
         let body_len = cursor.u32()? as usize;
@@ -197,6 +219,7 @@ fn decode(bytes: &[u8]) -> io::Result<VecDeque<UiMessage>> {
             from_name,
             body,
             outgoing,
+            pending,
             ts_unix,
         });
     }
@@ -290,12 +313,15 @@ mod tests {
             from_name: "alice".into(),
             body: "keep this private".into(),
             outgoing: true,
+            pending: true,
             ts_unix: 42,
         });
         save(&path, &secret, &peer_id, &messages).unwrap();
         let raw = std::fs::read(&path).unwrap();
         assert!(!raw.windows(17).any(|w| w == b"keep this private"));
-        assert_eq!(load(&path, &secret, &peer_id).unwrap().unwrap().len(), 1);
+        let loaded = load(&path, &secret, &peer_id).unwrap().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.front().unwrap().pending);
         assert!(load(&path, &[8u8; 32], &peer_id).is_err());
         let _ = std::fs::remove_file(path);
     }

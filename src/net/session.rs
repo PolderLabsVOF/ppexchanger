@@ -129,6 +129,29 @@ impl<S: Read + Write> Session<S> {
 /// Concrete specialization: TcpStream supports `set_read_timeout`, so the
 /// generic `try_recv` (blocking) can be overridden to poll briefly.
 impl Session<std::net::TcpStream> {
+    /// Fast, non-consuming liveness check used immediately before sending a
+    /// queued chat message. `WouldBlock` means the socket is alive but has no
+    /// inbound data; a zero-byte peek means the peer closed its side.
+    pub fn peer_alive(&mut self) -> std::io::Result<bool> {
+        use std::time::Duration;
+        self.stream.set_read_timeout(Some(Duration::from_millis(5)))?;
+        let mut byte = [0u8; 1];
+        let result = match self.stream.peek(&mut byte) {
+            Ok(0) => false,
+            Ok(_) => true,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) || matches!(error.raw_os_error(), Some(11 | 35)) => true,
+            Err(_) => false,
+        };
+        self.stream.set_read_timeout(None)?;
+        Ok(result)
+    }
+
     /// Non-blocking poll for one inbound frame. Returns `Ok(None)` if no
     /// frame arrives within ~50ms — the connection thread uses this to
     /// interleave outbound sends with inbound receives.

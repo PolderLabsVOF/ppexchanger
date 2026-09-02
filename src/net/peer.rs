@@ -181,6 +181,47 @@ pub fn spawn_session_driver_with_reg(
             // 1) Drain outbound queue.
             loop {
                 match outbound_rx.try_recv() {
+                    Ok(FrameBody::Text(body)) => {
+                        // A stale sender can survive briefly after the peer
+                        // has gone away. Probe the socket first so offline
+                        // sends become queued messages instead of surfacing a
+                        // raw broken-pipe error to the user.
+                        if !sess.peer_alive().unwrap_or(false) {
+                            if let Some(registry) = &reg_tx {
+                                let _ = registry.send(RegistryMsg::TextSendFailed {
+                                    peer_id,
+                                    body: body.clone(),
+                                });
+                            }
+                            let _ = tx.send(Event::Info(format!(
+                                "{} is offline; message queued",
+                                display
+                            )));
+                            exit(&tx, &reg_tx, &display);
+                            return;
+                        }
+                        if let Err(_error) = sess.send(&FrameBody::Text(body.clone())) {
+                            if let Some(registry) = &reg_tx {
+                                let _ = registry.send(RegistryMsg::TextSendFailed {
+                                    peer_id,
+                                    body: body.clone(),
+                                });
+                            }
+                            let _ = tx.send(Event::Info(format!(
+                                "{} is offline; message queued",
+                                display
+                            )));
+                            exit(&tx, &reg_tx, &display);
+                            return;
+                        }
+                        if let Some(registry) = &reg_tx {
+                            let _ = registry.send(RegistryMsg::TextDelivered {
+                                peer_id,
+                                body: body.clone(),
+                            });
+                        }
+                        let _ = tx.send(Event::TextDelivered { peer_id, body });
+                    }
                     Ok(body) => {
                         if let Err(e) = sess.send(&body) {
                             let _ = tx.send(Event::Info(format!("session send failed for {}: {}", display, e)));

@@ -71,6 +71,9 @@ pub enum Event {
         from_name: String,
         body: String,
     },
+    /// Confirmation emitted by the session driver after the encrypted text
+    /// frame has been written to the peer socket.
+    TextDelivered { peer_id: PeerId, body: String },
     /// Decryption failed for a peer's frame — usually means their pubkey changed.
     DecryptFailed { peer_id: PeerId, from_name: String },
     /// A peer's TCP connection dropped.
@@ -192,6 +195,8 @@ pub enum RegistryMsg {
     /// Replace the provisional address/fingerprint label once the encrypted
     /// Hello frame has authenticated the peer's configured display name.
     Rename { peer_id: PeerId, name: String },
+    TextDelivered { peer_id: PeerId, body: String },
+    TextSendFailed { peer_id: PeerId, body: String },
     Unregister {
         peer_id: PeerId,
     },

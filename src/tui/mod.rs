@@ -244,6 +244,7 @@ pub struct UiMessage {
     pub from_name: String,
     pub body: String,
     pub outgoing: bool,
+    pub pending: bool,
     pub ts_unix: u64,
 }
 
@@ -426,8 +427,20 @@ impl UiState {
                     from_name: from_name.clone(),
                     body: body.clone(),
                     outgoing: false,
+                    pending: false,
                     ts_unix: now_unix(),
                 });
+            }
+            Event::TextDelivered { peer_id, body } => {
+                if let Some(message) = self.messages.iter_mut().rev().find(|message| {
+                    message.outgoing
+                        && message.pending
+                        && message.from_peer == *peer_id
+                        && message.body == *body
+                }) {
+                    message.pending = false;
+                    self.history_dirty = true;
+                }
             }
             Event::DecryptFailed { peer_id, from_name } => {
                 self.push_message(UiMessage {
@@ -435,6 +448,7 @@ impl UiState {
                     from_name: "[decrypt]".into(),
                     body: format!("failed to decrypt message from {}", from_name),
                     outgoing: false,
+                    pending: false,
                     ts_unix: now_unix(),
                 });
             }
@@ -445,6 +459,7 @@ impl UiState {
                     from_name: "[net]".into(),
                     body: format!("{} disconnected", name),
                     outgoing: false,
+                    pending: false,
                     ts_unix: now_unix(),
                 });
                 if let Some(p) = self.peers.iter_mut().find(|p| &p.peer_id == peer_id) {
@@ -523,6 +538,7 @@ impl UiState {
                             offer.size
                         ),
                         outgoing: false,
+                        pending: false,
                         ts_unix: now_unix(),
                     });
                 }
@@ -547,6 +563,7 @@ impl UiState {
                         saved_to.display()
                     ),
                     outgoing: false,
+                    pending: false,
                     ts_unix: now_unix(),
                 });
             }
@@ -566,6 +583,7 @@ impl UiState {
                         from_name, name, reason
                     ),
                     outgoing: false,
+                    pending: false,
                     ts_unix: now_unix(),
                 });
             }
@@ -665,6 +683,7 @@ impl UiState {
             from_name: self.self_name.clone(),
             body,
             outgoing: true,
+            pending: true,
             ts_unix: now_unix(),
         });
     }
@@ -1344,12 +1363,20 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
                 // Format timestamp as HH:MM
                 let timestamp = chrono_timestamp(&Some(m.ts_unix));
                 let timestamp_style = theme.dim_style();
+                let delivery = if m.outgoing && m.pending {
+                    Span::styled("  ⏳ pending", theme.info_style())
+                } else if m.outgoing {
+                    Span::styled("  ✓ sent", theme.self_message_style())
+                } else {
+                    Span::raw("")
+                };
 
                 let marker = if m.outgoing { "›" } else { "‹" };
                 Line::from(vec![
                     Span::styled(format!(" {} ", marker), who_style.add_modifier(Modifier::BOLD).bg(theme.status_bg)),
                     Span::styled(format!("{}", who), who_style.add_modifier(Modifier::BOLD)),
                     Span::styled(format!("  {}  ", timestamp), timestamp_style),
+                    delivery,
                     Span::styled(m.body.clone(), Style::default().fg(theme.fg).bg(theme.bg)),
                 ])
             })
