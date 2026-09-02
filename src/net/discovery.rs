@@ -150,6 +150,7 @@ impl Discovery {
         // the advertised unicast control endpoint and to the control
         // multicast group. The latter is important on hosts whose firewall
         // permits discovery multicast but drops unsolicited unicast UDP.
+        let wildcard_target = target_peer_id == [0u8; 16];
         let control_group = SocketAddr::V4(SocketAddrV4::new(MULTICAST_GROUP, CONTROL_PORT));
         let mut last_send_error = None;
         for _ in 0..3 {
@@ -158,7 +159,10 @@ impl Discovery {
                 Ok(_) => sent = true,
                 Err(e) => last_send_error = Some(e),
             }
-            if control_group != addr && socket.send_to(&packet, control_group).is_ok() {
+            // A wildcard target is used only by the TCP scanner, which knows
+            // the peer's IP but not its beacon id. Keep that request unicast
+            // so every ppx instance on the LAN does not attempt the callback.
+            if !wildcard_target && control_group != addr && socket.send_to(&packet, control_group).is_ok() {
                 sent = true;
             }
             if !sent {
@@ -166,7 +170,11 @@ impl Discovery {
             }
             let mut reply = [0u8; 20];
             match socket.recv_from(&mut reply) {
-                Ok((20, _)) if &reply[..4] == REVERSE_ACK_MAGIC && reply[4..] == target_peer_id => {
+                Ok((20, _))
+                    if &reply[..4] == REVERSE_ACK_MAGIC
+                        && (reply[4..] == target_peer_id
+                            || (wildcard_target && reply[4..] != [0u8; 16])) =>
+                {
                     return Ok(true);
                 }
                 Ok(_) => continue,
@@ -186,7 +194,10 @@ impl Discovery {
     pub fn recv_reverse_connect(&self, our_peer_id: [u8; 16]) -> io::Result<Option<SocketAddr>> {
         let mut buf = [0u8; 64];
         match self.socket.recv_from(&mut buf) {
-            Ok((22, source)) if &buf[..4] == REVERSE_MAGIC && buf[4..20] == our_peer_id => {
+            Ok((22, source))
+                if &buf[..4] == REVERSE_MAGIC
+                    && (buf[4..20] == our_peer_id || buf[4..20] == [0u8; 16]) =>
+            {
                 let mut ack = [0u8; 20];
                 ack[..4].copy_from_slice(REVERSE_ACK_MAGIC);
                 ack[4..].copy_from_slice(&our_peer_id);

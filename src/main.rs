@@ -1440,7 +1440,17 @@ fn do_discover(
                 hostname: None,
                 addr: std::net::SocketAddr::V4(a),
                 fingerprint: None,
-                reverse: None,
+                // TCP discovery gives us a concrete peer IP but no beacon
+                // id. Keep a targeted reverse-connect fallback available;
+                // the receiver accepts the all-zero id only on its own
+                // unicast control endpoint.
+                reverse: Some((
+                    std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+                        *a.ip(),
+                        ppexchanger::net::discovery::CONTROL_PORT,
+                    )),
+                    [0u8; 16],
+                )),
             })
             .collect();
         let label = if ports.len() > 1 {
