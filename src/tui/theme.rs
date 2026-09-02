@@ -223,6 +223,56 @@ impl Theme {
         Style::default().fg(self.peer_text).bg(self.bg)
     }
 
+    /// Stable accent for a peer, derived from its authenticated identity so
+    /// the same person keeps the same color across reconnects and restarts.
+    /// The palette deliberately avoids `self_text`, keeping local echoes
+    /// visually distinct from every remote speaker.
+    pub fn peer_message_style_for(&self, peer_id: &[u8; 16]) -> Style {
+        let colors = match self.name {
+            ThemeName::Default => [
+                Color::Cyan,
+                Color::Yellow,
+                Color::Magenta,
+                Color::Blue,
+                Color::Red,
+                Color::White,
+            ],
+            ThemeName::Solarized => [
+                Color::Rgb(42, 161, 152),
+                Color::Rgb(181, 137, 0),
+                Color::Rgb(211, 54, 130),
+                Color::Rgb(38, 139, 210),
+                Color::Rgb(203, 75, 22),
+                Color::Rgb(108, 113, 196),
+            ],
+            ThemeName::Monochrome => [
+                Color::White,
+                Color::Gray,
+                Color::Indexed(250),
+                Color::Indexed(245),
+                Color::Indexed(240),
+                Color::Indexed(235),
+            ],
+            ThemeName::Neon => [
+                Color::Rgb(0, 220, 255),
+                Color::Rgb(255, 220, 0),
+                Color::Rgb(255, 80, 220),
+                Color::Rgb(120, 160, 255),
+                Color::Rgb(255, 100, 60),
+                Color::Rgb(180, 100, 255),
+            ],
+            ThemeName::Amber => [
+                Color::Rgb(255, 204, 102),
+                Color::Rgb(255, 153, 51),
+                Color::Rgb(255, 230, 153),
+                Color::Rgb(204, 153, 102),
+                Color::Rgb(255, 119, 51),
+                Color::Rgb(153, 204, 102),
+            ],
+        };
+        Style::default().fg(colors[peer_id[0] as usize % colors.len()]).bg(self.bg)
+    }
+
     pub fn info_style(&self) -> Style {
         Style::default().fg(self.info).bg(self.bg).add_modifier(Modifier::ITALIC)
     }

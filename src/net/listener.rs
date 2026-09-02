@@ -77,8 +77,9 @@ pub fn run(listener: TcpListener, static_kp: Arc<Keypair>, tx: mpsc::Sender<Acce
                 let tx2 = tx.clone();
                 std::thread::spawn(move || {
                     let mut s = stream;
-                    // Probe gate: peek for the 4-byte scanner magic. If it
-                    // matches, echo it back and proceed to the handshake.
+                    // Probe gate: the subnet scanner sends only the 4-byte
+                    // magic and closes after the echo. Do not pass a probe
+                    // into Noise or it will be logged as a failed handshake.
                     // If it doesn't, push the 4 bytes back into the stream
                     // so the legacy handshake (older ppx / unknown clients)
                     // still sees them as the length prefix it expects.
@@ -86,12 +87,11 @@ pub fn run(listener: TcpListener, static_kp: Arc<Keypair>, tx: mpsc::Sender<Acce
                     if s.read_exact(&mut head).is_err() {
                         return;
                     }
-                    let prefix = if &head == PROBE_MAGIC {
+                    if &head == PROBE_MAGIC {
                         let _ = s.write_all(PROBE_MAGIC);
-                        Vec::new()
-                    } else {
-                        head.to_vec()
-                    };
+                        return;
+                    }
+                    let prefix = head.to_vec();
                     let mut wrapped = PrefixedStream {
                         head: &prefix,
                         inner: s,

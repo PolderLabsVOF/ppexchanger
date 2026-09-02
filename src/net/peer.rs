@@ -205,6 +205,12 @@ pub fn spawn_session_driver_with_reg(
                             display = display_name.clone();
                             let _ = tx.send(Event::Info(format!("authenticated peer identity: {}", display_name)));
                             let _ = tx.send(Event::PeerNamed { peer_id, name: display_name });
+                            if let Some(registry) = &reg_tx {
+                                let _ = registry.send(RegistryMsg::Rename {
+                                    peer_id,
+                                    name: display.clone(),
+                                });
+                            }
                         }
                         FrameBody::Text(s) => {
                             let _ = tx.send(Event::TextMessage {

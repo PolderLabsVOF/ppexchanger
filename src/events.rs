@@ -189,6 +189,9 @@ pub enum RegistryMsg {
         name: String,
         sender: Sender<FrameBody>,
     },
+    /// Replace the provisional address/fingerprint label once the encrypted
+    /// Hello frame has authenticated the peer's configured display name.
+    Rename { peer_id: PeerId, name: String },
     Unregister {
         peer_id: PeerId,
     },

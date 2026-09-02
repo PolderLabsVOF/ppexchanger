@@ -371,17 +371,19 @@ fn start_tui(
                             let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
                             let _ = s.set_nodelay(true);
                             // Probe gate: peek for the 4-byte PPXP magic. If it
-                            // matches, echo it back and proceed to the handshake.
+                            // matches, echo it back and close the probe. The
+                            // subnet scanner intentionally sends only this
+                            // preamble; attempting Noise after it produces the
+                            // misleading "failed to fill whole buffer" log.
                             let mut head = [0u8; 4];
                             if s.read_exact(&mut head).is_err() {
                                 return;
                             }
-                            let prefix = if &head == b"PPXP" {
+                            if &head == b"PPXP" {
                                 let _ = s.write_all(b"PPXP");
-                                Vec::new()
-                            } else {
-                                head.to_vec()
-                            };
+                                return;
+                            }
+                            let prefix = head.to_vec();
                             let mut wrapped = ppexchanger::net::listener::PrefixedStream {
                                 head: &prefix,
                                 inner: s,
@@ -573,17 +575,9 @@ fn start_tui(
                     Ok(Action::SendText { to, body }) => {
                         // Optimistic local echo: render the sent line in
                         // the UI immediately so the user sees feedback.
-                        let name = peer_names
-                            .get(&to)
-                            .cloned()
-                            .unwrap_or_else(|| "self".into());
                         {
                             let mut s = act_state.lock().unwrap();
-                            s.apply(&Event::TextMessage {
-                                from_peer: to,
-                                from_name: name,
-                                body: body.clone(),
-                            });
+                            s.push_outgoing_message(to, body.clone());
                         }
                         // Push the actual encrypted frame through the
                         // session driver. If the peer is no longer
@@ -693,6 +687,9 @@ fn start_tui(
                         } => {
                             peer_names.insert(peer_id, name);
                             outbound.insert(peer_id, sender);
+                        }
+                        RegistryMsg::Rename { peer_id, name } => {
+                            peer_names.insert(peer_id, name);
                         }
                         RegistryMsg::Unregister { peer_id } => {
                             outbound.remove(&peer_id);

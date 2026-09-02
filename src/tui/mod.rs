@@ -236,6 +236,7 @@ pub enum PeerState {
 }
 
 pub struct UiMessage {
+    pub from_peer: PeerId,
     pub from_name: String,
     pub body: String,
     pub outgoing: bool,
@@ -408,15 +409,16 @@ impl UiState {
                 body,
             } => {
                 self.push_message(UiMessage {
+                    from_peer: *from_peer,
                     from_name: from_name.clone(),
                     body: body.clone(),
                     outgoing: false,
                     ts_unix: now_unix(),
                 });
-                let _ = from_peer;
             }
-            Event::DecryptFailed { from_name, .. } => {
+            Event::DecryptFailed { peer_id, from_name } => {
                 self.push_message(UiMessage {
+                    from_peer: *peer_id,
                     from_name: "[decrypt]".into(),
                     body: format!("failed to decrypt message from {}", from_name),
                     outgoing: false,
@@ -426,6 +428,7 @@ impl UiState {
             Event::PeerGone { peer_id, name } => {
                 self.peer_name_overrides.remove(peer_id);
                 self.push_message(UiMessage {
+                    from_peer: *peer_id,
                     from_name: "[net]".into(),
                     body: format!("{} disconnected", name),
                     outgoing: false,
@@ -498,6 +501,7 @@ impl UiState {
                     });
                 } else {
                     self.push_message(UiMessage {
+                        from_peer: *from_peer,
                         from_name: "[file]".into(),
                         body: format!(
                             "{} offers file: {} ({} bytes) — busy with another",
@@ -511,6 +515,7 @@ impl UiState {
                 }
             }
             Event::FileReceived {
+                from_peer,
                 from_name,
                 name,
                 bytes,
@@ -519,6 +524,7 @@ impl UiState {
             } => {
                 self.file_offer = None;
                 self.push_message(UiMessage {
+                    from_peer: *from_peer,
                     from_name: "[file]".into(),
                     body: format!(
                         "{} sent {} ({} bytes) → {}",
@@ -532,6 +538,7 @@ impl UiState {
                 });
             }
             Event::FileAborted {
+                from_peer,
                 from_name,
                 name,
                 reason,
@@ -539,6 +546,7 @@ impl UiState {
             } => {
                 self.file_offer = None;
                 self.push_message(UiMessage {
+                    from_peer: *from_peer,
                     from_name: "[file]".into(),
                     body: format!(
                         "{}: transfer of {} aborted ({})",
@@ -632,6 +640,19 @@ impl UiState {
         // Any new message resets the scroll anchor — we always show the
         // latest by default.
         self.scroll = 0;
+    }
+
+    /// Add an optimistic local echo for a message accepted by the composer.
+    /// Keeping this distinct from `TextMessage` prevents our own line from
+    /// being rendered as if it came from the selected peer.
+    pub fn push_outgoing_message(&mut self, to_peer: PeerId, body: String) {
+        self.push_message(UiMessage {
+            from_peer: to_peer,
+            from_name: self.self_name.clone(),
+            body,
+            outgoing: true,
+            ts_unix: now_unix(),
+        });
     }
 
     /// Currently selected peer, if any.
@@ -1138,11 +1159,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
                 } else {
                     theme.untrusted_style()
                 };
-                let name_style = if p.state == PeerState::Connected {
-                    theme.self_message_style()
-                } else {
-                    theme.peer_message_style()
-                };
+                let name_style = theme.peer_message_style_for(&p.peer_id);
                 let detail = match p.state {
                     PeerState::Connected => "online",
                     PeerState::Seen => "available",
@@ -1264,12 +1281,20 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
                 let who = if m.outgoing {
                     state.self_name.clone()
                 } else {
-                    m.from_name.clone()
+                    // Resolve at render time so a provisional `peer@IP`
+                    // label is replaced in already-rendered chat history as
+                    // soon as the encrypted Hello supplies the real name.
+                    state
+                        .peers
+                        .iter()
+                        .find(|peer| peer.peer_id == m.from_peer)
+                        .map(|peer| peer.name.clone())
+                        .unwrap_or_else(|| m.from_name.clone())
                 };
                 let who_style = if m.outgoing {
                     theme.self_message_style()
                 } else {
-                    theme.peer_message_style()
+                    theme.peer_message_style_for(&m.from_peer)
                 };
                 // Format timestamp as HH:MM
                 let timestamp = chrono_timestamp(&Some(m.ts_unix));
