@@ -134,6 +134,12 @@ impl Session<std::net::TcpStream> {
     /// interleave outbound sends with inbound receives.
     pub fn try_recv(&mut self) -> std::io::Result<Option<PlainFrame>> {
         use std::time::Duration;
+        fn transient(e: &std::io::Error) -> bool {
+            matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted)
+                // macOS reports EAGAIN as errno 35 in some socket timeout
+                // paths instead of mapping it to ErrorKind::WouldBlock.
+                || matches!(e.raw_os_error(), Some(11 | 35))
+        }
         self.stream.set_read_timeout(Some(Duration::from_millis(50)))?;
         // Never call `recv` until a complete frame is available. A timed
         // `read_exact` can consume a length prefix or part of a ciphertext
@@ -155,9 +161,7 @@ impl Session<std::net::TcpStream> {
                 let mut frame = vec![0u8; 4 + len];
                 matches!(self.stream.peek(&mut frame), Ok(n) if n == frame.len())
             }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut => false,
+            Err(e) if transient(&e) => false,
             Err(e) => return Err(e),
         };
         let result = if ready { self.recv().map(Some) } else { Ok(None) };
@@ -165,12 +169,7 @@ impl Session<std::net::TcpStream> {
         self.stream.set_read_timeout(None)?;
         match result {
             Ok(f) => Ok(f),
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-            {
-                Ok(None)
-            }
+            Err(e) if transient(&e) => Ok(None),
             Err(e) => Err(e),
         }
     }
