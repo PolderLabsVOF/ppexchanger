@@ -275,6 +275,8 @@ fn start_tui(
     // Wrap the static keypair in Arc so listener/handshake threads can share
     // it without cloning the inner struct (Keypair is intentionally not Clone).
     let static_kp: Arc<ppexchanger::crypto::Keypair> = Arc::new(id.keypair);
+    let local_name = id.name.clone();
+    let local_hostname = id.hostname.clone();
 
     // Announcer thread: continuously broadcasts our presence so peers running
     // `/discover` can find us even if we haven't initiated discovery ourselves.
@@ -319,6 +321,8 @@ fn start_tui(
         let stop2 = Arc::clone(&stop);
         let reg_tx2 = reg_tx.clone();
         let inbound_tx_for_listener = bus.tx_inbound_files.clone();
+        let local_name_for_listener = local_name.clone();
+        let local_hostname_for_listener = local_hostname.clone();
         thread::spawn(move || {
             loop {
                 if stop2.load(Ordering::Relaxed) {
@@ -330,6 +334,8 @@ fn start_tui(
                         let tx2 = tx.clone();
                         let reg_tx3 = reg_tx2.clone();
                         let inbound_tx_for_driver = inbound_tx_for_listener.clone();
+                        let local_name = local_name_for_listener.clone();
+                        let local_hostname = local_hostname_for_listener.clone();
                         thread::spawn(move || {
                             let mut s = stream;
                             let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
@@ -389,6 +395,8 @@ fn start_tui(
                                         tx2,
                                         inbound_tx_for_driver,
                                         Some(reg_tx4),
+                                        local_name,
+                                        local_hostname,
                                     );
                                 }
                                 Err(_e) => {}
@@ -448,6 +456,8 @@ fn start_tui(
                         let kp_clone = Arc::clone(&kp);
                         let reg_clone = act_reg_tx.clone();
                         let fallback_port = bound_port;
+                        let local_name_for_connect = local_name.clone();
+                        let local_hostname_for_connect = local_hostname.clone();
                         thread::spawn(move || {
                             if let Some((peer_id, discovered)) = peer::connect(
                                 addr,
@@ -456,6 +466,8 @@ fn start_tui(
                                 tx_clone.clone(),
                                 tx_inbound_clone,
                                 reg_clone,
+                                local_name_for_connect,
+                                local_hostname_for_connect,
                             ) {
                                 let _ = tx_clone.send(Event::PeerConnected {
                                     peer_id,

@@ -362,7 +362,7 @@ impl UiState {
                 name,
                 fingerprint,
                 trusted,
-                ..
+                addr,
             } => {
                 if let Some(p) = self.peers.iter_mut().find(|p| &p.peer_id == peer_id) {
                     p.name = name.clone();
@@ -377,6 +377,17 @@ impl UiState {
                         trusted: *trusted,
                         state: PeerState::Connected,
                     });
+                }
+                self.pending_connection = self
+                    .pending_connection
+                    .take()
+                    .filter(|pending| pending.addr != *addr);
+                self.status = format!("connected to {}", name);
+            }
+            Event::PeerNamed { peer_id, name } => {
+                if let Some(peer) = self.peers.iter_mut().find(|peer| peer.peer_id == *peer_id) {
+                    peer.name = name.clone();
+                    self.status = format!("connected to {}", name);
                 }
             }
             Event::TextMessage {

@@ -48,6 +48,8 @@ pub const TAG_FILE_REJECT: u8 = 4;
 pub const TAG_FILE_CHUNK: u8 = 5;
 /// Tag byte for `FrameBody::FileDone`.
 pub const TAG_FILE_DONE: u8 = 6;
+/// Tag byte for the encrypted identity greeting exchanged after handshake.
+pub const TAG_HELLO: u8 = 7;
 
 /// Decoded contents of a UDP beacon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,8 +224,10 @@ pub const FRAME_HEADER_LEN: usize = 12;
 ///   4 = FileReject `[id:16]`
 ///   5 = FileChunk  `[id:16][offset:8][data_len:4][data]`
 ///   6 = FileDone   `[id:16]`
+///   7 = Hello      `[name_len:2][name][hostname_len:2][hostname]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameBody {
+    Hello { name: String, hostname: String },
     Text(String),
     Bye,
     FileOffer {
@@ -279,6 +283,17 @@ impl std::fmt::Display for DecodeError {
 /// Encode `(seq, body)` into a cleartext byte buffer.
 pub fn encode_plain_frame(seq: u64, body: &FrameBody) -> Vec<u8> {
     let payload = match body {
+        FrameBody::Hello { name, hostname } => {
+            let name_bytes = name.as_bytes();
+            let hostname_bytes = hostname.as_bytes();
+            let mut v = Vec::with_capacity(1 + 2 + name_bytes.len() + 2 + hostname_bytes.len());
+            v.push(TAG_HELLO);
+            v.extend_from_slice(&(name_bytes.len() as u16).to_be_bytes());
+            v.extend_from_slice(name_bytes);
+            v.extend_from_slice(&(hostname_bytes.len() as u16).to_be_bytes());
+            v.extend_from_slice(hostname_bytes);
+            v
+        }
         FrameBody::Text(s) => {
             let mut v = Vec::with_capacity(1 + s.len());
             v.push(1u8);
@@ -352,6 +367,7 @@ pub fn decode_plain_frame(buf: &[u8]) -> Result<PlainFrame, DecodeError> {
     }
     let payload = &buf[FRAME_HEADER_LEN..];
     let body = match payload[0] {
+        TAG_HELLO => decode_hello(&payload[1..])?,
         0 => FrameBody::Bye,
         1 => {
             let s = std::str::from_utf8(&payload[1..])
@@ -366,6 +382,28 @@ pub fn decode_plain_frame(buf: &[u8]) -> Result<PlainFrame, DecodeError> {
         t => return Err(DecodeError::UnknownTag(t)),
     };
     Ok(PlainFrame { seq, body })
+}
+
+fn decode_hello(payload: &[u8]) -> Result<FrameBody, DecodeError> {
+    if payload.len() < 4 {
+        return Err(DecodeError::Malformed);
+    }
+    let name_len = u16::from_be_bytes(payload[..2].try_into().unwrap()) as usize;
+    let name_end = 2 + name_len;
+    if name_end + 2 > payload.len() {
+        return Err(DecodeError::Malformed);
+    }
+    let name = std::str::from_utf8(&payload[2..name_end])
+        .map_err(|_| DecodeError::Malformed)?
+        .to_string();
+    let host_len = u16::from_be_bytes(payload[name_end..name_end + 2].try_into().unwrap()) as usize;
+    if name_end + 2 + host_len != payload.len() {
+        return Err(DecodeError::Malformed);
+    }
+    let hostname = std::str::from_utf8(&payload[name_end + 2..])
+        .map_err(|_| DecodeError::Malformed)?
+        .to_string();
+    Ok(FrameBody::Hello { name, hostname })
 }
 
 fn read_id(rest: &[u8]) -> Result<FileId, DecodeError> {
@@ -517,6 +555,16 @@ mod tests {
         let dec = decode_plain_frame(&buf).unwrap();
         assert_eq!(dec.seq, 42);
         assert_eq!(dec.body, FrameBody::Text("hello".into()));
+    }
+
+    #[test]
+    fn frame_roundtrip_hello() {
+        let body = FrameBody::Hello {
+            name: "alice".into(),
+            hostname: "laptop".into(),
+        };
+        let buf = encode_plain_frame(3, &body);
+        assert_eq!(decode_plain_frame(&buf).unwrap().body, body);
     }
 
     #[test]

@@ -63,6 +63,8 @@ pub enum Event {
         trusted: bool,
         addr: SocketAddr,
     },
+    /// Authenticated identity greeting received after a session opens.
+    PeerNamed { peer_id: PeerId, name: String },
     /// An inbound chat message.
     TextMessage {
         from_peer: PeerId,

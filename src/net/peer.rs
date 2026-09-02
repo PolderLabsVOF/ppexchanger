@@ -74,6 +74,8 @@ pub fn connect(
     tx: mpsc::Sender<Event>,
     tx_inbound: mpsc::Sender<InboundFileEvent>,
     reg_tx: mpsc::Sender<RegistryMsg>,
+    local_name: String,
+    local_hostname: String,
 ) -> Option<(PeerId, DiscoveredPeer)> {
     let sess = match dial(addr, static_kp) {
         Ok(s) => s,
@@ -108,6 +110,8 @@ pub fn connect(
         tx,
         tx_inbound_for_driver,
         Some(reg_tx_for_driver),
+        local_name,
+        local_hostname,
     );
     let _ = reg_tx; // keep alive until end of fn (for clarity)
     Some((peer_id, discovered))
@@ -123,6 +127,8 @@ pub fn spawn_session_driver(
     outbound_rx: mpsc::Receiver<FrameBody>,
     tx: mpsc::Sender<Event>,
     tx_inbound: mpsc::Sender<InboundFileEvent>,
+    local_name: String,
+    local_hostname: String,
 ) {
     spawn_session_driver_with_reg(
         sess,
@@ -132,6 +138,8 @@ pub fn spawn_session_driver(
         tx,
         tx_inbound,
         None,
+        local_name,
+        local_hostname,
     )
 }
 
@@ -146,32 +154,42 @@ pub fn spawn_session_driver_with_reg(
     tx: mpsc::Sender<Event>,
     tx_inbound: mpsc::Sender<InboundFileEvent>,
     reg_tx: Option<mpsc::Sender<RegistryMsg>>,
+    local_name: String,
+    local_hostname: String,
 ) {
     std::thread::spawn(move || {
-        let display = fingerprint.clone();
-        let exit = |tx: &mpsc::Sender<Event>, reg_tx: &Option<mpsc::Sender<RegistryMsg>>| {
+        let mut hello_sent = false;
+        let mut display = fingerprint.clone();
+        let exit = |tx: &mpsc::Sender<Event>, reg_tx: &Option<mpsc::Sender<RegistryMsg>>, name: &str| {
             let _ = tx.send(Event::PeerGone {
                 peer_id,
-                name: display.clone(),
+                name: name.to_string(),
             });
             if let Some(r) = reg_tx {
                 let _ = r.send(RegistryMsg::Unregister { peer_id });
             }
         };
         loop {
+            if !hello_sent {
+                if sess.send(&FrameBody::Hello { name: local_name.clone(), hostname: local_hostname.clone() }).is_err() {
+                    exit(&tx, &reg_tx, &display);
+                    return;
+                }
+                hello_sent = true;
+            }
             // 1) Drain outbound queue.
             loop {
                 match outbound_rx.try_recv() {
                     Ok(body) => {
                         if sess.send(&body).is_err() {
-                            exit(&tx, &reg_tx);
+                            exit(&tx, &reg_tx, &display);
                             return;
                         }
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
                         let _ = sess.send(&FrameBody::Bye);
-                        exit(&tx, &reg_tx);
+                        exit(&tx, &reg_tx, &display);
                         return;
                     }
                 }
@@ -180,6 +198,11 @@ pub fn spawn_session_driver_with_reg(
             match sess.try_recv() {
                 Ok(Some(frame)) => {
                     match frame.body {
+                        FrameBody::Hello { name, hostname } => {
+                            let display_name = if hostname.is_empty() { name } else { format!("{} ({})", name, hostname) };
+                            display = display_name.clone();
+                            let _ = tx.send(Event::PeerNamed { peer_id, name: display_name });
+                        }
                         FrameBody::Text(s) => {
                             let _ = tx.send(Event::TextMessage {
                                 from_peer: peer_id,
@@ -188,7 +211,7 @@ pub fn spawn_session_driver_with_reg(
                             });
                         }
                         FrameBody::Bye => {
-                            exit(&tx, &reg_tx);
+                            exit(&tx, &reg_tx, &display);
                             return;
                         }
                         // File-* frames are routed over the inbound-file
@@ -231,7 +254,7 @@ pub fn spawn_session_driver_with_reg(
                 }
                 Ok(None) => continue,
                 Err(_e) => {
-                    exit(&tx, &reg_tx);
+                    exit(&tx, &reg_tx, &display);
                     return;
                 }
             }
