@@ -259,6 +259,26 @@ fn start_tui(
         .send(Event::Info(format!("listening on 0.0.0.0:{}", bound_port)))
         .ok();
 
+    // Keep inbound connectivity working on hosts with a default-deny
+    // firewall. This runs before the terminal switches to raw mode so an
+    // interactive sudo prompt remains visible and usable. The helper is
+    // idempotent and never enables the firewall or removes unrelated rules.
+    match ppexchanger::net::firewall::ensure_rules(
+        bound_port,
+        ppexchanger::net::discovery::CONTROL_PORT,
+    ) {
+        Ok(Some(message)) => {
+            let _ = bus.tx_events.send(Event::Info(message));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let _ = bus.tx_events.send(Event::Info(format!(
+                "firewall setup skipped: {}",
+                error
+            )));
+        }
+    }
+
     let stop = Arc::new(AtomicBool::new(false));
 
     // Registry channel: the inbound listener uses it to hand outbound

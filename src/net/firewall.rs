@@ -7,9 +7,10 @@
 //! one-line hint when `/discover` finds zero peers so a user who runs ppx
 //! directly without the installer still gets told what to do.
 //!
-//! Everything in this module is a no-op on non-Windows targets so the same
-//! call sites work cross-platform without conditional compilation at the
-//! caller.
+//! Linux uses UFW when it is installed. macOS deliberately does not mutate
+//! pf rules automatically: pf tables are system-wide and application
+//! firewall permissions are code-signing dependent. The caller receives a
+//! clear status either way.
 //!
 //! ponytail: macOS has a similar problem (`pf` / application firewall prompt)
 //! but the average home LAN runs on consumer routers that don't have the
@@ -20,12 +21,106 @@ use std::io;
 /// Stable name for the inbound rule — same string the installer uses, so a
 /// user can `netsh advfirewall firewall show rule name=ppx` to inspect.
 pub const RULE_NAME: &str = "ppexchanger (TCP/7777)";
+pub const CONTROL_RULE_NAME: &str = "ppexchanger (UDP/7778)";
 
 /// Default TCP port the rule covers. Pass `0` to substitute the bind port.
 pub const DEFAULT_PORT: u16 = crate::net::discovery::MULTICAST_PORT;
 
-/// Whether this build target has firewall plumbing. False on Linux/macOS.
+/// Whether this build target has the interactive firewall integration used by
+/// the empty-discovery hint. Linux rules are applied automatically at startup;
+/// the hint remains generic there because UFW may not be installed or active.
 pub const SUPPORTED: bool = cfg!(target_os = "windows");
+
+/// Ensure the inbound rules required for peer connections exist. This is
+/// intentionally best-effort and idempotent: it never enables a disabled
+/// firewall and never removes rules belonging to other applications.
+pub fn ensure_rules(tcp_port: u16, control_port: u16) -> io::Result<Option<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        return ensure_ufw_rules(tcp_port, control_port);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if !rule_present(tcp_port) {
+            add_rule(tcp_port)?;
+            return Ok(Some(format!("firewall rules added for TCP {} and UDP {}", tcp_port, control_port)));
+        }
+        return Ok(None);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (tcp_port, control_port);
+        Ok(None)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_ufw_rules(tcp_port: u16, control_port: u16) -> io::Result<Option<String>> {
+    // UFW requires root even for `status` on many distributions. Reuse the
+    // same elevation decision for status and rule writes so the first sudo
+    // prompt can be answered while the terminal is still in normal mode.
+    let is_root = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false);
+    let mut status_cmd = if is_root {
+        std::process::Command::new("ufw")
+    } else {
+        let mut c = std::process::Command::new("sudo");
+        c.arg("-p").arg("ppexchanger firewall permission: ");
+        c.arg("ufw");
+        c
+    };
+    let status = status_cmd.arg("status").output();
+    let status = match status {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            return Err(io::Error::other(format!(
+                "ufw status failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let text = String::from_utf8_lossy(&status.stdout);
+    let tcp_spec = format!("{}/tcp", tcp_port);
+    let udp_spec = format!("{}/udp", control_port);
+    let mut added = Vec::new();
+    for (spec, label) in [(&tcp_spec, "TCP"), (&udp_spec, "UDP")] {
+        if text.lines().any(|line| line.split_whitespace().next() == Some(spec)) {
+            continue;
+        }
+        let mut cmd = if is_root {
+            std::process::Command::new("ufw")
+        } else {
+            let mut c = std::process::Command::new("sudo");
+            c.arg("-p").arg("ppexchanger firewall permission: ");
+            c.arg("ufw");
+            c
+        };
+        let output = cmd
+            .arg("allow")
+            .arg(spec)
+            .arg("comment")
+            .arg(format!("ppexchanger {}", label))
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "could not add UFW rule {}: {}",
+                spec,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        added.push(spec.clone());
+    }
+    if added.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(format!("firewall rules ready ({})", added.join(", "))))
+    }
+}
 
 /// Run a side-effect: probe whether the inbound rule is currently in place.
 /// Used by the TUI to decide whether to print the firewall hint after a
