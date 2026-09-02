@@ -174,6 +174,7 @@ pub struct UiState {
     pub scroll: usize,
     pub max_scrollback: usize,
     history_dirty: bool,
+    contacts_dirty: bool,
 }
 
 /// Snapshot of an in-flight `/discover` scan.
@@ -225,6 +226,8 @@ pub struct UiPeer {
     pub peer_id: PeerId,
     pub name: String,
     pub fingerprint: String,
+    pub public_key: [u8; 32],
+    pub last_addr: Option<std::net::SocketAddr>,
     pub trusted: bool,
     pub state: PeerState,
 }
@@ -271,6 +274,7 @@ impl UiState {
             scroll: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
             history_dirty: false,
+            contacts_dirty: false,
         }
     }
 
@@ -311,7 +315,7 @@ impl UiState {
                 hostname,
                 fingerprint,
                 addr,
-                ..
+                public_key,
             } => {
                 // Update or add peer as "Seen" state (discovered but not connected)
                 let display_name = if hostname.is_empty() {
@@ -322,16 +326,19 @@ impl UiState {
                 if let Some(p) = self.peers.iter_mut().find(|p| &p.peer_id == peer_id) {
                     p.name = display_name;
                     p.fingerprint = fingerprint.clone();
+                    p.public_key = *public_key;
+                    p.last_addr = Some(*addr);
                 } else {
                     self.peers.push(UiPeer {
                         peer_id: *peer_id,
                         name: display_name,
                         fingerprint: fingerprint.clone(),
+                        public_key: *public_key,
+                        last_addr: Some(*addr),
                         trusted: false,
                         state: PeerState::Seen,
                     });
                 }
-                let _ = addr;
             }
             Event::ConnectionRequest {
                 addr,
@@ -380,6 +387,7 @@ impl UiState {
                 if let Some(p) = self.peers.iter_mut().find(|p| &p.peer_id == peer_id) {
                     p.name = display_name.clone();
                     p.fingerprint = fingerprint.clone();
+                    p.last_addr = Some(*addr);
                     p.trusted = *trusted;
                     p.state = PeerState::Connected;
                 } else {
@@ -387,6 +395,8 @@ impl UiState {
                         peer_id: *peer_id,
                         name: display_name.clone(),
                         fingerprint: fingerprint.clone(),
+                        public_key: [0u8; 32],
+                        last_addr: Some(*addr),
                         trusted: *trusted,
                         state: PeerState::Connected,
                     });
@@ -396,6 +406,7 @@ impl UiState {
                     .take()
                     .filter(|pending| pending.addr != *addr);
                 self.status = format!("connected to {}", display_name);
+                self.contacts_dirty = true;
             }
             Event::PeerNamed { peer_id, name } => {
                 if let Some(peer) = self.peers.iter_mut().find(|peer| peer.peer_id == *peer_id) {
@@ -675,6 +686,18 @@ impl UiState {
 
     pub fn mark_history_saved(&mut self) {
         self.history_dirty = false;
+    }
+
+    pub fn contacts_need_save(&self) -> bool {
+        self.contacts_dirty
+    }
+
+    pub fn mark_contacts_saved(&mut self) {
+        self.contacts_dirty = false;
+    }
+
+    pub fn mark_contacts_dirty(&mut self) {
+        self.contacts_dirty = true;
     }
 
     /// Currently selected peer, if any.
@@ -1585,6 +1608,8 @@ pub fn merge_contacts(state: &mut UiState, db: &PeerDb) {
                 peer_id: c.peer_id,
                 name: c.name.clone(),
                 fingerprint: crate::protocol::fingerprint(&c.public_key),
+                public_key: c.public_key,
+                last_addr: c.last_addr,
                 trusted: c.trusted,
                 state: PeerState::Seen,
             });
@@ -1606,17 +1631,17 @@ pub fn connected_addrs(state: &UiState) -> Vec<(PeerId, String)> {
 pub fn sync_to_db(state: &UiState, db: &mut PeerDb) {
     let now = now_unix();
     for p in &state.peers {
-        if db.by_peer_id(&p.peer_id).is_none() {
-            let c = Contact {
-                peer_id: p.peer_id,
-                name: p.name.clone(),
-                public_key: [0u8; 32], // filled by main when known
-                last_addr: None,
-                last_seen_unix: now,
-                trusted: p.trusted,
-            };
-            db.upsert(c);
+        if p.state != PeerState::Connected {
+            continue;
         }
+        db.upsert(Contact {
+            peer_id: p.peer_id,
+            name: p.name.clone(),
+            public_key: p.public_key,
+            last_addr: p.last_addr,
+            last_seen_unix: now,
+            trusted: p.trusted,
+        });
     }
 }
 
@@ -1910,6 +1935,8 @@ mod tests {
             peer_id: [pid; 16],
             name: name.into(),
             fingerprint: String::new(),
+            public_key: [0u8; 32],
+            last_addr: None,
             trusted: false,
             state,
         };
@@ -1940,6 +1967,8 @@ mod tests {
             peer_id: [pid; 16],
             name: name.into(),
             fingerprint: String::new(),
+            public_key: [0u8; 32],
+            last_addr: None,
             trusted: false,
             state,
         };

@@ -63,7 +63,13 @@ impl PeerDb {
     pub fn upsert(&mut self, c: Contact) {
         if let Some(existing) = self.contacts.iter_mut().find(|x| x.peer_id == c.peer_id) {
             existing.name = c.name;
-            existing.public_key = c.public_key;
+            // A TCP-only discovery can establish a session without exposing
+            // the peer's static key to the UI event. Never erase a previously
+            // authenticated key with that provisional all-zero value.
+            if c.public_key != [0u8; 32] {
+                existing.public_key = c.public_key;
+            }
+            existing.trusted |= c.trusted;
             if c.last_addr.is_some() {
                 existing.last_addr = c.last_addr;
             }

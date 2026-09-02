@@ -234,7 +234,7 @@ fn start_tui(
     }));
 
     // Load persistent contacts and seed the UI.
-    let db = PeerDb::load_or_default().unwrap_or_default();
+    let mut db = PeerDb::load_or_default().unwrap_or_default();
     {
         let mut s = state.lock().unwrap();
         tui::merge_contacts(&mut s, &db);
@@ -555,9 +555,7 @@ fn start_tui(
                         if let Some(p) = s.peers.iter_mut().find(|p| p.peer_id == peer_id) {
                             p.trusted = true;
                         }
-                        let mut db = PeerDb::default();
-                        db.trust(&peer_id);
-                        let _ = db.save();
+                        s.mark_contacts_dirty();
                     }
                     Ok(Action::AcceptConnection { addr: _ }) => {
                         // TODO: implement connection request prompts
@@ -578,9 +576,7 @@ fn start_tui(
                     Ok(Action::Revoke { peer_id }) => {
                         let mut s = act_state.lock().unwrap();
                         s.peers.retain(|p| p.peer_id != peer_id);
-                        let mut db = PeerDb::default();
-                        db.revoke(&peer_id);
-                        let _ = db.save();
+                        s.mark_contacts_dirty();
                         outbound.remove(&peer_id);
                         peer_names.remove(&peer_id);
                     }
@@ -856,6 +852,33 @@ fn start_tui(
         })
     };
 
+    // Restore every previously connected contact that has a usable last
+    // address. The action thread performs the bounded TCP retries off the UI
+    // thread, so a sleeping laptop or stale DHCP lease cannot stall startup.
+    let reconnect_targets: Vec<_> = db
+        .iter()
+        .filter_map(|contact| {
+            let addr = contact.last_addr?;
+            (addr.port() != 0 && !addr.ip().is_unspecified())
+                .then(|| (addr, contact.name.clone(), contact.public_key))
+        })
+        .collect();
+    if !reconnect_targets.is_empty() {
+        let _ = bus.tx_events.send(Event::Info(format!(
+            "reconnecting to {} saved peer{}…",
+            reconnect_targets.len(),
+            if reconnect_targets.len() == 1 { "" } else { "s" }
+        )));
+        for (addr, name, public_key) in reconnect_targets {
+            let _ = bus.tx_actions.send(Action::Connect {
+                addr,
+                name_hint: name,
+                public_key,
+                reverse: None,
+            });
+        }
+    }
+
     // TUI loop.
     let mut _guard = tui::TuiGuard::new(ui_cfg.mouse).unwrap();
     let mut terminal = tui::enter_terminal(ui_cfg.mouse).unwrap();
@@ -874,6 +897,15 @@ fn start_tui(
         {
             let mut s = state.lock().unwrap();
             let text_count = tui::drain_events(&bus.rx_events, &mut s);
+            if s.contacts_need_save() {
+                tui::sync_to_db(&s, &mut db);
+                match db.save() {
+                    Ok(()) => s.mark_contacts_saved(),
+                    Err(error) => {
+                        s.status = format!("peer list save failed: {}", error);
+                    }
+                }
+            }
             // Persist after each batch of newly-arrived messages. Keep the
             // state lock while serializing so a concurrent optimistic echo
             // cannot be marked clean without being included in the snapshot.
