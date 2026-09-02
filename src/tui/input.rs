@@ -7,9 +7,10 @@
 //! sentinel that the main loop turns into `Action::Quit`.
 //!
 //! Other shortcuts (Tab focus, Ctrl-N new chat, Ctrl-T trust, Ctrl-R revoke,
-//! Ctrl-Q quit, Ctrl-L clear, Esc cancel, PageUp/PageDown scrollback, ? help)
-//! are emitted as `EditorEvent` values so the main loop can decide which ones
-//! need an action vs. a UI-only effect.
+//! Ctrl-Q quit, Ctrl-L clear, Esc cancel, PageUp/PageDown scrollback, ? help,
+//! Ctrl-B toggle sidebar, Ctrl-P open peer picker) are emitted as
+//! `EditorEvent` values so the main loop can decide which ones need an
+//! action vs. a UI-only effect.
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
@@ -47,6 +48,13 @@ pub enum EditorEvent {
     ToggleHelp,
     /// `Ctrl-,` — open the settings popup.
     OpenSettings,
+    /// Ctrl-B — toggle the sidebar visibility. UI-only; the render pass
+    /// reads `state.sidebar_hidden` to decide whether to allocate room
+    /// for it.
+    ToggleSidebar,
+    /// Ctrl-P — open the temporary peer picker overlay. Used in narrow
+    /// terminals where the sidebar is collapsed by default.
+    OpenPeerPicker,
     /// A click landed on one of the top menu buttons. The menu is the
     /// only entry point that needs the closure payload (so the handler
     /// in main.rs can route Settings → open_settings, Quit → quit,
@@ -171,6 +179,8 @@ impl LineEditor {
                 KeyCode::Char('t') => return EditorEvent::ToggleTrust,
                 KeyCode::Char('r') => return EditorEvent::RevokePeer,
                 KeyCode::Char(',') => return EditorEvent::OpenSettings,
+                KeyCode::Char('b') => return EditorEvent::ToggleSidebar,
+                KeyCode::Char('p') => return EditorEvent::OpenPeerPicker,
                 _ => {}
             }
         }
@@ -440,6 +450,27 @@ mod tests {
         assert_eq!(
             ed.on_key(&press(KeyCode::Char('h'), KeyModifiers::CONTROL)),
             EditorEvent::Edited
+        );
+        assert!(ed.buffer.is_empty());
+    }
+
+    #[test]
+    fn ctrl_b_toggles_sidebar() {
+        let mut ed = LineEditor::new();
+        assert_eq!(
+            ed.on_key(&press(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            EditorEvent::ToggleSidebar
+        );
+        // Buffer is untouched — sidebar toggle is a UI-only effect.
+        assert!(ed.buffer.is_empty());
+    }
+
+    #[test]
+    fn ctrl_p_opens_peer_picker() {
+        let mut ed = LineEditor::new();
+        assert_eq!(
+            ed.on_key(&press(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            EditorEvent::OpenPeerPicker
         );
         assert!(ed.buffer.is_empty());
     }

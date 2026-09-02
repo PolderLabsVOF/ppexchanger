@@ -30,7 +30,7 @@ pub mod theme;
 pub use config::{UiConfig, DEFAULT_SCROLLBACK, MAX_SCROLLBACK};
 pub use input::{EditorEvent, LineEditor};
 pub use settings_popup::SettingsState;
-pub use theme::{detect_glyphs, Glyphs, Theme, ThemeName};
+pub use theme::{detect_glyphs, Glyphs, StyleRole, Theme, ThemeName};
 
 use crate::events::{Event, PeerId};
 use crate::identity::Identity;
@@ -53,7 +53,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Layout constants shared between `render()` and `hit_test()`. The
 /// sidebar has room for connection metadata; the body always retains a
 /// usable chat region. Changing these constants in one place is enough.
-const SIDEBAR_WIDTH: u16 = 30;
+/// Percentage of the body width allocated to the sidebar when visible.
+/// The sidebar only needs a single column of peer names + a status dot;
+/// a quarter of the screen leaves plenty of room for the conversation.
+const SIDEBAR_PERCENT: u16 = 25;
+/// Minimum chat pane width when the sidebar is visible. Anything below
+/// this triggers a sidebar collapse (handled by the render loop via the
+/// responsive breakpoint logic).
+const MIN_CHAT_WIDTH: u16 = 40;
 /// A focused message field plus an unboxed status/action line. Slash-command
 /// suggestions render above it in the chat pane.
 const FOOTER_HEIGHT: u16 = 5;
@@ -136,6 +143,20 @@ pub struct UiState {
     pub selected_peer: usize,
     pub focus: Focus,
     pub show_help: bool,
+    /// Mirror of `UiConfig::sidebar_hidden`. When true the layout
+    /// engine skips the sidebar column entirely and the chat pane
+    /// absorbs the freed horizontal space. Flipped with Ctrl-B.
+    pub sidebar_hidden: bool,
+    /// Modal state for the temporary peer picker overlay (Ctrl-P).
+    /// Useful when the sidebar is hidden on narrow terminals.
+    pub show_peer_picker: bool,
+    /// Mirror of `UiConfig::narrow_sidebar_below`. The layout engine
+    /// hides the sidebar when the screen width drops below this
+    /// threshold, unless the user has explicitly toggled it back on.
+    pub narrow_sidebar_below: u16,
+    /// Mirror of `UiConfig::min_conversation_width`. The layout engine
+    /// ensures the chat pane never shrinks below this column count.
+    pub min_conversation_width: u16,
     /// Mirror of `UiConfig::status_format` so `draw_footer` can choose
     /// what to render. Updated by `apply_live_cfg` on every render pass.
     pub status_format: crate::tui::config::StatusFormat,
@@ -300,6 +321,10 @@ impl UiState {
             selected_peer: 0,
             focus: Focus::Chat,
             show_help: false,
+            sidebar_hidden: false,
+            show_peer_picker: false,
+            narrow_sidebar_below: crate::tui::config::DEFAULT_NARROW_SIDEBAR_BELOW,
+            min_conversation_width: crate::tui::config::DEFAULT_MIN_CONVERSATION_WIDTH,
             status_format: crate::tui::config::StatusFormat::NameOnly,
             show_footer: true,
             file_offer: None,
@@ -336,6 +361,8 @@ impl UiState {
     pub fn apply_live_cfg(&mut self, cfg: &crate::tui::UiConfig) {
         self.status_format = cfg.status_format;
         self.show_footer = cfg.show_footer;
+        self.narrow_sidebar_below = cfg.narrow_sidebar_below;
+        self.min_conversation_width = cfg.min_conversation_width;
     }
 
     /// Drop the settings modal. Caller is responsible for persisting the
@@ -1022,7 +1049,13 @@ fn day_separator_label(bucket: u64, today_bucket: u64) -> String {
 /// back to panes). Returns the same shape regardless of caller, so a
 /// click on a peer name in the sidebar always corresponds to the row
 /// the user can see.
-pub fn compute_layout(area: Rect) -> LayoutAreas {
+///
+/// `sidebar_visible` lets the caller (typically the main render loop)
+/// hide the sidebar when it's been collapsed by Ctrl-B or by the
+/// responsive breakpoint logic. When hidden, the sidebar rect collapses
+/// to a zero-width sliver and the chat pane absorbs the freed column
+/// count — the layout is always the same shape, just narrower.
+pub fn compute_layout(area: Rect, sidebar_visible: bool) -> LayoutAreas {
     // Vertical: pinned menu on top, body absorbs the middle, footer on the
     // bottom. The menu row is opt-out of the body budget so the chat pane
     // can never be squeezed below BODY_MIN_HEIGHT by a tall menu.
@@ -1034,10 +1067,26 @@ pub fn compute_layout(area: Rect) -> LayoutAreas {
             Constraint::Length(FOOTER_HEIGHT),
         ])
         .split(area);
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(10)])
-        .split(outer[1]);
+    let cols = if sidebar_visible {
+        // Peer sidebar occupies a percentage slice — peers usually have
+        // a single-line name and an `online` / `offline` dot, so a
+        // quarter of the screen is plenty even on 200-column terminals.
+        // Min cap keeps the sidebar readable on very wide screens.
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(SIDEBAR_PERCENT),
+                Constraint::Min(MIN_CHAT_WIDTH),
+            ])
+            .split(outer[1])
+    } else {
+        // Sidebar hidden — collapse to a zero-width sliver so the rest
+        // of the layout pipeline still sees the same shape.
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(0), Constraint::Min(MIN_CHAT_WIDTH)])
+            .split(outer[1])
+    };
     LayoutAreas {
         menu: outer[0],
         sidebar: cols[0],
@@ -1235,8 +1284,14 @@ pub fn render(
         // Paint the complete canvas first. This prevents stale cells when a
         // message wraps differently after a resize or theme switch.
         f.render_widget(Block::default().style(theme.style()), area);
+        // Responsive breakpoint: when the terminal is too narrow for the
+        // configured sidebar allocation, hide the sidebar automatically.
+        // The user can still toggle it back via Ctrl-B if they need to.
+        let sidebar_visible = !state.sidebar_hidden
+            && area.width >= state.narrow_sidebar_below
+            && area.width >= state.min_conversation_width + SIDEBAR_PERCENT;
         // Single source of truth for the layout — hit_test reuses it.
-        let areas = compute_layout(area);
+        let areas = compute_layout(area, sidebar_visible);
 
         draw_menu(f, areas.menu, state, theme, glyphs);
         draw_sidebar(f, areas.sidebar, state, theme, glyphs);
@@ -1279,12 +1334,18 @@ pub fn render(
     Ok(())
 }
 
-/// Render the top menu bar as five bordered Paragraph blocks side by
-/// side. Each block is the click target for the corresponding
-/// `MenuAction`; `hit_test` re-uses the same horizontal split to map a
-/// mouse column back to an action. Buttons render as `[ Label ]` with
-/// brackets in `border_inactive` and label in `accent` so the menu
-/// reads at a glance against the CRT palette.
+/// Render the top menu bar.
+///
+/// Layout (two rows inside a single bordered block):
+///   row 1: `PPX  secure local exchange   ● N online`
+///   row 2: `[1] PEERS  ·  [/] DISCOVER  ·  [3] SETTINGS  ·  [?] HELP  ·  [x] QUIT`
+///
+/// Each nav entry is bracketed (`[1]`, `[/]`, `[3]`, `[?]`, `[x]`)
+/// rather than a button-styled rectangle — the brackets themselves
+/// carry the keyboard shortcut cue, so the row reads as a sentence
+/// instead of a control panel. Active section inverts to bg/accent,
+/// inactive dims via the muted role. The connection identity moves to
+/// the active conversation header (see `draw_chat`).
 fn draw_menu(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, _glyphs: &Glyphs) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -1295,43 +1356,97 @@ fn draw_menu(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, _glyphs:
         .filter(|p| p.state == PeerState::Connected)
         .count();
     let known = state.peers.len();
-    let health = if known == 0 { 0 } else { (online * 100 / known) as u16 };
-    let identity = truncate_tail(&state.self_name, 20);
-    let fingerprint = truncate_tail(&state.self_fingerprint, 12);
-    let title = Line::from(vec![
-        Span::styled(" PPX ", Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD)),
-        Span::styled("  secure local exchange", Style::default().fg(theme.fg).bg(theme.bg).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("  ·  {} online", online), theme.self_message_style()),
-        Span::styled(format!("  ·  {}  {}", identity, fingerprint), theme.dim_style()),
-    ]);
-    let button = |label: &str, style: Style| {
-        Span::styled(
-            format!("{:^width$}", label, width = MENU_BUTTON_WIDTH as usize),
-            style,
-        )
-    };
-    let active_button = Style::default()
+    let health = online
+        .checked_mul(100)
+        .and_then(|n| n.checked_div(known))
+        .unwrap_or(0) as u16;
+    // Primary row: brand mark + descriptor + online dot + count.
+    // The `●` glyph is the same one the sidebar uses so the online
+    // indicator reads consistently across panes.
+    let mut title_spans: Vec<Span> = Vec::with_capacity(6);
+    title_spans.push(Span::styled(
+        " PPX ",
+        Style::default()
+            .fg(theme.bg)
+            .bg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    ));
+    title_spans.push(Span::styled(
+        "  secure local exchange",
+        Style::default()
+            .fg(theme.fg)
+            .bg(theme.bg)
+            .add_modifier(Modifier::BOLD),
+    ));
+    title_spans.push(Span::styled(
+        format!("  {} {} online", _glyphs.dot_connected, online),
+        theme.role_style(StyleRole::TextSecondary),
+    ));
+
+    // Secondary nav row: bracketed keys with a · separator. We render
+    // each entry as three spans — `[`, key, `]` — so the bracket color
+    // stays muted even when the label inverts for the active section.
+    // This reads as "[1] PEERS" without the box-of-color button effect.
+    let dim = theme.role_style(StyleRole::TextMuted);
+    let accent = theme.role_style(StyleRole::TextAccent);
+    let active_inverted = Style::default()
         .fg(theme.bg)
         .bg(theme.accent)
         .add_modifier(Modifier::BOLD);
-    let quiet_button = Style::default().fg(theme.fg).bg(theme.status_bg);
-    let info_button = Style::default().fg(theme.info).bg(theme.status_bg);
-    let danger_button = Style::default().fg(theme.error).bg(theme.status_bg);
-    // Fixed-width, filled controls read as buttons in every color theme and
-    // stay exactly aligned with the mouse hit regions below.
-    let nav = Line::from(vec![
-        button("1 PEERS", if state.focus == Focus::Sidebar { active_button } else { quiet_button }),
-        Span::raw(" "),
-        button("/ DISCOVER", info_button),
-        Span::raw(" "),
-        button("3 SETTINGS", quiet_button),
-        Span::raw(" "),
-        button("? HELP", quiet_button),
-        Span::raw(" "),
-        button("x QUIT", danger_button),
-    ]);
-    let block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
-        .border_style(theme.border_style(false));
+    let quiet = Style::default().fg(theme.fg).bg(theme.bg);
+    let danger = theme.role_style(StyleRole::TextDanger);
+    let info = Style::default().fg(theme.info).bg(theme.bg);
+    let bracket_active = Style::default()
+        .fg(theme.bg)
+        .bg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let nav_style = |active: bool, base: Style, _info: bool| -> Style {
+        if active {
+            active_inverted
+        } else {
+            base
+        }
+    };
+    let bracket_style_for = |active: bool| -> Style {
+        if active {
+            bracket_active
+        } else {
+            dim
+        }
+    };
+    let sep = Span::styled("  ·  ", dim);
+    let mut nav: Vec<Span> = Vec::with_capacity(20);
+    let nav_items: [(&str, &str, Style, bool); 5] = [
+        (
+            "1",
+            "PEERS",
+            nav_style(state.focus == Focus::Sidebar, quiet, false),
+            state.focus == Focus::Sidebar,
+        ),
+        ("/", "DISCOVER", info, false),
+        ("3", "SETTINGS", quiet, false),
+        ("?", "HELP", quiet, false),
+        ("x", "QUIT", danger, false),
+    ];
+    for (idx, (key, label, label_style, active)) in nav_items.iter().enumerate() {
+        let bracket_style = bracket_style_for(*active);
+        nav.push(Span::styled("[", bracket_style));
+        nav.push(Span::styled(*key, bracket_style));
+        nav.push(Span::styled("] ", bracket_style));
+        nav.push(Span::styled(*label, *label_style));
+        if idx + 1 < nav_items.len() {
+            nav.push(sep.clone());
+        }
+    }
+
+    // Suppress the unused-variable warning for `accent` — the role call
+    // documents the intent even though we only invert via `active_inverted`.
+    let _ = accent;
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme.role_style(StyleRole::BorderNormal));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let header = Layout::default()
@@ -1342,17 +1457,23 @@ fn draw_menu(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, _glyphs:
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(28), Constraint::Length(22)])
         .split(header[0]);
-    f.render_widget(Paragraph::new(title), top[0]);
-    f.render_widget(
-        Gauge::default()
-            .ratio(f64::from(health) / 100.0)
-            .label(format!(" LINK {} / {} ", online, known))
-            .use_unicode(true)
-            .style(Style::default().fg(theme.status_fg).bg(theme.status_bg))
-            .gauge_style(theme.gauge_filled_style()),
-        top[1],
-    );
-    f.render_widget(Paragraph::new(nav), header[1]);
+    f.render_widget(Paragraph::new(Line::from(title_spans)), top[0]);
+    // Health gauge: live only on wide terminals where there is room.
+    // On a narrow terminal the gauge becomes a single row of noise;
+    // dropping it leaves the connection count in the title row to do
+    // the same job.
+    if top[1].width >= 18 {
+        f.render_widget(
+            Gauge::default()
+                .ratio(f64::from(health) / 100.0)
+                .label(format!(" LINK {} / {} ", online, known))
+                .use_unicode(true)
+                .style(Style::default().fg(theme.status_fg).bg(theme.status_bg))
+                .gauge_style(theme.gauge_filled_style()),
+            top[1],
+        );
+    }
+    f.render_widget(Paragraph::new(Line::from(nav)), header[1]);
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
@@ -1384,29 +1505,37 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
         area
     };
     let active = state.focus == Focus::Sidebar;
-    let title_style = if active {
-        theme.border_style(true)
-    } else {
-        theme.border_style(false)
-    };
+    // Single focus cue: brighter border. Title is the secondary cue in
+    // accent vs muted role so the reader knows where focus sits
+    // without three simultaneous signals.
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(title_style)
+        .border_style(if active {
+            theme.role_style(StyleRole::BorderFocused)
+        } else {
+            theme.role_style(StyleRole::BorderNormal)
+        })
         .title(Span::styled(
-            format!(" {} PEERS · {}/{} ", glyphs.cursor, online_count(state), state.peers.len()),
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(
-            Line::from(Span::styled(" ↑↓ navigate · click select ", theme.dim_style()))
-                .right_aligned(),
-        );
+            format!(" PEERS · {}/{} ", online_count(state), state.peers.len()),
+            if active {
+                theme.role_style(StyleRole::TextAccent)
+            } else {
+                theme.role_style(StyleRole::TextMuted)
+            },
+        ));
 
     let items: Vec<ListItem> = if state.peers.is_empty() {
-        // Empty state: show helpful message
+        // Empty state: minimal copy, centered.
         vec![ListItem::new(vec![
-            Line::from(Span::styled("no connected peers", theme.dim_style())),
-            Line::from(Span::styled("run /discover to find someone nearby", theme.info_style())),
+            Line::from(Span::styled(
+                "  no peers discovered  ",
+                theme.role_style(StyleRole::TextMuted),
+            )),
+            Line::from(Span::styled(
+                "  run / discover to find someone  ",
+                theme.role_style(StyleRole::TextSecondary),
+            )),
         ])]
     } else {
         state
@@ -1420,40 +1549,58 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
                     PeerState::Gone => (glyphs.dot_gone, theme.status_offline),
                 };
                 let trust = if p.trusted { glyphs.trusted } else { glyphs.untrusted };
-                let style = if p.trusted {
-                    theme.trusted_style()
-                } else {
-                    theme.untrusted_style()
-                };
                 let name_style = theme.peer_message_style_for(&p.peer_id);
                 let detail = match p.state {
                     PeerState::Connected => "online",
                     PeerState::Seen => "available",
                     PeerState::Gone => "offline",
                 };
-                let label = if i == state.selected_peer {
-                    Line::from(vec![
-                        Span::styled(
-                            format!("{} ", dot),
-                            Style::default().fg(dot_color),
-                        ),
-                        Span::styled(
-                            format!("{} {}  ", trust, p.name),
-                            name_style.add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(detail, Style::default().fg(dot_color).bg(theme.status_bg)),
+                // Truncated fingerprint in muted gray — the readable
+                // peer name stays the dominant signal; the fingerprint
+                // is a secondary identifier underneath.
+                let fp_short = if p.fingerprint.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}…", truncate_tail(&p.fingerprint, 9))
+                };
+                if i == state.selected_peer {
+                    ListItem::new(vec![
+                        Line::from(vec![
+                            Span::styled(format!("{} ", dot), Style::default().fg(dot_color)),
+                            Span::styled(
+                                format!("{} {} ", trust, p.name),
+                                name_style.add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                detail,
+                                Style::default()
+                                    .fg(dot_color)
+                                    .bg(theme.status_bg)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]),
+                        Line::from(Span::styled(
+                            format!("  {}", fp_short),
+                            theme.role_style(StyleRole::TextMuted),
+                        )),
                     ])
                 } else {
-                    Line::from(vec![
-                        Span::styled(
-                            format!("{} {} ", dot, trust),
-                            style,
-                        ),
-                        Span::styled(p.name.clone(), name_style),
-                        Span::styled(format!(" · {}", detail), theme.dim_style()),
+                    ListItem::new(vec![
+                        Line::from(vec![
+                            Span::styled(format!("{} ", dot), Style::default().fg(dot_color)),
+                            Span::styled(format!("{} ", trust), name_style),
+                            Span::styled(p.name.clone(), name_style),
+                            Span::styled(
+                                format!(" · {}", detail),
+                                theme.role_style(StyleRole::TextMuted),
+                            ),
+                        ]),
+                        Line::from(Span::styled(
+                            format!("  {}", fp_short),
+                            theme.role_style(StyleRole::TextMuted),
+                        )),
                     ])
-                };
-                ListItem::new(label)
+                }
             })
             .collect()
     };
@@ -1499,43 +1646,61 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
 
     // Conversation header follows the selected peer and is deliberately
     // separate from the app chrome, so context survives scrolling.
+    // Layout: `<dot> <peer>  <status>  <fp>` with peer name dominant
+    // in accent, status in semantic role color (success/warning/danger),
+    // fingerprint muted gray and truncated.
     let title = if selected_name.is_empty() {
         Line::from(vec![Span::styled(
             format!(" {} INBOX ", glyphs.cursor),
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            theme.role_style(StyleRole::TextAccent),
         )])
     } else {
-        // Show status dot and peer hostname with connection status
         let fp = selected
             .map(|peer| peer.fingerprint.as_str())
             .filter(|fingerprint| !fingerprint.is_empty())
-            .map(|fingerprint| format!("  · {}", truncate_tail(fingerprint, 12)))
+            .map(|fingerprint| format!(" · {}", truncate_tail(fingerprint, 12)))
             .unwrap_or_default();
-        let (dot, dot_color, status_text) = match selected.map(|p| p.state) {
-            Some(PeerState::Connected) => (glyphs.dot_connected, theme.status_online, "[connected]"),
-            Some(PeerState::Seen) => (glyphs.dot_seen, theme.status_seen, "[seen]"),
-            Some(PeerState::Gone) | None => (glyphs.dot_gone, theme.status_offline, "[offline]"),
+        let (dot, dot_color, status_text, status_role) = match selected.map(|p| p.state) {
+            Some(PeerState::Connected) => (
+                glyphs.dot_connected,
+                theme.status_online,
+                "connected",
+                StyleRole::TextSuccess,
+            ),
+            Some(PeerState::Seen) => (
+                glyphs.dot_seen,
+                theme.status_seen,
+                "available",
+                StyleRole::TextWarning,
+            ),
+            Some(PeerState::Gone) | None => (
+                glyphs.dot_gone,
+                theme.status_offline,
+                "offline",
+                StyleRole::TextDanger,
+            ),
         };
         Line::from(vec![
-            Span::styled(
-                format!(" {} ", dot),
-                Style::default().fg(dot_color),
-            ),
+            Span::styled(format!(" {} ", dot), Style::default().fg(dot_color)),
             Span::styled(
                 selected_name.clone(),
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                theme.role_style(StyleRole::TextAccent),
             ),
             Span::styled(
-                format!("  · {}", status_text.trim_matches(&['[', ']'][..])),
-                Style::default().fg(dot_color),
+                format!("  · {} ", status_text),
+                theme.role_style(status_role),
             ),
-            Span::styled(fp, theme.dim_style()),
+            Span::styled(fp, theme.role_style(StyleRole::TextMuted)),
         ])
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(theme.border_style(active))
+        .border_style(if active {
+            theme.role_style(StyleRole::BorderFocused)
+        } else {
+            theme.role_style(StyleRole::BorderNormal)
+        })
         .title(title);
 
     // Scroll math. `state.scroll` is the offset from the bottom of
@@ -1600,20 +1765,28 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
             }
         };
         // Build a single header line for a bubble that opens a new
-        // sender group. Outgoing groups right-align the label so it
-        // sits flush against the outgoing bubble column; incoming
-        // groups pad the left edge with the sender's accent color so
-        // the header visually anchors to the incoming bubble below.
+        // sender group. The sender name is dominant (BOLD in their
+        // accent color) and the timestamp rides muted gray to its right.
+        // Outgoing groups right-align the label so it sits flush against
+        // the outgoing bubble column; incoming groups pad the left edge
+        // with the sender's accent color so the header visually anchors
+        // to the incoming bubble below.
         let build_header = |m: &UiMessage| -> Line<'_> {
             let who = resolve_who(m);
             let who_style = who_style_for(m).add_modifier(Modifier::BOLD);
+            let ts_style = theme.role_style(StyleRole::TextMuted);
             let ts = chrono_timestamp(&Some(m.ts_unix));
             if m.outgoing {
-                Line::from(Span::styled(format!("{} · {}", who, ts), who_style)).right_aligned()
+                Line::from(vec![
+                    Span::styled(format!("{} ", who), who_style),
+                    Span::styled(format!(" {}", ts), ts_style),
+                ])
+                .right_aligned()
             } else {
                 Line::from(vec![
-                    Span::styled(" ", who_style.bg(theme.status_bg)),
-                    Span::styled(format!("{} · {}", who, ts), who_style),
+                    Span::styled(" ", who_style),
+                    Span::styled(format!("{} ", who), who_style),
+                    Span::styled(format!(" {}", ts), ts_style),
                 ])
             }
         };
@@ -1663,11 +1836,17 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
             // Inline group header: emit when the sender differs from
             // the previous bubble in the slice, or when this is the
             // very first bubble (which always opens a new group).
+            // A blank gutter row precedes the header for every group
+            // except the very first so the eye can separate groups
+            // without relying on borders or color contrast.
             let is_group_start = match prev_outgoing {
                 Some(prev) => prev != m.outgoing,
                 None => true,
             };
             if is_group_start {
+                if prev.is_some() {
+                    m_lines.push(gutter.clone());
+                }
                 m_lines.push(build_header(m));
             }
 
@@ -1731,32 +1910,35 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
             } else {
                 None
             };
+            //
+            // Outgoing: subtle tone (status_bg) so the eye lands on the
+            //   reader's own messages without per-row rectangles. The
+            //   delivery chip occupies its own column on the right
+            //   with two cells of breathing room between body and
+            //   scrollbar. Chip color follows the semantic policy —
+            //   dim for both pending and delivered; the protocol only
+            //   exposes one ack state, so we keep the single `✓` glyph.
+            // Incoming: no fill, alignment only. Two cells of indent
+            //   under the header create the breathing room the spec
+            //   calls for without any background tone.
             if m.outgoing {
-                // Delivery chip (⏳ / ✓) sits flush-right at the row edge
-                // so the reader always knows the local turn's state
-                // without scanning the message body for it.
-                let chip_style = if m.pending {
-                    theme.info_style().bg(theme.status_bg)
-                } else {
-                    theme.self_message_style().bg(theme.status_bg)
-                };
-                let chip = if m.pending { " ⏳" } else { " ✓" };
+                let chip_char = if m.pending { " ⏳" } else { " ✓" };
+                let chip_style = theme.role_style(StyleRole::TextMuted);
                 m_lines.push(
                     Line::from(vec![
+                        Span::styled("  ", bubble),
                         Span::styled(m.body.clone(), bubble),
-                        Span::styled(chip, chip_style),
+                        Span::styled("  ", bubble),
+                        Span::styled(chip_char, chip_style),
+                        Span::styled(" ", Style::default().bg(theme.bg)),
                     ])
                     .right_aligned(),
                 );
             } else {
-                // Incoming bubble: small coloured padding on each side
-                // visually anchors the bubble against the right-aligned
-                // outgoing rows without needing per-message borders.
-                let who_style = who_style_for(m).add_modifier(Modifier::BOLD);
+                let indent_style = Style::default().bg(theme.bg);
                 m_lines.push(Line::from(vec![
-                    Span::styled(" ", who_style.bg(theme.status_bg)),
-                    Span::styled(m.body.clone(), bubble),
-                    Span::styled(" ", who_style.bg(theme.status_bg)),
+                    Span::styled("  ", indent_style),
+                    Span::styled(m.body.clone(), Style::default().fg(theme.fg).bg(theme.bg)),
                 ]));
             }
             // Image preview placeholder rows. The actual pixel rendering
@@ -1840,18 +2022,32 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
             body.width,
             height,
         );
-        let (headline, detail) = if selected_name.is_empty() {
-            ("YOUR INBOX IS READY", "Choose a peer, or use Discover to find someone on your LAN.")
+        // Empty / transitional states: keep the headline short and the
+        // detail action-oriented. The first line carries the user
+        // affordance; the second line tells them how to get there.
+        // Centered but quiet — no boxes, no neon glow.
+        let (headline, detail, hint) = if selected_name.is_empty() {
+            (
+                "Select a peer to start messaging",
+                "↑ ↓ navigate  ·  Enter open  ·  / discover",
+                "no peers discovered · run /discover to find someone on your LAN",
+            )
         } else {
-            ("START THE CONVERSATION", "Write a message below — your exchange stays encrypted on this network.")
+            (
+                "Start the conversation",
+                "Write a message below — your exchange stays encrypted.",
+                "Enter send  ·  Esc clear  ·  ? help",
+            )
         };
+        let _ = hint; // reserved for future per-state copy
         f.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled(headline, theme.highlight_style())),
+                Line::from(Span::styled(
+                    headline,
+                    theme.role_style(StyleRole::TextSecondary),
+                )),
                 Line::from(""),
-                Line::from(Span::styled(detail, theme.dim_style())),
-                Line::from(""),
-                Line::from(Span::styled("Discover  ·  Select a peer  ·  Start chatting", theme.info_style())),
+                Line::from(Span::styled(detail, theme.role_style(StyleRole::TextMuted))),
             ])
             .alignment(Alignment::Center),
             empty_area,
@@ -1868,9 +2064,16 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         let mut scrollbar_state = ScrollbarState::new(total)
             .position(total.saturating_sub(viewport_rows.saturating_add(state.scroll)))
             .viewport_content_length(viewport_rows);
+        // Scrollbar restraint: the track stays very dim and the thumb
+        // sits at medium brightness so the chrome recedes. The spec
+        // forbids over-prominent scrollbars — the chat must read as a
+        // column of text, not a widget assembly.
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .thumb_style(Style::default().fg(theme.accent).bg(theme.bg))
-            .track_style(Style::default().fg(theme.border_inactive).bg(theme.bg))
+            .thumb_style(Style::default().fg(theme.border_inactive).bg(theme.bg))
+            .track_style(Style::default()
+                .fg(theme.border_inactive)
+                .bg(theme.bg)
+                .add_modifier(Modifier::DIM))
             .begin_symbol(None)
             .end_symbol(None);
         f.render_stateful_widget(
@@ -1928,68 +2131,122 @@ fn render_image_preview(
     f.render_stateful_widget(StatefulImage::new(None), rect, protocol);
 }
 
+/// Render the footer (composer + status row).
+///
+/// The composer is a two-row block:
+///   row 1: `message · encrypted` (dim label) — gives the user the
+///          "what is this box" cue without a button-styled title.
+///   row 2: `TO <peer> › <draft or placeholder>` — recipient chip on
+///          the left, prompt on the right with the cursor.
+///
+/// Below the composer a thin status row carries the connection state on
+/// the left and a list of bracketed keyboard hints on the right. The
+/// shortcuts are highlighted in accent so they pop against muted gray
+/// descriptions.
 fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
     if area.width < 4 || area.height < FOOTER_HEIGHT {
         return;
     }
+    // Composer is 2 rows tall: 1 row title above the input + 1 row
+    // input area inside the block. The status row sits below. Block
+    // height 3 = 1 border + 1 title + 1 input. The spec reference
+    // collapses the title to a single dim label rather than a
+    // button-styled title bar — let the border weight carry the focus
+    // cue instead.
     let composer_area = Rect::new(area.x, area.y, area.width, 3);
     let target = state.selected().map(|p| p.name.as_str()).unwrap_or("no recipient");
     let target_label = truncate_tail(target, 18);
     let composer_title = if target == "no recipient" {
-        " message · choose a peer "
+        " choose a peer "
     } else {
         " message · encrypted "
     };
+    // Single focus cue: brighter border. Title is a secondary cue in
+    // the accent role — only one cue dominates at a time so the eye
+    // can lock onto focused vs unfocused without ambiguity.
     let composer_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(theme.border_style(state.focus == Focus::Chat))
+        .border_style(if state.focus == Focus::Chat {
+            theme.role_style(StyleRole::BorderFocused)
+        } else {
+            theme.role_style(StyleRole::BorderNormal)
+        })
         .title(Span::styled(
             composer_title,
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            if state.focus == Focus::Chat {
+                theme.role_style(StyleRole::TextAccent)
+            } else {
+                theme.role_style(StyleRole::TextMuted)
+            },
         ));
-    let input_area = composer_block.inner(composer_area);
+    let inner = composer_block.inner(composer_area);
     f.render_widget(composer_block, composer_area);
+
+    // Inner row: TO chip + prompt + draft.
+    let input_area = Rect::new(inner.x, inner.y, inner.width, 1);
     let chip = format!(" TO {} ", target_label);
-    let prefix = format!(" {} ", glyphs.arrow);
+    let prefix = format!("{} ", glyphs.arrow);
+    let chip_width = chip.chars().count() as u16;
+    let prefix_width = prefix.chars().count() as u16;
     let available = input_area
         .width
-        .saturating_sub(chip.chars().count() as u16)
-        .saturating_sub(prefix.chars().count() as u16)
+        .saturating_sub(chip_width)
+        .saturating_sub(prefix_width)
         .max(1) as usize;
     let draft = truncate_tail(&state.composer, available);
     let is_empty = state.composer.is_empty();
-    let input = Line::from(vec![
-        Span::styled(chip, Style::default().fg(theme.status_fg).bg(theme.status_bg).add_modifier(Modifier::BOLD)),
-        Span::styled(prefix.clone(), theme.highlight_style()),
-        Span::styled(if is_empty { glyphs.cursor } else { "" }, theme.highlight_style()),
-        Span::styled(
-            if is_empty { "Write a message or /command".to_string() } else { draft.clone() },
-            if is_empty { theme.dim_style() } else { Style::default().fg(theme.fg).bg(theme.bg) },
-        ),
-    ]);
-    f.render_widget(Paragraph::new(input), input_area);
+    let placeholder = if target == "no recipient" {
+        "Select a peer to start messaging"
+    } else {
+        "Write a message or /command"
+    };
+    let prompt_style = theme.role_style(StyleRole::TextAccent);
+    let chip_style = if target == "no recipient" {
+        theme.role_style(StyleRole::TextMuted)
+    } else {
+        theme.role_style(StyleRole::TextSecondary)
+    };
+    let draft_style = if is_empty {
+        theme.role_style(StyleRole::TextMuted)
+    } else {
+        Style::default().fg(theme.fg).bg(theme.bg)
+    };
+    let mut input_spans: Vec<Span> = Vec::with_capacity(5);
+    input_spans.push(Span::styled(chip, chip_style));
+    input_spans.push(Span::styled(prefix.clone(), prompt_style));
+    if is_empty {
+        input_spans.push(Span::styled(placeholder.to_string(), draft_style));
+    } else {
+        input_spans.push(Span::styled(draft.clone(), draft_style));
+    }
+    f.render_widget(Paragraph::new(Line::from(input_spans)), input_area);
 
     // Place the terminal cursor at the logical end of the visible draft.
     let modal_open = state.show_help
         || state.discovery.is_some()
         || state.file_offer.is_some()
-        || state.settings.is_some();
+        || state.settings.is_some()
+        || state.show_peer_picker;
     if state.focus == Focus::Chat && !modal_open && !is_empty {
         let cursor_x = input_area
             .x
-            .saturating_add(target_label.chars().count() as u16 + 5)
-            .saturating_add(prefix.chars().count() as u16)
+            .saturating_add(chip_width)
+            .saturating_add(prefix_width)
             .saturating_add(draft.chars().count() as u16)
             .min(input_area.right().saturating_sub(1));
         f.set_cursor_position((cursor_x, input_area.y));
     }
-    let status = if state.status_format == crate::tui::config::StatusFormat::Off {
-        "Ready".to_string()
-    } else if state.status.trim().is_empty() {
+
+    // Status row beneath the composer: connection state on the left,
+    // keyboard hints on the right. Each shortcut is bracketed and
+    // highlighted in accent; descriptions sit muted next to them.
+    let status = if state.status_format == crate::tui::config::StatusFormat::Off
+        || state.status.trim().is_empty()
+    {
         "Ready".to_string()
     } else {
-        truncate_tail(&state.status, area.width.saturating_sub(28) as usize)
+        truncate_tail(&state.status, area.width.saturating_sub(40) as usize)
     };
     let status_style = status_style(&status, theme);
     let status_icon = if ["failed", "denied", "error", "aborted"]
@@ -2002,22 +2259,67 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs
     } else {
         "·"
     };
-    let meta = Line::from(vec![
-        Span::styled(format!(" {} ", status_icon), status_style.add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" {}", status), status_style),
-        Span::raw("  "),
-        Span::styled(
-            " Enter send ",
-            Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  Esc clear", theme.dim_style()),
-        Span::styled("   Tab focus", theme.dim_style()),
-        Span::styled("   ? help", Style::default().fg(theme.info).bg(theme.bg)),
-    ]);
-    f.render_widget(
-        Paragraph::new(meta),
-        Rect::new(area.x, area.y.saturating_add(3), area.width, 1),
-    );
+
+    let dim = theme.role_style(StyleRole::TextMuted);
+    let accent = theme.role_style(StyleRole::TextAccent);
+    let hint = |key: &str, desc: &str| -> Vec<Span> {
+        vec![
+            Span::styled("[", dim),
+            Span::styled(key.to_string(), accent),
+            Span::styled("]", dim),
+            Span::styled(format!(" {} ", desc), dim),
+        ]
+    };
+    // Left side: connection state icon + status. The hint row sits
+    // right-justified in the remaining space. On very narrow terminals
+    // we drop the hint row entirely so the status text isn't truncated
+    // out of existence.
+    let mut right_spans: Vec<Span> = Vec::new();
+    for h in [
+        hint("Enter", "send"),
+        hint("Esc", "clear"),
+        hint("Tab", "focus"),
+        hint("?", "help"),
+    ] {
+        right_spans.extend(h);
+    }
+    let right_width: usize = right_spans
+        .iter()
+        .map(|s| s.content.chars().count())
+        .sum();
+    let row = Rect::new(area.x, area.y.saturating_add(3), area.width, 1);
+    let has_room_for_hints = area.width as usize >= right_width + 10;
+    if has_room_for_hints {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(right_width as u16),
+            ])
+            .split(row);
+        let left_text = format!(" {} {} ", status_icon, status);
+        let left_width = chunks[0].width as usize;
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                truncate_tail(&left_text, left_width),
+                status_style,
+            ))),
+            chunks[0],
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(right_spans)).alignment(Alignment::Right),
+            chunks[1],
+        );
+    } else {
+        let left_text = format!(" {} {} ", status_icon, status);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                truncate_tail(&left_text, row.width as usize),
+                status_style,
+            ))),
+            row,
+        );
+    }
 }
 
 /// Show matching slash commands immediately above the borderless composer.
@@ -2610,7 +2912,7 @@ mod tests {
 
     fn synthetic_layout() -> (Rect, LayoutAreas) {
         let screen = Rect::new(0, 0, 80, 24);
-        let areas = compute_layout(screen);
+        let areas = compute_layout(screen, true);
         (screen, areas)
     }
 
@@ -2618,9 +2920,12 @@ mod tests {
     fn compute_layout_produces_four_rects() {
         let (screen, areas) = synthetic_layout();
         // Outer is header + body + composer; constants define their sizes.
-        assert_eq!(areas.sidebar.width, SIDEBAR_WIDTH);
+        // The sidebar is now a percentage slice — check that it sits to
+        // the left of the chat pane and that the chat pane fills the
+        // remainder.
+        assert_eq!(areas.sidebar.width, 80 * SIDEBAR_PERCENT / 100);
         assert_eq!(areas.footer.height, FOOTER_HEIGHT);
-        assert_eq!(areas.chat.x, areas.sidebar.x + SIDEBAR_WIDTH);
+        assert_eq!(areas.chat.x, areas.sidebar.right());
         assert_eq!(areas.footer.y, screen.height - FOOTER_HEIGHT);
         // Header sits at the very top and spans the full width.
         assert_eq!(areas.menu.y, 0);
@@ -2628,6 +2933,107 @@ mod tests {
         assert_eq!(areas.menu.width, screen.width);
         // Body sits below the menu.
         assert_eq!(areas.chat.y, MENU_HEIGHT);
+    }
+
+    #[test]
+    fn compute_layout_collapses_sidebar_when_hidden() {
+        let screen = Rect::new(0, 0, 80, 24);
+        let areas = compute_layout(screen, false);
+        // Sidebar collapses to a zero-width sliver; the chat pane
+        // absorbs the freed column count.
+        assert_eq!(areas.sidebar.width, 0);
+        assert_eq!(areas.chat.width, screen.width);
+        assert_eq!(areas.chat.x, 0);
+    }
+
+    #[test]
+    fn sidebar_collapse_keeps_chat_at_minimum_width() {
+        // Narrow terminal — sidebar hidden, chat pane fills the whole
+        // body width without ever falling below the configured min.
+        let screen = Rect::new(0, 0, 60, 24);
+        let areas = compute_layout(screen, false);
+        assert_eq!(areas.sidebar.width, 0);
+        assert!(areas.chat.width >= MIN_CHAT_WIDTH || areas.chat.width == screen.width);
+    }
+
+    #[test]
+    fn sidebar_visible_on_wide_terminal() {
+        let screen = Rect::new(0, 0, 120, 24);
+        let areas = compute_layout(screen, true);
+        // The sidebar gets a quarter of the body width; chat fills the rest.
+        assert!(areas.sidebar.width > 0);
+        assert!(areas.chat.width > areas.sidebar.width);
+        assert_eq!(areas.sidebar.right(), areas.chat.x);
+    }
+
+    #[test]
+    fn narrow_sidebar_below_defaults_round_trip() {
+        // Mirrored config fields start at the same defaults that the
+        // config file declares. A misbehaving apply_live_cfg call
+        // would silently snap the breakpoint to zero and break the
+        // responsive logic.
+        let id = Identity {
+            peer_id: [0u8; 16],
+            keypair: crate::crypto::Keypair::generate(),
+            name: "alice".into(),
+            hostname: "test-host".into(),
+        };
+        let s = UiState::from_identity(&id);
+        assert_eq!(
+            s.narrow_sidebar_below,
+            crate::tui::config::DEFAULT_NARROW_SIDEBAR_BELOW
+        );
+        assert_eq!(
+            s.min_conversation_width,
+            crate::tui::config::DEFAULT_MIN_CONVERSATION_WIDTH
+        );
+    }
+
+    #[test]
+    fn apply_live_cfg_mirrors_responsive_knobs() {
+        let id = Identity {
+            peer_id: [0u8; 16],
+            keypair: crate::crypto::Keypair::generate(),
+            name: "alice".into(),
+            hostname: "test-host".into(),
+        };
+        let mut s = UiState::from_identity(&id);
+        let cfg = UiConfig {
+            theme: ThemeName::Default,
+            show_footer: true,
+            mouse: true,
+            scrollback: 100,
+            notify_sound: false,
+            auto_trust_seen: false,
+            status_format: crate::tui::config::StatusFormat::NameOnly,
+            narrow_sidebar_below: 72,
+            min_conversation_width: 32,
+        };
+        s.apply_live_cfg(&cfg);
+        assert_eq!(s.narrow_sidebar_below, 72);
+        assert_eq!(s.min_conversation_width, 32);
+    }
+
+    #[test]
+    fn sidebar_toggle_is_independent_of_focus() {
+        // The Ctrl-B toggle should flip sidebar_hidden regardless of
+        // which pane has focus — it's a layout knob, not a focus
+        // claim. Lock that contract down so a future refactor doesn't
+        // muddle focus with chrome visibility.
+        let id = Identity {
+            peer_id: [0u8; 16],
+            keypair: crate::crypto::Keypair::generate(),
+            name: "alice".into(),
+            hostname: "test-host".into(),
+        };
+        let mut s = UiState::from_identity(&id);
+        assert!(!s.sidebar_hidden);
+        s.sidebar_hidden = !s.sidebar_hidden;
+        assert!(s.sidebar_hidden);
+        s.sidebar_hidden = !s.sidebar_hidden;
+        assert!(!s.sidebar_hidden);
+        // Focus is unchanged.
+        assert_eq!(s.focus, Focus::Chat);
     }
 
     #[test]

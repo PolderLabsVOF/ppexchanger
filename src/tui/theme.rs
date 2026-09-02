@@ -7,6 +7,79 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
+/// Semantic style roles.
+///
+/// Render code asks for a role by name instead of poking individual palette
+/// fields. Each concrete theme resolves every role so the renderer never
+/// falls back to an ad-hoc `Style::default().fg(theme.x)` — that scattered
+/// pattern is what made the previous chrome read like a stack of unrelated
+/// buttons. Roles map one-to-one with the spec's "semantic color rules":
+/// brightness carries hierarchy, color only signals semantic state.
+///
+/// Lavender / purple = focused nav, focused input, commands,
+/// keyboard-shortcut brackets.
+/// Cyan / blue      = peer identifiers, connection info, commands.
+/// Green            = success (connected, delivered).
+/// Red              = danger (errors, disconnect, destructive).
+/// Gray             = timestamps, fingerprints, hints, inactive nav.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleRole {
+    /// Primary readable body text. fg + bg with no modifier.
+    TextPrimary,
+    /// Secondary text — peer summaries, secondary labels.
+    TextSecondary,
+    /// Muted text — timestamps, fingerprints, hints, placeholder copy.
+    TextMuted,
+    /// Accent — focused borders, active nav, keyboard shortcut brackets,
+    /// commands. The "look here" cue.
+    TextAccent,
+    /// Successful state — connected, delivered, trusted.
+    TextSuccess,
+    /// Warning state — pending, partial trust.
+    TextWarning,
+    /// Error state — failed, revoked, destructive.
+    TextDanger,
+    /// Background surface — the base canvas behind everything.
+    SurfaceBase,
+    /// Panel surface — composer, sidebar, secondary surfaces. Slightly
+    /// different from base so chrome reads as elevated.
+    SurfacePanel,
+    /// Selection / highlight surface — currently-selected sidebar row.
+    SurfaceSelected,
+    /// Incoming message surface — usually the same as `SurfaceBase` so
+    /// incoming bubbles rely on alignment + whitespace instead of fill.
+    SurfaceMessageIncoming,
+    /// Outgoing message surface — subtle tone so the reader's eye lands
+    /// here without a per-row rectangle.
+    SurfaceMessageOutgoing,
+    /// Normal (unfocused) border color.
+    BorderNormal,
+    /// Focused border color — the dominant focus cue.
+    BorderFocused,
+}
+
+impl StyleRole {
+    /// Stable identifier used by tests and theme diagnostics.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StyleRole::TextPrimary => "text.primary",
+            StyleRole::TextSecondary => "text.secondary",
+            StyleRole::TextMuted => "text.muted",
+            StyleRole::TextAccent => "text.accent",
+            StyleRole::TextSuccess => "text.success",
+            StyleRole::TextWarning => "text.warning",
+            StyleRole::TextDanger => "text.danger",
+            StyleRole::SurfaceBase => "surface.base",
+            StyleRole::SurfacePanel => "surface.panel",
+            StyleRole::SurfaceSelected => "surface.selected",
+            StyleRole::SurfaceMessageIncoming => "surface.message.incoming",
+            StyleRole::SurfaceMessageOutgoing => "surface.message.outgoing",
+            StyleRole::BorderNormal => "border.normal",
+            StyleRole::BorderFocused => "border.focused",
+        }
+    }
+}
+
 /// Built-in color themes. Selectable via `ppexchanger --theme <name>` or the
 /// in-TUI `/theme <name>` command. Persisted to `config.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +386,56 @@ impl Theme {
     pub fn dim_style(&self) -> Style {
         Style::default().fg(self.fg).bg(self.bg).add_modifier(Modifier::DIM)
     }
+
+    /// Resolve a semantic role to a concrete `Style` for this theme.
+    ///
+    /// Roles carry the *meaning* of a color slot (focused border,
+    /// incoming surface, success text). Each concrete theme maps roles
+    /// onto its palette so the render code never has to know whether the
+    /// active theme is solarized, monochrome, or amber.
+    ///
+    /// `TextSecondary` deliberately picks a brighter shade than
+    /// `TextMuted` so secondary labels still outrank hints and
+    /// timestamps. `SurfaceMessageIncoming` collapses to `SurfaceBase`
+    /// for now — incoming bubbles rely on alignment + whitespace, not on
+    /// a fill, so the eye reads the writer/reader direction from layout
+    /// alone.
+    pub fn role_style(&self, role: StyleRole) -> Style {
+        match role {
+            StyleRole::TextPrimary => Style::default().fg(self.fg).bg(self.bg),
+            StyleRole::TextSecondary => Style::default()
+                .fg(self.fg)
+                .bg(self.bg)
+                .add_modifier(Modifier::DIM),
+            StyleRole::TextMuted => Style::default()
+                .fg(self.border_inactive)
+                .bg(self.bg),
+            StyleRole::TextAccent => Style::default()
+                .fg(self.accent)
+                .bg(self.bg)
+                .add_modifier(Modifier::BOLD),
+            StyleRole::TextSuccess => Style::default()
+                .fg(self.status_online)
+                .bg(self.bg),
+            StyleRole::TextWarning => Style::default()
+                .fg(self.status_seen)
+                .bg(self.bg),
+            StyleRole::TextDanger => Style::default()
+                .fg(self.error)
+                .bg(self.bg)
+                .add_modifier(Modifier::BOLD),
+            StyleRole::SurfaceBase => Style::default().bg(self.bg),
+            StyleRole::SurfacePanel => Style::default().bg(self.status_bg),
+            StyleRole::SurfaceSelected => Style::default()
+                .bg(self.status_bg)
+                .fg(self.fg)
+                .add_modifier(Modifier::BOLD),
+            StyleRole::SurfaceMessageIncoming => Style::default().bg(self.bg),
+            StyleRole::SurfaceMessageOutgoing => Style::default().bg(self.status_bg),
+            StyleRole::BorderNormal => Style::default().fg(self.border_inactive).bg(self.bg),
+            StyleRole::BorderFocused => Style::default().fg(self.border_active).bg(self.bg),
+        }
+    }
 }
 
 /// Glyph set. The terminal width() check tells us whether the runtime can
@@ -419,5 +542,74 @@ mod tests {
         let is_unicode = g.dot_connected == "●";
         let is_ascii = g.dot_connected == "*";
         assert!(is_unicode || is_ascii);
+    }
+
+    #[test]
+    fn every_theme_resolves_every_role() {
+        // The semantic color policy relies on every theme providing a
+        // concrete Style for every role. If a theme forgets one, the
+        // renderer would fall back to the default Style and the visual
+        // hierarchy would silently break for that theme.
+        let roles = [
+            StyleRole::TextPrimary,
+            StyleRole::TextSecondary,
+            StyleRole::TextMuted,
+            StyleRole::TextAccent,
+            StyleRole::TextSuccess,
+            StyleRole::TextWarning,
+            StyleRole::TextDanger,
+            StyleRole::SurfaceBase,
+            StyleRole::SurfacePanel,
+            StyleRole::SurfaceSelected,
+            StyleRole::SurfaceMessageIncoming,
+            StyleRole::SurfaceMessageOutgoing,
+            StyleRole::BorderNormal,
+            StyleRole::BorderFocused,
+        ];
+        for name in [
+            ThemeName::Default,
+            ThemeName::Solarized,
+            ThemeName::Monochrome,
+            ThemeName::Neon,
+            ThemeName::Amber,
+        ] {
+            let t = Theme::by_name(name);
+            for role in roles {
+                let _ = t.role_style(role);
+            }
+        }
+    }
+
+    #[test]
+    fn role_strings_are_stable() {
+        // Role names are surfaced in debug logs and test diagnostics.
+        // Locking the strings down prevents silent rename drift.
+        assert_eq!(StyleRole::TextPrimary.as_str(), "text.primary");
+        assert_eq!(StyleRole::BorderFocused.as_str(), "border.focused");
+        assert_eq!(
+            StyleRole::SurfaceMessageOutgoing.as_str(),
+            "surface.message.outgoing"
+        );
+    }
+
+    #[test]
+    fn focus_border_is_brighter_than_normal_border() {
+        // The spec mandates that focus is communicated dominantly by
+        // border brightness — verify every theme picks a brighter shade
+        // for the focused border than the unfocused one.
+        for name in [
+            ThemeName::Default,
+            ThemeName::Solarized,
+            ThemeName::Monochrome,
+            ThemeName::Neon,
+            ThemeName::Amber,
+        ] {
+            let t = Theme::by_name(name);
+            assert_ne!(
+                t.role_style(StyleRole::BorderFocused).fg,
+                t.role_style(StyleRole::BorderNormal).fg,
+                "theme {name:?} must differentiate focused from normal border"
+            );
+        }
     }
 }

@@ -8,13 +8,15 @@
 //! which we can parse with a handful of lines.
 //!
 //! Supported keys under `[ui]`:
-//!   theme             = "default" | "solarized" | "monochrome" | "neon" | "amber"
-//!   show_footer       = true | false
-//!   mouse             = true | false
-//!   scrollback        = <integer>
-//!   notify_sound      = true | false
-//!   auto_trust_seen   = true | false
-//!   status_format     = "name" | "name+addr" | "off"
+//!   theme                  = "default" | "solarized" | "monochrome" | "neon" | "amber"
+//!   show_footer            = true | false
+//!   mouse                  = true | false
+//!   scrollback             = <integer>
+//!   notify_sound           = true | false
+//!   auto_trust_seen        = true | false
+//!   status_format          = "name" | "name+addr" | "off"
+//!   narrow_sidebar_below   = <integer>   # column width that triggers Ctrl+B collapse
+//!   min_conversation_width = <integer>   # minimum chat pane width before sidebar hides
 //!
 //! Lines starting with `#` are comments. Unknown keys are silently ignored.
 //! Missing file → defaults.
@@ -27,6 +29,12 @@ use std::path::Path;
 pub const DEFAULT_SCROLLBACK: usize = 500;
 /// Hard cap so a misconfigured file can't request an unbounded buffer.
 pub const MAX_SCROLLBACK: usize = 50_000;
+/// Terminal column count below which the sidebar should collapse to keep
+/// the chat pane usable. Users can still toggle manually with Ctrl+B.
+pub const DEFAULT_NARROW_SIDEBAR_BELOW: u16 = 80;
+/// Minimum column count the chat pane should retain when the sidebar is
+/// visible. Below this the sidebar hides by default regardless of toggle.
+pub const DEFAULT_MIN_CONVERSATION_WIDTH: u16 = 40;
 
 /// What the footer status line shows. `Off` hides it entirely; the other
 /// two modes are obvious from the name. Persisted as a string in TOML.
@@ -72,6 +80,12 @@ pub struct UiConfig {
     pub auto_trust_seen: bool,
     /// What the footer status line renders. See `StatusFormat`.
     pub status_format: StatusFormat,
+    /// Terminal column width below which the sidebar collapses by default.
+    /// The user can still toggle it with Ctrl+B.
+    pub narrow_sidebar_below: u16,
+    /// Minimum column count reserved for the chat pane when the sidebar is
+    /// visible. Below this the layout engine hides the sidebar.
+    pub min_conversation_width: u16,
 }
 
 impl Default for UiConfig {
@@ -88,6 +102,8 @@ impl Default for UiConfig {
             notify_sound: false,
             auto_trust_seen: false,
             status_format: StatusFormat::NameOnly,
+            narrow_sidebar_below: DEFAULT_NARROW_SIDEBAR_BELOW,
+            min_conversation_width: DEFAULT_MIN_CONVERSATION_WIDTH,
         }
     }
 }
@@ -162,6 +178,16 @@ impl UiConfig {
                         }
                     }
                 }
+                "narrow_sidebar_below" => {
+                    if let Ok(n) = value.parse::<u16>() {
+                        out.narrow_sidebar_below = n.clamp(40, 240);
+                    }
+                }
+                "min_conversation_width" => {
+                    if let Ok(n) = value.parse::<u16>() {
+                        out.min_conversation_width = n.clamp(20, 200);
+                    }
+                }
                 _ => {} // unknown key — ignore
             }
         }
@@ -185,6 +211,14 @@ impl UiConfig {
         out.push_str(&format!(
             "status_format = \"{}\"\n",
             self.status_format.as_str()
+        ));
+        out.push_str(&format!(
+            "narrow_sidebar_below = {}\n",
+            self.narrow_sidebar_below
+        ));
+        out.push_str(&format!(
+            "min_conversation_width = {}\n",
+            self.min_conversation_width
         ));
         out
     }
@@ -356,6 +390,8 @@ scrollback = 1024\n";
             notify_sound: true,
             auto_trust_seen: false,
             status_format: StatusFormat::NameAddr,
+            narrow_sidebar_below: 72,
+            min_conversation_width: 32,
         };
         let toml = original.to_toml();
         let parsed = UiConfig::parse(&toml).expect("self-emitted TOML must parse");
@@ -366,5 +402,45 @@ scrollback = 1024\n";
         assert_eq!(parsed.notify_sound, original.notify_sound);
         assert_eq!(parsed.auto_trust_seen, original.auto_trust_seen);
         assert_eq!(parsed.status_format, original.status_format);
+        assert_eq!(parsed.narrow_sidebar_below, original.narrow_sidebar_below);
+        assert_eq!(
+            parsed.min_conversation_width,
+            original.min_conversation_width
+        );
+    }
+
+    #[test]
+    fn parses_responsive_layout_keys() {
+        let toml = r#"
+            [ui]
+            narrow_sidebar_below = 72
+            min_conversation_width = 32
+        "#;
+        let c = UiConfig::parse(toml).unwrap();
+        assert_eq!(c.narrow_sidebar_below, 72);
+        assert_eq!(c.min_conversation_width, 32);
+    }
+
+    #[test]
+    fn responsive_keys_clamps_out_of_range_values() {
+        // Anything outside the safety band falls back to the closest
+        // sane value — a misconfigured config file must not silently
+        // request a zero-width chat pane.
+        let c = UiConfig::parse("[ui]\nnarrow_sidebar_below = 0\n").unwrap();
+        assert_eq!(c.narrow_sidebar_below, 40);
+        let c = UiConfig::parse("[ui]\nnarrow_sidebar_below = 500\n").unwrap();
+        assert_eq!(c.narrow_sidebar_below, 240);
+        let c = UiConfig::parse("[ui]\nmin_conversation_width = 0\n").unwrap();
+        assert_eq!(c.min_conversation_width, 20);
+    }
+
+    #[test]
+    fn responsive_keys_default_when_absent() {
+        let c = UiConfig::parse("[ui]\ntheme = \"neon\"\n").unwrap();
+        assert_eq!(c.narrow_sidebar_below, DEFAULT_NARROW_SIDEBAR_BELOW);
+        assert_eq!(
+            c.min_conversation_width,
+            DEFAULT_MIN_CONVERSATION_WIDTH
+        );
     }
 }
