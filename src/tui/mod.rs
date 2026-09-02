@@ -173,6 +173,11 @@ pub struct UiState {
     /// pinned to bottom (latest).
     pub scroll: usize,
     pub max_scrollback: usize,
+    /// Height (in rows) of the chat block's interior. Refreshed by
+    /// `draw_chat` each frame so `scroll_back` can cap `scroll` so the
+    /// viewport stays full of the oldest messages instead of
+    /// scrolling past the top and leaving empty rows behind.
+    pub visible_chat_rows: usize,
     history_dirty: bool,
     contacts_dirty: bool,
 }
@@ -274,6 +279,7 @@ impl UiState {
             bound_port: 0,
             scroll: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
+            visible_chat_rows: 0,
             history_dirty: false,
             contacts_dirty: false,
         }
@@ -792,7 +798,22 @@ impl UiState {
     }
 
     pub fn scroll_back(&mut self, lines: usize) {
-        self.scroll = (self.scroll + lines).min(self.messages.len().saturating_sub(1));
+        // Cap at `messages.len() - (visible_chat_rows - 1)` so the
+        // viewport at the top of history stays full of the oldest
+        // bubbles. The chat interior reserves one row for the sticky
+        // group header, so only `visible_chat_rows - 1` bubbles fit per
+        // page. Falling back to `messages.len() - 1` (the old cap)
+        // when visible_chat_rows has not been set yet keeps single-
+        // frame callers safe; the value is refreshed by `draw_chat`
+        // before any scroll input can land.
+        let max_scroll = if self.visible_chat_rows <= 1 {
+            self.messages.len().saturating_sub(1)
+        } else {
+            self.messages
+                .len()
+                .saturating_sub(self.visible_chat_rows.saturating_sub(1))
+        };
+        self.scroll = (self.scroll + lines).min(max_scroll);
     }
 
     pub fn scroll_forward(&mut self, lines: usize) {
@@ -1342,7 +1363,7 @@ fn online_count(state: &UiState) -> usize {
         .count()
 }
 
-fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
+fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyphs: &Glyphs) {
     let active = state.focus == Focus::Chat;
     let selected = state.selected();
     let selected_name = selected.map(|p| p.name.clone()).unwrap_or_default();
@@ -1394,6 +1415,9 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: 
     // exact slice indices don't need to be pre-computed here.
     let total = state.messages.len();
     let visible_n = (area.height as usize).saturating_sub(2); // minus borders
+    // Publish the chat interior height so `scroll_back` can clamp the
+    // scroll offset to keep the viewport full at the top of history.
+    state.visible_chat_rows = visible_n;
 
     // Empty state: show improved welcome message
     let empty = state.messages.is_empty();
@@ -1942,9 +1966,46 @@ mod tests {
             });
         }
         s.scroll_back(99);
+        // Without `visible_chat_rows` populated, the cap falls back to
+        // messages.len() - 1 so the viewport always shows at least the
+        // oldest message.
         assert_eq!(s.scroll, 4);
         s.scroll_forward(2);
         assert_eq!(s.scroll, 2);
+        s.scroll_forward(99);
+        assert_eq!(s.scroll, 0);
+    }
+
+    #[test]
+    fn scroll_back_clamps_to_visible_rows() {
+        // With `visible_chat_rows` set to the chat block's interior
+        // height (rows available for bubbles + sticky header), the
+        // scroll cap becomes `messages.len() - visible_chat_rows + 1`
+        // so scrolling all the way back fills the viewport with the
+        // oldest messages instead of leaving empty rows at the bottom.
+        let id = Identity {
+            peer_id: [0u8; 16],
+            keypair: crate::crypto::Keypair::generate(),
+            name: "alice".into(),
+            hostname: "test-host".into(),
+        };
+        let mut s = UiState::from_identity(&id);
+        for i in 0..20 {
+            s.apply(&Event::TextMessage {
+                from_peer: [1u8; 16],
+                from_name: "bob".into(),
+                body: format!("m{}", i),
+            });
+        }
+        s.visible_chat_rows = 8;
+        s.scroll_back(99);
+        // 20 messages minus an 8-row viewport (1 sticky header + 7
+        // bubbles) caps the scroll at 13.
+        assert_eq!(s.scroll, 13);
+        s.scroll_back(2);
+        assert_eq!(s.scroll, 13);
+        s.scroll_forward(5);
+        assert_eq!(s.scroll, 8);
         s.scroll_forward(99);
         assert_eq!(s.scroll, 0);
     }
