@@ -21,6 +21,9 @@ use std::time::{Duration, Instant};
 /// Multicast group used by every `ppexchanger` instance.
 pub const MULTICAST_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 42, 99);
 pub const MULTICAST_PORT: u16 = 7777;
+/// Stable unicast control port for reverse-connect requests. Keeping this
+/// separate from multicast and TCP makes host-firewall rules predictable.
+pub const CONTROL_PORT: u16 = 7778;
 const REVERSE_MAGIC: &[u8; 4] = b"PPXR";
 const REVERSE_ACK_MAGIC: &[u8; 4] = b"PPXA";
 
@@ -143,10 +146,24 @@ impl Discovery {
         packet[..4].copy_from_slice(REVERSE_MAGIC);
         packet[4..20].copy_from_slice(&target_peer_id);
         packet[20..].copy_from_slice(&requester_tcp_port.to_be_bytes());
-        // UDP is not reliable, particularly on client Wi-Fi. A short retry
-        // keeps the fallback snappy while avoiding a long OS TCP timeout.
+        // UDP is not reliable, particularly on client Wi-Fi. Send both to
+        // the advertised unicast control endpoint and to the control
+        // multicast group. The latter is important on hosts whose firewall
+        // permits discovery multicast but drops unsolicited unicast UDP.
+        let control_group = SocketAddr::V4(SocketAddrV4::new(MULTICAST_GROUP, CONTROL_PORT));
+        let mut last_send_error = None;
         for _ in 0..3 {
-            socket.send_to(&packet, addr)?;
+            let mut sent = false;
+            match socket.send_to(&packet, addr) {
+                Ok(_) => sent = true,
+                Err(e) => last_send_error = Some(e),
+            }
+            if control_group != addr && socket.send_to(&packet, control_group).is_ok() {
+                sent = true;
+            }
+            if !sent {
+                continue;
+            }
             let mut reply = [0u8; 20];
             match socket.recv_from(&mut reply) {
                 Ok((20, _)) if &reply[..4] == REVERSE_ACK_MAGIC && reply[4..] == target_peer_id => {
@@ -156,6 +173,9 @@ impl Discovery {
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => continue,
                 Err(e) => return Err(e),
             }
+        }
+        if let Some(e) = last_send_error {
+            return Err(e);
         }
         Ok(false)
     }

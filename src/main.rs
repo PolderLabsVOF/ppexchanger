@@ -285,12 +285,17 @@ fn start_tui(
     let announcer_beacon = announce_beacon.clone();
     let announcer_events = bus.tx_events.clone();
     std::thread::spawn(move || {
-        let mut d = match ppexchanger::net::discovery::Discovery::bind(0) {
+        let mut d = match ppexchanger::net::discovery::Discovery::bind(
+            ppexchanger::net::discovery::CONTROL_PORT,
+        ) {
             Ok(d) => d,
-            Err(e) => {
-                eprintln!("announcer bind failed: {}", e);
-                return;
-            }
+            Err(_) => match ppexchanger::net::discovery::Discovery::bind(0) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("announcer bind failed: {}", e);
+                    return;
+                }
+            },
         };
         let mut beacon = announcer_beacon;
         beacon.control_port = d.local_port().unwrap_or(0);
@@ -301,6 +306,10 @@ fn start_tui(
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             while std::time::Instant::now() < deadline && !announcer_stop.load(std::sync::atomic::Ordering::Relaxed) {
                 if let Ok(Some(addr)) = d.recv_reverse_connect(beacon.peer_id) {
+                    let _ = announcer_events.send(Event::Info(format!(
+                        "incoming reverse connection request from {}",
+                        addr
+                    )));
                     let _ = announcer_events.send(Event::ConnectionRequest {
                         addr,
                         name: format!("peer@{}", addr),
@@ -481,10 +490,23 @@ fn start_tui(
                                     addr,
                                 });
                             } else if let Some((control_addr, target_peer_id)) = reverse {
-                                match Discovery::request_reverse_connect(control_addr, target_peer_id, fallback_port) {
-                                    Ok(true) => { let _ = tx_clone.send(Event::Info(format!("{} received the reverse-connect request", addr))); }
-                                    Ok(false) => { let _ = tx_clone.send(Event::Info(format!("{} did not acknowledge the reverse-connect request", addr))); }
-                                    Err(e) => { let _ = tx_clone.send(Event::Info(format!("direct connection and reverse request failed: {}", e))); }
+                                // Try the advertised endpoint first, then the
+                                // stable control port. This also recovers from
+                                // a stale beacon published by an older build.
+                                let first = Discovery::request_reverse_connect(control_addr, target_peer_id, fallback_port);
+                                let stable = if control_addr.port() != ppexchanger::net::discovery::CONTROL_PORT {
+                                    Discovery::request_reverse_connect(
+                                        SocketAddr::new(control_addr.ip(), ppexchanger::net::discovery::CONTROL_PORT),
+                                        target_peer_id,
+                                        fallback_port,
+                                    )
+                                } else {
+                                    Ok(false)
+                                };
+                                match (first, stable) {
+                                    (Ok(true), _) | (_, Ok(true)) => { let _ = tx_clone.send(Event::Info(format!("{} received the reverse-connect request", addr))); }
+                                    (Ok(false), Ok(false)) => { let _ = tx_clone.send(Event::Info(format!("{} did not acknowledge the reverse-connect request", addr))); }
+                                    (Err(e), _) | (_, Err(e)) => { let _ = tx_clone.send(Event::Info(format!("direct connection and reverse request failed: {}", e))); }
                                 }
                             }
                         });
