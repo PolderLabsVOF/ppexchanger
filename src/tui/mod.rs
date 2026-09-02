@@ -244,6 +244,7 @@ pub enum PeerState {
     Gone,
 }
 
+#[derive(Clone)]
 pub struct UiMessage {
     pub from_peer: PeerId,
     pub from_name: String,
@@ -1409,10 +1410,12 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         .border_style(theme.border_style(active))
         .title(title);
 
-    // Scroll math. `state.scroll` is the offset from the bottom of the
-    // message deque (0 = newest visible). The reverse walk below stops
-    // when it runs out of budget or reaches the scroll anchor, so the
-    // exact slice indices don't need to be pre-computed here.
+    // Scroll math. `state.scroll` is the offset from the bottom of
+    // the visible message deque (0 = newest visible). The forward
+    // walk below accumulates whole message chunks oldest → newest,
+    // then drops chunks from the front when the budget fills so the
+    // newest stays anchored to the bottom of the viewport while
+    // older messages overflow off the top as the reader scrolls back.
     let total = state.messages.len();
     let visible_n = (area.height as usize).saturating_sub(2); // minus borders
     // Publish the chat interior height so `scroll_back` can clamp the
@@ -1424,21 +1427,19 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
     let visible: Vec<Line> = if empty {
         Vec::new()
     } else {
-        // Build grouped + separated chat rows by walking newest → oldest
-        // and prepending into the row buffer. Tracking the line budget
-        // and stopping when full means the newest messages are always
-        // visible (the bottom of the viewport never gets clipped), and
-        // older messages overflow off the top as the reader scrolls
-        // back. The forward slice approach used here previously produced
-        // more rendered rows than the area could hold once the group
-        // header + bubble + day separator + gutter added up — the bottom
-        // rows were silently truncated and the newest content vanished.
+        // Forward walk: oldest → newest. Each message is rendered as a
+        // chunk containing only its day separator (if it crosses a day
+        // boundary from the previous message) and the bubble row. The
+        // group header is NOT emitted per-message — instead it is
+        // rendered ONCE at the very top of the viewport as a sticky
+        // label for the first visible message's group. Anchoring the
+        // header to the top of the viewport (instead of attaching it to
+        // the oldest visible message of each group) keeps it in place
+        // while the reader scrolls within a group and avoids chasing
+        // the newest message as more bubbles arrive.
         let bubble = Style::default().fg(theme.fg).bg(theme.status_bg);
         let gutter = Line::from("");
         let today_bucket = day_bucket(now_unix());
-        // Break a group after a noticeable silence so a reply "ten
-        // minutes later" doesn't visually merge into the previous turn.
-        const GROUP_GAP_SECS: u64 = 120;
         // Line budget for rendered chat rows. The chat block paints a
         // top + bottom border; the remaining rows hold content.
         let budget = (area.height as usize).saturating_sub(2);
@@ -1470,58 +1471,58 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         // consider messages at or before the scroll window so we don't
         // re-surface content that should be off-screen.
         let visible_end_index = total.saturating_sub(state.scroll);
-
-        let mut rows: Vec<Line> = Vec::new();
-        let mut lines_used: usize = 0;
-        let mut newer: Option<&UiMessage> = None;
-
-        for m in state
+        // Snapshot the visible slice into a contiguous Vec so we can
+        // borrow it as `&[UiMessage]` for the forward walk below.
+        let slice: Vec<UiMessage> = state
             .messages
             .iter()
             .take(visible_end_index)
-            .rev()
-        {
-            // Lines for this single message: optional group header
-            // (gutter + caption) + bubble.
+            .cloned()
+            .collect();
+        let slice: &[UiMessage] = &slice;
+
+        // Build per-message chunks oldest → newest. Each chunk carries
+        // only its day separator (if it crosses a calendar boundary
+        // from the previous message) and the bubble row — the group
+        // header is rendered separately as a sticky top-of-viewport
+        // label once chunks have been finalised.
+        struct Chunk<'a> {
+            rows: Vec<Line<'a>>,
+            slice_idx: usize,
+        }
+        let mut chunks: Vec<Chunk<'_>> = Vec::new();
+        let mut lines_used: usize = 0;
+        let mut prev: Option<&UiMessage> = None;
+
+        for (i, m) in slice.iter().enumerate() {
+            // Lines for this single message: optional day separator +
+            // bubble. No per-message header.
             let mut m_lines: Vec<Line> = Vec::new();
 
-            // Group attribution. The newest visible message always
-            // gets a header (it's the natural anchor for the bottom
-            // row); otherwise emit one when the immediately newer
-            // message is from a different direction, peer, or far
-            // enough away in time.
-            let starts_group = match newer {
-                None => true,
-                Some(n) => {
-                    n.outgoing != m.outgoing
-                        || n.from_peer != m.from_peer
-                        || n.ts_unix.saturating_sub(m.ts_unix) > GROUP_GAP_SECS
-                }
+            // Day boundary: prepend [gutter, separator, gutter] when
+            // the previous (older) message in the deque crosses into a
+            // different calendar day. When this is the very first
+            // message in the slice we compare against the message just
+            // past the slice so a scroll anchor that lands on a new day
+            // is labelled.
+            let prev_for_day: Option<&UiMessage> = if i == 0 {
+                state.messages.get(visible_end_index)
+            } else {
+                prev
             };
-            if starts_group {
-                m_lines.push(gutter.clone());
-                let who = resolve_who(m);
-                let who_style = who_style_for(m).add_modifier(Modifier::BOLD);
-                let ts = chrono_timestamp(&Some(m.ts_unix));
-                if m.outgoing {
-                    // Caption sits flush-right above the first bubble
-                    // of the local turn, with a subtle dot to separate
-                    // name and time without an extra heavy rail.
-                    m_lines.push(
-                        Line::from(Span::styled(
-                            format!("{} · {}", who, ts),
-                            who_style,
-                        ))
-                        .right_aligned(),
-                    );
-                } else {
-                    // Incoming caption is a coloured bar so the source
-                    // is identifiable even when no peer list highlight
-                    // is in view.
-                    m_lines.push(Line::from(vec![
-                        Span::styled(" ", who_style.bg(theme.status_bg)),
-                        Span::styled(format!("{} · {}", who, ts), who_style),
-                    ]));
+            if let Some(p) = prev_for_day {
+                let mb = day_bucket(m.ts_unix);
+                let pb = day_bucket(p.ts_unix);
+                if mb != pb {
+                    let label = day_separator_label(mb, today_bucket);
+                    let sep = Line::from(Span::styled(
+                        format!("─── {} ───", label),
+                        theme.dim_style(),
+                    ))
+                    .centered();
+                    m_lines.push(gutter.clone());
+                    m_lines.push(sep);
+                    m_lines.push(gutter.clone());
                 }
             }
 
@@ -1555,38 +1556,65 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
                 ]));
             }
 
-            // Day boundary: when the current (older) message crosses
-            // into a different calendar day than the newer message,
-            // prepend [gutter, separator, gutter] so the seam lands
-            // above the older message in the final rendered order.
-            if let Some(n) = newer {
-                let mb = day_bucket(m.ts_unix);
-                let nb = day_bucket(n.ts_unix);
-                if mb != nb {
-                    let label = day_separator_label(mb, today_bucket);
-                    let sep = Line::from(Span::styled(
-                        format!("─── {} ───", label),
-                        theme.dim_style(),
-                    ))
-                    .centered();
-                    let mut prefix = vec![gutter.clone(), sep, gutter.clone()];
-                    prefix.extend(m_lines);
-                    m_lines = prefix;
+            // Append this chunk, then drop oldest chunks until the
+            // total fits the budget.
+            let new_size = lines_used + m_lines.len();
+            if new_size > budget {
+                let mut drop_lines = new_size - budget;
+                while drop_lines > 0 && !chunks.is_empty() {
+                    let front = chunks.first().unwrap();
+                    if front.rows.len() <= drop_lines {
+                        drop_lines -= front.rows.len();
+                        lines_used -= front.rows.len();
+                        chunks.remove(0);
+                    } else {
+                        lines_used -= front.rows.len();
+                        chunks.remove(0);
+                        drop_lines = 0;
+                    }
                 }
             }
-
-            // Stop when this message wouldn't fit. Older messages
-            // overflow off the top — the correct chat-app behaviour.
-            if lines_used + m_lines.len() > budget {
-                break;
-            }
-
-            // Prepend so the newest message ends up at the end of the
-            // buffer, matching the natural reading order top-to-bottom.
             lines_used += m_lines.len();
-            m_lines.extend(rows);
-            rows = m_lines;
-            newer = Some(m);
+            chunks.push(Chunk {
+                rows: m_lines,
+                slice_idx: i,
+            });
+            prev = Some(m);
+        }
+
+        // Sticky header: emit ONE header line at the top of the
+        // viewport for the first remaining chunk's group. The header
+        // is anchored to the viewport (not to any individual message)
+        // so it stays in place while the reader scrolls within a group
+        // and doesn't chase the latest message as more bubbles arrive.
+        if let Some(first) = chunks.first() {
+            let first_msg = &slice[first.slice_idx];
+            let who = resolve_who(first_msg);
+            let who_style = who_style_for(first_msg).add_modifier(Modifier::BOLD);
+            let ts = chrono_timestamp(&Some(first_msg.ts_unix));
+            let header_line: Line = if first_msg.outgoing {
+                Line::from(Span::styled(format!("{} · {}", who, ts), who_style)).right_aligned()
+            } else {
+                Line::from(vec![
+                    Span::styled(" ", who_style.bg(theme.status_bg)),
+                    Span::styled(format!("{} · {}", who, ts), who_style),
+                ])
+            };
+            chunks.insert(
+                0,
+                Chunk {
+                    rows: vec![header_line],
+                    slice_idx: first.slice_idx,
+                },
+            );
+            lines_used += 1;
+        }
+
+        // Flatten chunks into the final row buffer in display order
+        // (oldest chunk first).
+        let mut rows: Vec<Line> = Vec::with_capacity(lines_used);
+        for chunk in chunks {
+            rows.extend(chunk.rows);
         }
         rows
     };
@@ -1623,11 +1651,16 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         );
     }
     // The chat's scroll position is discoverable at a glance, including
-    // when mouse-wheel or PageUp navigation moves away from the newest item.
+    // when mouse-wheel or PageUp navigation moves away from the newest
+    // item. The viewport now reserves one row for the sticky group
+    // header, so `visible_n - 1` messages fit per page. Reporting that
+    // to ratatui keeps the thumb flush with the bottom edge of the
+    // track when the viewport is at the latest content (scroll == 0).
     if total > visible_n && area.width > 2 && area.height > 2 {
+        let viewport_rows = visible_n.saturating_sub(1).max(1);
         let mut scrollbar_state = ScrollbarState::new(total)
-            .position(total.saturating_sub(visible_n.saturating_add(state.scroll)))
-            .viewport_content_length(visible_n);
+            .position(total.saturating_sub(viewport_rows.saturating_add(state.scroll)))
+            .viewport_content_length(viewport_rows);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .thumb_style(Style::default().fg(theme.accent).bg(theme.bg))
             .track_style(Style::default().fg(theme.border_inactive).bg(theme.bg))
