@@ -2,6 +2,14 @@
 
 All notable ppexchanger updates are listed here in plain language.
 
+## 0.7.2 — 2026-09-03
+
+### Cleaner npm installs
+
+- npm installs no longer depend on lifecycle scripts or script approvals.
+- The launcher downloads the matching native binary the first time `ppx` is
+  run, keeping installs safe and predictable.
+
 ## 0.7.1 — 2026-09-03
 
 ### Safer updates and releases

@@ -1,6 +1,6 @@
 {
   "name": "ppexchanger",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "A private, encrypted LAN messenger for your terminal",
   "license": "MIT",
   "repository": {
@@ -19,9 +19,6 @@
     "scripts/install.js",
     "README.md"
   ],
-  "scripts": {
-    "postinstall": "node scripts/install.js"
-  },
   "engines": {
     "node": ">=18"
   }
