@@ -67,6 +67,14 @@ ppx
 The shorter npm name `ppx` is already owned by an unrelated package, so the
 official launcher is published as `ppexchanger`.
 
+For a project-local install, use the package through npm rather than a
+possibly older `ppx` already on your `PATH`:
+
+```sh
+npm install ppexchanger
+npx --no-install ppexchanger
+```
+
 ### Linux
 
 Requires `curl`, `tar`, and `sha256sum` (all pre-installed on every
