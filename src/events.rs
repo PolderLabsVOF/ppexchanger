@@ -128,6 +128,10 @@ pub struct FileOffer {
     pub mime: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Optional UTF-8 preview for text attachments. It is capped by the
+    /// protocol encoder and lets recipients inspect a paste before accepting
+    /// the download.
+    pub preview: Option<String>,
 }
 
 /// One peer discovered by a scan. Mirrors the public struct in

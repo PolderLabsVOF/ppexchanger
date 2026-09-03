@@ -172,6 +172,9 @@ pub struct UiState {
     /// offer; otherwise the modal is shown over the chat and the user
     /// can accept or reject via Enter / Esc.
     pub file_offer: Option<file_offer_popup::FileOfferPrompt>,
+    /// Preview of a downloaded text attachment. Closing the preview leaves
+    /// the file on disk and shows its path in the chat row for later use.
+    pub text_preview: Option<TextFilePreview>,
     /// Modal state for `/discover`. `None` means the modal is closed; the
     /// popup renders the in-progress scan results when present.
     pub discovery: Option<DiscoveryState>,
@@ -226,6 +229,14 @@ pub struct UiState {
     /// resize+encode once per area change; we keep the result so
     /// subsequent frames just render pixels without re-decoding.
     pub image_protocols: HashMap<PathBuf, ratatui_image::protocol::StatefulProtocol>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TextFilePreview {
+    pub from_name: String,
+    pub name: String,
+    pub path: PathBuf,
+    pub content: String,
 }
 
 /// A transient inbound-message notification rendered above the chat. The
@@ -352,6 +363,7 @@ impl UiState {
             status_format: crate::tui::config::StatusFormat::NameOnly,
             show_footer: true,
             file_offer: None,
+            text_preview: None,
             discovery: None,
             settings: None,
             pending_connection: None,
@@ -658,6 +670,21 @@ impl UiState {
                 ..
             } => {
                 self.file_offer = None;
+                if is_text_attachment(name) {
+                    if let Ok(bytes) = std::fs::read(saved_to) {
+                        let content: String = String::from_utf8_lossy(&bytes)
+                            .chars()
+                            .take(8_000)
+                            .collect();
+                        self.text_preview = Some(TextFilePreview {
+                            from_name: from_name.clone(),
+                            name: name.clone(),
+                            path: saved_to.clone(),
+                            content,
+                        });
+                        self.status = format!("downloaded {} · preview ready", name);
+                    }
+                }
                 self.push_message(UiMessage {
                     from_peer: *from_peer,
                     from_name: "[file]".into(),
@@ -1114,6 +1141,16 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+fn is_text_attachment(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        ".txt", ".md", ".markdown", ".log", ".csv", ".json", ".yaml", ".yml", ".toml",
+        ".xml", ".html", ".css", ".rs", ".py", ".js", ".ts",
+    ]
+    .iter()
+    .any(|suffix| lower.ends_with(suffix))
+}
+
 /// Format a Unix timestamp as HH:MM (24-hour format).
 fn chrono_timestamp(ts: &Option<u64>) -> String {
     match ts {
@@ -1481,6 +1518,9 @@ pub fn render(
         }
         if let Some(p) = &state.file_offer {
             file_offer_popup::render(f, theme, glyphs, p);
+        }
+        if let Some(preview) = &state.text_preview {
+            render_text_preview(f, theme, preview);
         }
         // Settings popup renders last so it sits on top of every other
         // modal. Caller passes the live UiConfig; the popup mutates it
@@ -2543,6 +2583,60 @@ fn draw_notification(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme) 
         Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+fn render_text_preview(f: &mut Frame, theme: &Theme, preview: &TextFilePreview) {
+    let area = f.area();
+    if area.width < 40 || area.height < 10 {
+        return;
+    }
+    let width = area.width.saturating_sub(4).min(84);
+    let height = area.height.saturating_sub(4).min(24);
+    let popup = Rect::new(
+        area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        area.y.saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    );
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme.role_style(StyleRole::BorderFocused))
+        .title(Span::styled(
+            format!(" text preview · {} ", preview.name),
+            theme.role_style(StyleRole::TextAccent),
+        ));
+    let content_rows = height.saturating_sub(6) as usize;
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("Downloaded from {}", preview.from_name),
+            theme.self_message_style().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("Saved to {}", preview.path.display()),
+            theme.role_style(StyleRole::TextMuted),
+        )),
+        Line::from(""),
+    ];
+    lines.extend(
+        preview
+            .content
+            .lines()
+            .take(content_rows)
+            .map(|line| Line::from(Span::styled(line.to_string(), theme.role_style(StyleRole::TextSecondary)))),
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Enter / Esc close · file remains available at the saved path",
+        theme.role_style(StyleRole::TextMuted),
+    )));
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
         popup,
     );
 }

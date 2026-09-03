@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -263,6 +263,27 @@ fn notification_text(value: &str, max_chars: usize) -> String {
 #[cfg(target_os = "macos")]
 fn apple_script_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Materialize a large paste as a durable local text file so it can travel
+/// through the existing encrypted file-transfer pipeline and be downloaded
+/// by the recipient. Files are kept under the app's `sent/` directory so a
+/// transfer that outlives the current process never loses its source.
+fn create_pasted_text_file(text: &str) -> std::io::Result<PathBuf> {
+    let dir = config_dir()?.join("sent");
+    std::fs::create_dir_all(&dir)?;
+    let stamp = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let path = dir.join(format!("ppx-paste-{}-{}.txt", std::process::id(), stamp));
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)?;
+    file.write_all(text.as_bytes())?;
+    file.flush()?;
+    Ok(path)
 }
 
 /// Copy the transferred bytes to `dest`, creating the parent
@@ -770,6 +791,7 @@ fn start_tui(
                                         mime: offer.mime.clone(),
                                         width: offer.width,
                                         height: offer.height,
+                                        preview: offer.preview.clone(),
                                     });
                                 }
                                 outbox.insert(t);
@@ -1332,8 +1354,13 @@ fn start_tui(
                                 }
                                 let file_action = {
                                     let s = state.lock().unwrap();
-                                    s.file_offer.as_ref().and_then(|_| {
-                                        ppexchanger::tui::file_offer_popup::mouse_action(rect, m.column, m.row)
+                                    s.file_offer.as_ref().and_then(|offer| {
+                                        ppexchanger::tui::file_offer_popup::mouse_action_for_preview(
+                                            rect,
+                                            m.column,
+                                            m.row,
+                                            offer.offer.preview.as_deref(),
+                                        )
                                     })
                                 };
                                 if let Some(file_action) = file_action {
@@ -1455,6 +1482,21 @@ fn start_tui(
                                         }
                                     }
                                 }
+                        }
+                    }
+                } else if state.lock().unwrap().text_preview.is_some() {
+                    // A downloaded text attachment owns the keyboard until
+                    // the preview is dismissed, so Enter/Esc never leak into
+                    // the composer underneath it.
+                    if let crossterm::event::Event::Key(k) = &ev {
+                        if k.kind == crossterm::event::KeyEventKind::Press
+                            && matches!(
+                                k.code,
+                                crossterm::event::KeyCode::Enter
+                                    | crossterm::event::KeyCode::Esc
+                            )
+                        {
+                            state.lock().unwrap().text_preview = None;
                         }
                     }
                 } else if state.lock().unwrap().pending_connection.is_some() {
@@ -1631,6 +1673,37 @@ fn start_tui(
                         state.lock().unwrap().status = "message copied to clipboard".into();
                         } else {
                         match editor.on_key(&ev) {
+                        ppexchanger::tui::EditorEvent::SubmitTextFile(text) => {
+                            if let Some(target) = resolve_target(&state, "") {
+                                let line_count = text.lines().count();
+                                match create_pasted_text_file(&text) {
+                                    Ok(path) => {
+                                        let _ = bus.tx_actions.send(Action::SendFile {
+                                            to: target,
+                                            path,
+                                            mime: Some("text/plain; charset=utf-8".into()),
+                                            width: None,
+                                            height: None,
+                                            persist_to: None,
+                                        });
+                                        let _ = bus.tx_events.send(Event::Info(format!(
+                                            "text file ready · {} lines · waiting for peer approval",
+                                            line_count
+                                        )));
+                                    }
+                                    Err(error) => {
+                                        let _ = bus.tx_events.send(Event::Info(format!(
+                                            "could not prepare text file: {}",
+                                            error
+                                        )));
+                                    }
+                                }
+                            } else {
+                                let _ = bus.tx_events.send(Event::Info(
+                                    "no peer selected for text file".into(),
+                                ));
+                            }
+                        }
                         ppexchanger::tui::EditorEvent::Submit(text) => {
                             if text.starts_with('/') {
                                 handle_command(
@@ -2025,7 +2098,11 @@ fn handle_mouse(
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut s = state.lock().unwrap();
     let areas = tui::compute_layout(size, !s.sidebar_hidden);
-    let modal_open = s.file_offer.is_some() || s.show_help || s.discovery.is_some() || s.settings.is_some();
+    let modal_open = s.file_offer.is_some()
+        || s.text_preview.is_some()
+        || s.show_help
+        || s.discovery.is_some()
+        || s.settings.is_some();
     let hit = tui::hit_test(
         size,
         m.column,

@@ -18,6 +18,8 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 pub enum EditorEvent {
     /// User pressed Enter with non-empty buffer.
     Submit(String),
+    /// A large bracketed paste is treated as a text-file attachment.
+    SubmitTextFile(String),
     /// Enter on an empty composer. The main loop uses this to open the
     /// currently highlighted peer when the sidebar has focus.
     ActivateSelection,
@@ -78,6 +80,8 @@ pub struct LineEditor {
     history: VecDeque<String>,
     /// Current history-cursor position. `None` means we're typing fresh.
     history_idx: Option<usize>,
+    /// Raw payload of a large paste waiting for the user to press Enter.
+    pending_text_file: Option<String>,
 }
 
 use std::collections::VecDeque;
@@ -114,6 +118,9 @@ pub fn command_matches(input: &str) -> Vec<(&'static str, &'static str)> {
 /// doesn't OOM the UI thread. If the cap is hit, the paste is dropped
 /// entirely — the editor stays usable.
 const PASTE_MAX: usize = 1024 * 1024;
+/// Pasting a long document is much easier to consume as a downloadable file
+/// than as a giant chat bubble. Shorter pastes remain ordinary messages.
+pub const TEXT_FILE_LINE_THRESHOLD: usize = 20;
 
 impl LineEditor {
     pub fn new() -> Self {
@@ -127,6 +134,7 @@ impl LineEditor {
     pub fn clear(&mut self) {
         self.buffer.clear();
         self.history_idx = None;
+        self.pending_text_file = None;
     }
 
     /// Append a pasted string to the buffer. Called by the main loop on
@@ -138,6 +146,12 @@ impl LineEditor {
         if text.len() > PASTE_MAX || self.buffer.len() + text.len() > PASTE_MAX {
             return EditorEvent::None;
         }
+        if self.buffer.is_empty() && text.lines().count() >= TEXT_FILE_LINE_THRESHOLD {
+            self.pending_text_file = Some(text.to_string());
+            self.buffer = format!("[pasted text file · {} lines]", text.lines().count());
+            return EditorEvent::Edited;
+        }
+        self.pending_text_file = None;
         self.buffer.push_str(text);
         EditorEvent::Edited
     }
@@ -158,6 +172,14 @@ impl LineEditor {
         // Ignore key-release events so a held key doesn't double-fire.
         if !matches!(kind, crossterm::event::KeyEventKind::Press) {
             return EditorEvent::None;
+        }
+
+        // Any edit other than Enter turns the pending attachment back into a
+        // normal composer buffer. This makes the preview label a safe,
+        // cancellable affordance instead of an opaque mode switch.
+        if !matches!(code, KeyCode::Enter) && self.pending_text_file.is_some() {
+            self.pending_text_file = None;
+            self.buffer.clear();
         }
 
         // Ctrl-modified shortcuts first.
@@ -211,6 +233,11 @@ impl LineEditor {
 
         match code {
             KeyCode::Enter => {
+                if let Some(text) = self.pending_text_file.take() {
+                    self.buffer.clear();
+                    self.history_idx = None;
+                    return EditorEvent::SubmitTextFile(text);
+                }
                 let out = std::mem::take(&mut self.buffer);
                 self.history_idx = None;
                 if !out.is_empty() {
@@ -350,6 +377,22 @@ mod tests {
             ed.on_key(&press(KeyCode::Enter, KeyModifiers::NONE)),
             EditorEvent::ActivateSelection
         );
+    }
+
+    #[test]
+    fn long_paste_submits_as_text_file() {
+        let mut ed = LineEditor::new();
+        let payload = (0..TEXT_FILE_LINE_THRESHOLD)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ed.on_paste(&payload);
+        assert!(ed.buffer.contains("pasted text file"));
+        assert_eq!(
+            ed.on_key(&press(KeyCode::Enter, KeyModifiers::NONE)),
+            EditorEvent::SubmitTextFile(payload)
+        );
+        assert!(ed.buffer.is_empty());
     }
 
     #[test]

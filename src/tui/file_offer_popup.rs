@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, Borders, BorderType, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 const POPUP_W: u16 = 60;
-const POPUP_H: u16 = 9;
+const POPUP_H: u16 = 15;
 
 /// What the user has chosen, if anything. `None` = awaiting decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,13 +59,27 @@ pub fn render(
         ));
 
     let size = human_size(state.offer.size);
-    let body = format!("{} wants to send:", state.from_name);
+    let is_text = state
+        .offer
+        .mime
+        .as_deref()
+        .is_some_and(|mime| mime.starts_with("text/"))
+        || state.offer.name.to_ascii_lowercase().ends_with(".txt");
+    let body = if is_text {
+        format!("{} wants to send a text file (preview after download):", state.from_name)
+    } else {
+        format!("{} wants to send:", state.from_name)
+    };
     let file_line = format!("  {}  ({})", state.offer.name, size);
 
     let hint = match state.decision {
         Decision::Pending => Line::from(vec![
             Span::styled(
-                "  ACCEPT (Enter)  ",
+                if is_text {
+                    "  DOWNLOAD (Enter)  "
+                } else {
+                    "  ACCEPT (Enter)  "
+                },
                 Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD),
             ),
             Span::raw("   "),
@@ -77,7 +91,7 @@ pub fn render(
         Decision::Accepted => Line::from(Span::styled("accepted — receiving…", theme.info_style())),
         Decision::Rejected => Line::from(Span::styled("rejected", theme.error_style())),
     };
-    let lines: Vec<Line> = vec![
+    let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
             body,
             Style::default().fg(theme.fg).bg(theme.bg),
@@ -87,9 +101,21 @@ pub fn render(
             file_line,
             Style::default().fg(theme.peer_text).bg(theme.bg),
         )),
-        Line::from(""),
-        hint,
     ];
+    if let Some(preview) = state.offer.preview.as_ref() {
+        lines.push(Line::from(Span::styled(
+            "Preview",
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(preview.lines().take(5).map(|line| {
+            Line::from(Span::styled(
+                format!("  {}", line),
+                Style::default().fg(theme.fg).bg(theme.bg),
+            ))
+        }));
+    }
+    lines.push(Line::from(""));
+    lines.push(hint);
 
     let para = Paragraph::new(lines)
         .block(block)
@@ -101,10 +127,24 @@ pub fn render(
 /// The bottom action row is split into two large mouse targets, so the file
 /// prompt is not keyboard-only.
 pub fn mouse_action(area: Rect, col: u16, row: u16) -> Option<MouseAction> {
+    mouse_action_for_preview(area, col, row, None)
+}
+
+/// Mouse hit-test that mirrors the rendered preview length for a concrete
+/// offer. Keeping this separate preserves the small public helper used by
+/// older callers while making preview rows non-clickable.
+pub fn mouse_action_for_preview(
+    area: Rect,
+    col: u16,
+    row: u16,
+    preview: Option<&str>,
+) -> Option<MouseAction> {
     let popup = centered(area);
-    // The fifth content line is the action row (one row below the inner
-    // border plus four preceding body lines).
-    if row != popup.y.saturating_add(5) || col < popup.x || col >= popup.right() {
+    let action_offset = preview
+        .map(|text| 6 + text.lines().take(5).count() as u16)
+        .unwrap_or(5);
+    let action_row = popup.y.saturating_add(action_offset);
+    if row != action_row || col < popup.x || col >= popup.right() {
         return None;
     }
     if col < popup.x.saturating_add(popup.width / 2) {

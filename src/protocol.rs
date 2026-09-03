@@ -220,7 +220,7 @@ pub const FRAME_HEADER_LEN: usize = 12;
 ///   0 = Bye
 ///   1 = Text
 ///   2 = FileOffer  `[id:16][name_len:2][name][size:8][mime_len:2][mime]
-///                   [has_dims:1][w:4][h:4]?`
+///                   [has_dims:1][w:4][h:4]?[preview_len:2][preview]?`
 ///                   The trailing `has_dims` byte is `0` for backwards
 ///                   compatibility with peers that don't speak the
 ///                   clipboard-image preview extension. When `1`, four
@@ -245,6 +245,8 @@ pub enum FrameBody {
         /// without having to decode the file again.
         width: Option<u32>,
         height: Option<u32>,
+        /// Optional UTF-8 preview for text attachments.
+        preview: Option<String>,
     },
     FileAccept {
         id: FileId,
@@ -311,7 +313,7 @@ pub fn encode_plain_frame(seq: u64, body: &FrameBody) -> Vec<u8> {
             v
         }
         FrameBody::Bye => vec![0u8],
-        FrameBody::FileOffer { id, name, size, mime, width, height } => {
+        FrameBody::FileOffer { id, name, size, mime, width, height, preview } => {
             let name_bytes = name.as_bytes();
             // mime is optional; emit 0-length when None.
             let mime_bytes = mime.as_ref().map(|m| m.as_bytes()).unwrap_or(&[]);
@@ -320,7 +322,10 @@ pub fn encode_plain_frame(seq: u64, body: &FrameBody) -> Vec<u8> {
                 (Some(_), Some(_)) => 1 + 4 + 4,
                 _ => 1,
             };
-            let cap = 1 + 16 + 2 + name_bytes.len() + 8 + 2 + mime_bytes.len() + dims_tail;
+            let preview_bytes = preview.as_ref().map(|value| value.as_bytes());
+            let preview_len = preview_bytes.map(|bytes| bytes.len().min(u16::MAX as usize)).unwrap_or(0);
+            let preview_tail = preview.is_some().then_some(2 + preview_len).unwrap_or(0);
+            let cap = 1 + 16 + 2 + name_bytes.len() + 8 + 2 + mime_bytes.len() + dims_tail + preview_tail;
             let mut v = Vec::with_capacity(cap);
             v.push(TAG_FILE_OFFER);
             v.extend_from_slice(&id.0);
@@ -338,6 +343,10 @@ pub fn encode_plain_frame(seq: u64, body: &FrameBody) -> Vec<u8> {
                 _ => {
                     v.push(0u8);
                 }
+            }
+            if let Some(bytes) = preview_bytes {
+                v.extend_from_slice(&(preview_len as u16).to_be_bytes());
+                v.extend_from_slice(&bytes[..preview_len]);
             }
             v
         }
@@ -455,7 +464,7 @@ fn decode_file_id_only(payload: &[u8], tag: u8) -> Result<FrameBody, DecodeError
 
 fn decode_file_offer(payload: &[u8]) -> Result<FrameBody, DecodeError> {
     // [id:16][name_len:2][name][size:8][mime_len:2][mime]
-    // optional trailing [has_dims:1][w:4][h:4]?
+    // optional trailing [has_dims:1][w:4][h:4]?[preview_len:2][preview]?
     if payload.len() < 16 + 2 + 8 + 2 {
         return Err(DecodeError::Malformed);
     }
@@ -494,11 +503,12 @@ fn decode_file_offer(payload: &[u8]) -> Result<FrameBody, DecodeError> {
         let has_dims = payload[p];
         p += 1;
         if has_dims == 1 {
-            if p + 8 != payload.len() {
+            if p + 8 > payload.len() {
                 return Err(DecodeError::Malformed);
             }
             let w = u32::from_be_bytes(payload[p..p + 4].try_into().unwrap());
             let h = u32::from_be_bytes(payload[p + 4..p + 8].try_into().unwrap());
+            p += 8;
             (Some(w), Some(h))
         } else if has_dims == 0 {
             (None, None)
@@ -508,7 +518,24 @@ fn decode_file_offer(payload: &[u8]) -> Result<FrameBody, DecodeError> {
     } else {
         (None, None)
     };
-    Ok(FrameBody::FileOffer { id, name, size, mime, width, height })
+    let preview = if p == payload.len() {
+        None
+    } else {
+        if p + 2 > payload.len() {
+            return Err(DecodeError::Malformed);
+        }
+        let preview_len = u16::from_be_bytes(payload[p..p + 2].try_into().unwrap()) as usize;
+        p += 2;
+        if p + preview_len != payload.len() {
+            return Err(DecodeError::Malformed);
+        }
+        Some(
+            std::str::from_utf8(&payload[p..p + preview_len])
+                .map_err(|_| DecodeError::Malformed)?
+                .to_string(),
+        )
+    };
+    Ok(FrameBody::FileOffer { id, name, size, mime, width, height, preview })
 }
 
 fn decode_file_chunk(payload: &[u8]) -> Result<FrameBody, DecodeError> {
@@ -632,6 +659,7 @@ mod tests {
             mime: Some("application/pdf".into()),
             width: None,
             height: None,
+            preview: None,
         };
         let buf = encode_plain_frame(7, &body);
         let dec = decode_plain_frame(&buf).unwrap();
@@ -649,6 +677,7 @@ mod tests {
             mime: None,
             width: None,
             height: None,
+            preview: None,
         };
         let buf = encode_plain_frame(0, &body);
         let dec = decode_plain_frame(&buf).unwrap();
@@ -665,6 +694,7 @@ mod tests {
             mime: Some("image/png".into()),
             width: Some(800),
             height: Some(600),
+            preview: None,
         };
         let buf = encode_plain_frame(11, &body);
         let dec = decode_plain_frame(&buf).unwrap();
@@ -681,10 +711,26 @@ mod tests {
             mime: None,
             width: Some(2),
             height: Some(3),
+            preview: None,
         };
         let buf = encode_plain_frame(2, &body);
         let dec = decode_plain_frame(&buf).unwrap();
         assert_eq!(dec.body, body);
+    }
+
+    #[test]
+    fn frame_roundtrip_text_file_preview() {
+        let body = FrameBody::FileOffer {
+            id: FileId([0x42u8; 16]),
+            name: "paste.txt".into(),
+            size: 128,
+            mime: Some("text/plain; charset=utf-8".into()),
+            width: None,
+            height: None,
+            preview: Some("line one\nline two".into()),
+        };
+        let encoded = encode_plain_frame(9, &body);
+        assert_eq!(decode_plain_frame(&encoded).unwrap().body, body);
     }
 
     #[test]
@@ -703,6 +749,7 @@ mod tests {
                 mime: None,
                 width: None,
                 height: None,
+                preview: None,
             },
         );
         // Truncate off the trailing `has_dims` byte to simulate a
@@ -722,6 +769,7 @@ mod tests {
                 mime: None,
                 width: None,
                 height: None,
+                preview: None,
             }
         );
     }
@@ -738,6 +786,7 @@ mod tests {
                 mime: None,
                 width: Some(1),
                 height: Some(1),
+                preview: None,
             },
         );
         // Flip the has_dims flag from 1 to 7 — invalid.

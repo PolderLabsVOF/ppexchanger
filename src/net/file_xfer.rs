@@ -89,6 +89,7 @@ impl OutboundTransfer {
             .unwrap_or("file")
             .to_string();
         let id = FileId::random();
+        let preview = text_preview(&path, mime.as_deref());
         let offer = FileOffer {
             id,
             name,
@@ -96,6 +97,7 @@ impl OutboundTransfer {
             mime,
             width,
             height,
+            preview,
         };
         let file = File::open(&path)?;
         Ok(Self {
@@ -558,6 +560,26 @@ pub enum FinalizeOutcome {
 // Path helpers
 // ---------------------------------------------------------------------------
 
+/// Read a small UTF-8 preview for text attachments. The preview is metadata
+/// only; the complete file still travels through the encrypted chunk stream.
+fn text_preview(path: &PathBuf, mime: Option<&str>) -> Option<String> {
+    let is_text = mime.is_some_and(|value| value.starts_with("text/"))
+        || path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "txt" | "md" | "log" | "csv" | "json" | "yaml" | "yml" | "toml"
+                )
+            });
+    if !is_text {
+        return None;
+    }
+    let bytes = fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).chars().take(2_000).collect())
+}
+
 /// Returns `<config_dir>/received/`, creating it on first call.
 pub fn received_dir() -> std::io::Result<PathBuf> {
     let dir = config_dir()?.join("received");
@@ -657,6 +679,7 @@ mod tests {
             mime: None,
             width: None,
             height: None,
+            preview: None,
         };
         let mut t = InboundTransfer::new([2u8; 16], "alice".into(), offer.clone());
 
@@ -691,6 +714,7 @@ mod tests {
                 mime: None,
                 width: None,
                 height: None,
+                preview: None,
             },
         );
         t.path = dest.clone();

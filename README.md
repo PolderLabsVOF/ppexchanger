@@ -488,6 +488,11 @@ that resolves to an existing file — directly into the input line and
 press Enter. Pasted payloads are capped at 1 MiB; anything bigger is
 dropped silently so a stray log-file paste can't OOM the UI thread.
 
+Pastes of 20 or more lines are offered as encrypted `.txt` attachments
+instead of giant chat bubbles. The recipient can preview the first lines in
+the offer, accept the download, and review the complete file at the saved
+path after transfer.
+
 ## Discovery
 
 Discovery is **manual**. Press `/discover` (or use the command in any
