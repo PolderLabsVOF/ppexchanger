@@ -55,6 +55,11 @@ changes before they become stable.
 This keeps experimental work out of stable downloads while making it easy to
 try the next version early.
 
+Release tags also publish the npm launcher automatically. Stable releases use
+the `latest` npm channel; beta and RC releases use the `beta` channel. The
+repository is configured for npm trusted publishing (OIDC), so no long-lived
+npm token is required.
+
 ### npm
 
 Install the native binary through npm (the command installed is still `ppx`):

@@ -25,7 +25,8 @@ on:
         default: ''
 
 permissions:
-  contents: write   # required for gh release create / upload
+  contents: write   # required for GitHub release create / upload
+  id-token: write   # npm trusted publishing / provenance
 
 jobs:
   validate:
@@ -36,6 +37,7 @@ jobs:
       channel: ${{ steps.validate.outputs.channel }}
       source_branch: ${{ steps.validate.outputs.source_branch }}
       prerelease: ${{ steps.validate.outputs.prerelease }}
+      npm_tag: ${{ steps.validate.outputs.npm_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,10 +51,12 @@ jobs:
             CHANNEL=stable
             SOURCE_BRANCH=main
             PRERELEASE=false
+            NPM_TAG=latest
           elif [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(beta|rc)(\.[0-9A-Za-z.-]+)?$ ]]; then
             CHANNEL=beta
             SOURCE_BRANCH=beta
             PRERELEASE=true
+            NPM_TAG=beta
           else
             echo "Use vX.Y.Z for stable releases or vX.Y.Z-beta.N / vX.Y.Z-rc.N for beta releases (got: $RELEASE_TAG)"
             exit 1
@@ -69,6 +73,7 @@ jobs:
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
           echo "source_branch=$SOURCE_BRANCH" >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "npm_tag=$NPM_TAG" >> "$GITHUB_OUTPUT"
           echo "Validated $CHANNEL release $RELEASE_TAG from $SOURCE_BRANCH"
 
   build:
@@ -257,3 +262,29 @@ jobs:
           draft: false
           prerelease: ${{ needs.validate.outputs.prerelease == 'true' }}
           make_latest: ${{ needs.validate.outputs.prerelease != 'true' }}
+
+  publish-npm:
+    name: publish npm package
+    needs: [validate, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Publish package with provenance
+        working-directory: npm/ppx
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ needs.validate.outputs.npm_tag }}
+        run: |
+          # Preferred authentication is npm trusted publishing (OIDC). For
+          # repositories that still use a token, NPM_TOKEN is supported as a
+          # fallback without changing the workflow.
+          npm publish --access public --provenance --tag "$NPM_TAG"
