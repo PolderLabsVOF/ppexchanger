@@ -31,6 +31,7 @@ published alongside the release, and drops the binary into
 - [Linux](#linux)
 - [macOS](#macos)
 - [Windows](#windows)
+- [npm](#npm)
 - [From source](#from-source) — git + cargo, with or without the installer
 
 ### Nightly builds
@@ -53,6 +54,18 @@ changes before they become stable.
 
 This keeps experimental work out of stable downloads while making it easy to
 try the next version early.
+
+### npm
+
+Install the native binary through npm (the command installed is still `ppx`):
+
+```sh
+npm install --global ppexchanger
+ppx
+```
+
+The shorter npm name `ppx` is already owned by an unrelated package, so the
+official launcher is published as `ppexchanger`.
 
 ### Linux
 
