@@ -1109,16 +1109,47 @@ fn start_tui(
                             if accepted {
                                 // File transfers are trusted at the session
                                 // layer; do not block delivery behind a UI
-                                // confirmation dialog. Accept immediately so
-                                // dropped images arrive and preview without
-                                // requiring a second click.
-                                if let Some(sender) = outbound.get(&peer) {
-                                    let _ = sender.send(FrameBody::FileAccept { id: offer.id });
+                                // confirmation dialog. Transition the local
+                                // transfer to Receiving before acknowledging
+                                // the offer, otherwise incoming chunks would
+                                // be rejected as "not in receiving state".
+                                match inbox.accept(offer.id) {
+                                    Ok(Some(_)) => {
+                                        if let Some(sender) = outbound.get(&peer) {
+                                            if sender.send(FrameBody::FileAccept { id: offer.id }).is_ok() {
+                                                let _ = act_bus_tx.send(Event::Info(format!(
+                                                    "receiving {} from {}",
+                                                    offer.name, from_name
+                                                )));
+                                            } else {
+                                                let _ = inbox.reject(offer.id);
+                                                let _ = act_bus_tx.send(Event::Info(format!(
+                                                    "could not accept {} from {}: peer disconnected",
+                                                    offer.name, from_name
+                                                )));
+                                            }
+                                        } else {
+                                            let _ = inbox.reject(offer.id);
+                                            let _ = act_bus_tx.send(Event::Info(format!(
+                                                "could not accept {} from {}: session unavailable",
+                                                offer.name, from_name
+                                            )));
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        let _ = act_bus_tx.send(Event::Info(format!(
+                                            "could not receive {}: offer disappeared",
+                                            offer.name
+                                        )));
+                                    }
+                                    Err(error) => {
+                                        let _ = inbox.reject(offer.id);
+                                        let _ = act_bus_tx.send(Event::Info(format!(
+                                            "could not receive {}: {}",
+                                            offer.name, error
+                                        )));
+                                    }
                                 }
-                                let _ = act_bus_tx.send(Event::Info(format!(
-                                    "receiving {} from {}",
-                                    offer.name, from_name
-                                )));
                             }
                         }
                         InboundFileEvent::Accept { peer: _, id } => {
