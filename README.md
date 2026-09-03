@@ -496,8 +496,9 @@ path after transfer.
 
 PNG and JPEG images can be pasted with `/paste-image` or dragged from a file
 manager into the composer. The receiver gets an inline terminal preview after
-accepting the encrypted transfer; the original is kept under the received
-files directory.
+accepting the encrypted transfer; received images are saved under
+`~/Pictures/ppexchanger/` (other files remain under ppx's received-files
+directory).
 
 ## Discovery
 

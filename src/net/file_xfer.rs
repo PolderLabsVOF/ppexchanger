@@ -364,7 +364,7 @@ impl InboundTransfer {
         if self.phase != InboundPhase::Pending {
             return Ok(());
         }
-        let dir = received_dir()?;
+        let dir = received_dir_for_offer(&self.offer)?;
         self.path = dir.join(format!(
             "{}-{}",
             self.offer.id.to_hex(),
@@ -600,6 +600,34 @@ fn text_preview(path: &PathBuf, mime: Option<&str>) -> Option<String> {
 /// Returns `<config_dir>/received/`, creating it on first call.
 pub fn received_dir() -> std::io::Result<PathBuf> {
     let dir = config_dir()?.join("received");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Choose a user-facing destination for an inbound offer. Images are placed
+/// in a dedicated folder under the user's Pictures directory so they are
+/// discoverable by normal photo/file-manager workflows; other attachments
+/// retain the app-private received directory.
+fn received_dir_for_offer(offer: &FileOffer) -> std::io::Result<PathBuf> {
+    let is_image = offer
+        .mime
+        .as_deref()
+        .is_some_and(|mime| mime.starts_with("image/"))
+        || offer.name.to_ascii_lowercase().ends_with(".png")
+        || offer.name.to_ascii_lowercase().ends_with(".jpg")
+        || offer.name.to_ascii_lowercase().ends_with(".jpeg");
+    if !is_image {
+        return received_dir();
+    }
+    let home = if cfg!(windows) {
+        std::env::var_os("USERPROFILE").map(PathBuf::from)
+    } else {
+        std::env::var_os("HOME").map(PathBuf::from)
+    };
+    let Some(home) = home else {
+        return received_dir();
+    };
+    let dir = home.join("Pictures").join("ppexchanger");
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }
