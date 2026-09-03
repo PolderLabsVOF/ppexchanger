@@ -208,7 +208,7 @@ jobs:
 
   publish:
     name: publish release
-    needs: build
+    needs: [validate, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
