@@ -1,6 +1,6 @@
 [package]
 name = "ppexchanger"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Fully-local, fully-encrypted LAN P2P terminal messenger (Rust)"
 license = "MIT"

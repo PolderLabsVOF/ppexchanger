@@ -1,0 +1,22 @@
+{
+  "name": "ppx",
+  "version": "0.7.0",
+  "description": "A private, encrypted LAN messenger for your terminal",
+  "license": "MIT",
+  "repository": "github:PolderLabsVOF/ppexchanger",
+  "homepage": "https://github.com/PolderLabsVOF/ppexchanger",
+  "bin": {
+    "ppx": "bin/ppx.js"
+  },
+  "files": [
+    "bin/ppx.js",
+    "scripts/install.js",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
