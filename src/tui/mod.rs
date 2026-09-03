@@ -171,6 +171,12 @@ pub struct UiState {
     /// Preview of a downloaded text attachment. Closing the preview leaves
     /// the file on disk and shows its path in the chat row for later use.
     pub text_preview: Option<TextFilePreview>,
+    /// Identity of the text attachment currently expanded inline in chat.
+    expanded_text: Option<(PeerId, u64, bool)>,
+    expanded_text_offset: usize,
+    /// Exact rendered row ranges for file attachments. Used by mouse hit
+    /// testing so clicks on empty chat space never open or expand anything.
+    attachment_rows: Vec<(u16, u16, (PeerId, u64, bool))>,
     /// Modal state for `/discover`. `None` means the modal is closed; the
     /// popup renders the in-progress scan results when present.
     pub discovery: Option<DiscoveryState>,
@@ -354,6 +360,9 @@ impl UiState {
             show_footer: true,
             file_offer: None,
             text_preview: None,
+            expanded_text: None,
+            expanded_text_offset: 0,
+            attachment_rows: Vec::new(),
             discovery: None,
             settings: None,
             pending_connection: None,
@@ -686,18 +695,8 @@ impl UiState {
                 };
                 let is_text = image.is_none() && is_text_attachment(name);
                 if is_text {
-                    if let Ok(file_bytes) = std::fs::read(saved_to) {
-                        let content: String = String::from_utf8_lossy(&file_bytes)
-                            .chars()
-                            .take(8_000)
-                            .collect();
-                        self.text_preview = Some(TextFilePreview {
-                            from_name: from_name.clone(),
-                            name: name.clone(),
-                            path: saved_to.clone(),
-                            content,
-                        });
-                        self.status = format!("downloaded {} · preview ready", name);
+                    if std::fs::metadata(saved_to).is_ok() {
+                        self.status = format!("downloaded {} · click the message to expand", name);
                     }
                 }
                 if let Some(image) = image {
@@ -840,6 +839,9 @@ impl UiState {
         self.scroll = 0;
         self.message_selection = None;
         self.selecting_message = None;
+        self.expanded_text = None;
+        self.expanded_text_offset = 0;
+        self.attachment_rows.clear();
         self.history_dirty = true;
     }
 
@@ -997,14 +999,8 @@ impl UiState {
         bytes: u64,
         lines: usize,
     ) {
-        let name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("pasted-text.txt")
-            .to_string();
         let body = format!(
-            "[text file {} · {} lines · {:.1} KB · click to expand]",
-            name,
+            "▤ text paste · {} lines · {:.1} KB · click to expand",
             lines,
             bytes as f64 / 1024.0
         );
@@ -1071,17 +1067,11 @@ impl UiState {
         bytes: u64,
         lines: usize,
     ) {
-        let name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("received-text.txt")
-            .to_string();
         self.push_message(UiMessage {
             from_peer,
             from_name,
             body: format!(
-                "[text file {} · {} lines · {:.1} KB · click to expand]",
-                name,
+                "▤ text paste · {} lines · {:.1} KB · click to expand",
                 lines,
                 bytes as f64 / 1024.0
             ),
@@ -1098,38 +1088,40 @@ impl UiState {
         });
     }
 
-    /// Open a text attachment selected in the chat. The preview is capped so
-    /// a large paste never blocks the render loop or allocates unbounded UI
-    /// state. Returns whether the row was a readable text attachment.
+    /// Toggle a text attachment selected in the chat. Expansion is rendered
+    /// inline, so the composer and surrounding conversation remain visible.
     pub fn open_text_preview_at(&mut self, index: usize) -> bool {
         let Some(message) = self.messages.get(index).cloned() else {
             return false;
         };
-        let Some(meta) = message.image.filter(|meta| meta.mime.starts_with("text/")) else {
+        let Some(_meta) = message.image.filter(|meta| meta.mime.starts_with("text/")) else {
             return false;
         };
-        let Ok(bytes) = std::fs::read(&meta.path) else {
-            self.status = format!("text attachment unavailable: {}", meta.path.display());
-            return false;
-        };
-        let content: String = String::from_utf8_lossy(&bytes).chars().take(8_000).collect();
-        let name = meta
-            .path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("text attachment")
-            .to_string();
-        self.text_preview = Some(TextFilePreview {
-            from_name: if message.outgoing {
-                self.self_name.clone()
-            } else {
-                message.from_name
-            },
-            name,
-            path: meta.path,
-            content,
-        });
+        let key = (message.from_peer, message.ts_unix, message.outgoing);
+        if self.expanded_text == Some(key) {
+            self.expanded_text = None;
+            self.expanded_text_offset = 0;
+        } else {
+            self.expanded_text = Some(key);
+            self.expanded_text_offset = 0;
+        }
+        self.scroll = 0;
         true
+    }
+
+    pub fn attachment_at_chat_row(&self, chat: Rect, row: u16) -> Option<usize> {
+        self.attachment_rows
+            .iter()
+            .find(|(start, end, _)| {
+                let absolute_start = chat.y.saturating_add(1).saturating_add(*start);
+                let absolute_end = chat.y.saturating_add(1).saturating_add(*end);
+                row >= absolute_start && row <= absolute_end
+            })
+            .and_then(|(_, _, key)| {
+                self.messages.iter().position(|message| {
+                    (message.from_peer, message.ts_unix, message.outgoing) == *key
+                })
+            })
     }
 
     /// Replace the in-memory ring with history loaded from disk. Loading is
@@ -1233,6 +1225,9 @@ impl UiState {
         // subsequent copy can never leak text from another chat.
         self.message_selection = None;
         self.selecting_message = None;
+        self.expanded_text = None;
+        self.expanded_text_offset = 0;
+        self.attachment_rows.clear();
     }
 
     pub fn cycle_focus(&mut self) {
@@ -1243,6 +1238,10 @@ impl UiState {
     }
 
     pub fn scroll_back(&mut self, lines: usize) {
+        if self.expanded_text.is_some() {
+            self.expanded_text_offset = self.expanded_text_offset.saturating_add(lines);
+            return;
+        }
         // Cap so the viewport at the top of history stays full of the
         // oldest content. With inline group headers, total rendered
         // rows = `messages.len()` bubbles + one header per sender
@@ -1277,6 +1276,10 @@ impl UiState {
     }
 
     pub fn scroll_forward(&mut self, lines: usize) {
+        if self.expanded_text.is_some() {
+            self.expanded_text_offset = self.expanded_text_offset.saturating_sub(lines);
+            return;
+        }
         self.scroll = self.scroll.saturating_sub(lines);
     }
 
@@ -2139,6 +2142,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
     // widgets at the right row. We compute Y offsets by walking the
     // same row counts the Paragraph is about to consume.
     let mut image_anchors: Vec<(u16, ImagePreview)> = Vec::new();
+    state.attachment_rows.clear();
     let visible: Vec<Line> = if empty {
         Vec::new()
     } else {
@@ -2225,6 +2229,8 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         struct Chunk<'a> {
             rows: Vec<Line<'a>>,
             preview: Option<ImagePreview>,
+            attachment_key: Option<(PeerId, u64, bool)>,
+            attachment_body_offset: Option<usize>,
         }
         // Maximum rows / columns we'll spend on an inline preview.
         // Keeps a single image from monopolising the chat viewport.
@@ -2298,6 +2304,17 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
             }
 
             // Bubble body.
+            let text_meta = m
+                .image
+                .as_ref()
+                .filter(|meta| meta.mime.starts_with("text/"));
+            let attachment_key = m
+                .image
+                .as_ref()
+                .map(|_| (m.from_peer, m.ts_unix, m.outgoing));
+            let text_key = text_meta.map(|_| (m.from_peer, m.ts_unix, m.outgoing));
+            let text_expanded = text_key.is_some_and(|key| state.expanded_text == Some(key));
+            let attachment_body_offset = attachment_key.map(|_| m_lines.len());
             let image_preview = if let Some(img) = m
                 .image
                 .as_ref()
@@ -2339,12 +2356,22 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
             // Peer bubbles are anchored to the left; our bubbles are anchored
             // to the right. The delivery chip remains the final span so it
             // sits at the far right of an outgoing row.
+            let bubble_body = text_meta
+                .map(|meta| {
+                    format!(
+                        "▤ text paste · {} lines · {:.1} KB · click to {}",
+                        meta.width,
+                        meta.bytes as f64 / 1024.0,
+                        if text_expanded { "collapse" } else { "expand" }
+                    )
+                })
+                .unwrap_or_else(|| m.body.clone());
             if m.outgoing {
                 let chip_char = if m.pending { " ⏳" } else { " ✓" };
                 let chip_style = theme.role_style(StyleRole::TextMuted);
                 let mut bubble_line = vec![
                     Span::styled("  ", bubble),
-                    Span::styled(m.body.clone(), bubble),
+                    Span::styled(bubble_body, bubble),
                     Span::styled("  ", bubble),
                 ];
                 let chip = Span::styled(chip_char, chip_style);
@@ -2354,8 +2381,49 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
                 let indent_style = Style::default().bg(theme.bg);
                 m_lines.push(Line::from(vec![
                     Span::styled("  ", indent_style),
-                    Span::styled(m.body.clone(), Style::default().fg(theme.fg).bg(theme.bg)),
+                    Span::styled(bubble_body, Style::default().fg(theme.fg).bg(theme.bg)),
                 ]).left_aligned());
+            }
+            if text_expanded {
+                if let Some(meta) = text_meta {
+                    match std::fs::read_to_string(&meta.path) {
+                        Ok(content) => {
+                            let all_lines: Vec<&str> = content.lines().collect();
+                            let total_lines = all_lines.len();
+                            let start = state
+                                .expanded_text_offset
+                                .min(total_lines.saturating_sub(1));
+                            // Keep the expanded chunk bounded to the current
+                            // viewport. PageUp/PageDown and the mouse wheel
+                            // move this window through the complete file.
+                            let room = budget.saturating_sub(m_lines.len() + 2).max(1);
+                            let shown = all_lines.iter().skip(start).take(room);
+                            m_lines.push(Line::from(Span::styled(
+                                format!(
+                                    "  ┌─ pasted text · lines {}–{} of {} ─────────",
+                                    start.saturating_add(1),
+                                    (start + shown.len()).min(total_lines),
+                                    total_lines
+                                ),
+                                theme.role_style(StyleRole::TextMuted),
+                            )));
+                            for line in shown {
+                                m_lines.push(Line::from(vec![
+                                    Span::styled("  │ ", theme.role_style(StyleRole::TextMuted)),
+                                    Span::styled((*line).to_string(), theme.role_style(StyleRole::TextSecondary)),
+                                ]));
+                            }
+                            m_lines.push(Line::from(Span::styled(
+                                "  └─ click this message to collapse · scroll to read ─",
+                                theme.role_style(StyleRole::TextMuted),
+                            )));
+                        }
+                        Err(_) => m_lines.push(Line::from(Span::styled(
+                            "  text attachment is no longer available",
+                            theme.role_style(StyleRole::TextDanger),
+                        ))),
+                    }
+                }
             }
             // Image preview placeholder rows. The actual pixel rendering
             // is done in a second pass via `StatefulImage`; these blank
@@ -2392,6 +2460,8 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
             chunks.push_back(Chunk {
                 rows: m_lines,
                 preview: image_preview.clone(),
+                attachment_key,
+                attachment_body_offset,
             });
             prev = Some(m);
             prev_outgoing = Some(m.outgoing);
@@ -2401,10 +2471,16 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         // (oldest chunk first).
         let mut rows: Vec<Line> = Vec::with_capacity(lines_used);
         for chunk in &chunks {
+            let chunk_start = rows.len();
             rows.extend(chunk.rows.iter().cloned());
             if let Some(preview) = chunk.preview.as_ref() {
                 let top = rows.len().saturating_sub(preview.height as usize) as u16;
                 image_anchors.push((top, preview.clone()));
+            }
+            if let (Some(key), Some(offset)) = (chunk.attachment_key, chunk.attachment_body_offset) {
+                let start = chunk_start.saturating_add(offset) as u16;
+                let end = rows.len().saturating_sub(1) as u16;
+                state.attachment_rows.push((start, end, key));
             }
         }
         rows

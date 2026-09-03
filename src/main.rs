@@ -2306,7 +2306,7 @@ fn handle_mouse(
             }
             tui::Hit::Chat => {
                 s.focus = tui::Focus::Chat;
-                if let Some(index) = s.message_index_at_chat_row(areas.chat, m.row) {
+                if let Some(index) = s.attachment_at_chat_row(areas.chat, m.row) {
                     let attachment = s.messages.get(index).and_then(|message| {
                         message.image.as_ref().map(|meta| (meta.mime.clone(), meta.path.clone()))
                     });
