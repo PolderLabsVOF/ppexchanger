@@ -978,6 +978,15 @@ impl UiState {
         if let Some(peer_id) = selected_id {
             if let Some(index) = self.peers.iter().position(|peer| peer.peer_id == peer_id) {
                 self.selected_peer = index;
+            } else {
+                // The selected contact was removed (for example, after
+                // revoke). Do not leave a copy selection or scroll anchor
+                // pointing at a conversation that is no longer visible.
+                self.message_selection = None;
+                self.selecting_message = None;
+                self.active_chat_peer = None;
+                self.active_chat_message_count = 0;
+                self.scroll = 0;
             }
         }
         if self.selected_peer >= self.peers.len() {
@@ -2045,9 +2054,9 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
                 None
             };
             //
-            // Every bubble is left-aligned. Outgoing delivery state gets a
-            // padded right-hand chip so only the status reaches the pane
-            // edge; this keeps message text in a stable readable column.
+            // Peer bubbles are anchored to the left; our bubbles are anchored
+            // to the right. The delivery chip remains the final span so it
+            // sits at the far right of an outgoing row.
             if m.outgoing {
                 let chip_char = if m.pending { " ⏳" } else { " ✓" };
                 let chip_style = theme.role_style(StyleRole::TextMuted);
@@ -2057,17 +2066,14 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
                     Span::styled("  ", bubble),
                 ];
                 let chip = Span::styled(chip_char, chip_style);
-                let used = bubble_line.iter().map(Span::width).sum::<usize>() + chip.width();
-                let inner_width = area.width.saturating_sub(2) as usize;
-                bubble_line.push(Span::raw(" ".repeat(inner_width.saturating_sub(used))));
                 bubble_line.push(chip);
-                m_lines.push(Line::from(bubble_line).left_aligned());
+                m_lines.push(Line::from(bubble_line).right_aligned());
             } else {
                 let indent_style = Style::default().bg(theme.bg);
                 m_lines.push(Line::from(vec![
                     Span::styled("  ", indent_style),
                     Span::styled(m.body.clone(), Style::default().fg(theme.fg).bg(theme.bg)),
-                ]));
+                ]).left_aligned());
             }
             // Image preview placeholder rows. The actual pixel rendering
             // is done in a second pass via `StatefulImage`; these blank
