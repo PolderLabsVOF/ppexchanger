@@ -667,10 +667,28 @@ impl UiState {
                 name,
                 bytes,
                 saved_to,
-                ..
+                mime,
+                width,
+                height,
             } => {
                 self.file_offer = None;
-                if is_text_attachment(name) {
+                let image = if mime
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with("image/"))
+                    || is_image_attachment(name)
+                {
+                    let (detected_width, detected_height) = image::image_dimensions(saved_to).ok().unwrap_or((0, 0));
+                    Some(ImageMeta {
+                        path: saved_to.clone(),
+                        mime: mime.clone().unwrap_or_else(|| "image/*".into()),
+                        width: width.unwrap_or(detected_width),
+                        height: height.unwrap_or(detected_height),
+                        bytes: *bytes,
+                    })
+                } else {
+                    None
+                };
+                if image.is_none() && is_text_attachment(name) {
                     if let Ok(bytes) = std::fs::read(saved_to) {
                         let content: String = String::from_utf8_lossy(&bytes)
                             .chars()
@@ -698,7 +716,7 @@ impl UiState {
                     outgoing: false,
                     pending: false,
                     ts_unix: now_unix(),
-                    image: None,
+                    image,
                 });
             }
             Event::FileAborted {
@@ -1151,6 +1169,13 @@ fn is_text_attachment(name: &str) -> bool {
     .any(|suffix| lower.ends_with(suffix))
 }
 
+fn is_image_attachment(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+}
+
 /// Format a Unix timestamp as HH:MM (24-hour format).
 fn chrono_timestamp(ts: &Option<u64>) -> String {
     match ts {
@@ -1437,6 +1462,16 @@ impl Drop for TuiGuard {
         if !self.active {
             return;
         }
+        // Always reset terminal input modes, even if the configured mouse
+        // flag was false or teardown is happening after a partially failed
+        // setup. This prevents queued SGR mouse payloads from leaking into
+        // the shell prompt after ppx exits.
+        let mut out = stdout();
+        let _ = std::io::Write::write_all(
+            &mut out,
+            b"\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?25h",
+        );
+        let _ = std::io::Write::flush(&mut out);
         use crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
         use crossterm::terminal::LeaveAlternateScreen;
         if self.mouse_enabled {

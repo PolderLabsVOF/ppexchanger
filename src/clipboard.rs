@@ -339,14 +339,6 @@ mod tests {
     fn paste_returns_first_successful_tool() {
         // wl-paste returns PNG, the rest never get queried.
         let stub = StubSpawn::new(vec![
-            Ok(None),
-            Ok(None),
-            Ok(None),
-        ]);
-        // We've queued three fall-throughs but the first call returns
-        // Ok(None) which means we loop to the next tool. So set up a
-        // first-tool-wins script instead.
-        let stub = StubSpawn::new(vec![
             Ok(Some(png_1x1())),
             Ok(None),
             Ok(None),

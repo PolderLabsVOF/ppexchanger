@@ -411,6 +411,9 @@ impl InboundTransfer {
             name: self.offer.name.clone(),
             bytes: self.bytes_written,
             path: self.path.clone(),
+            mime: self.offer.mime.clone(),
+            width: self.offer.width,
+            height: self.offer.height,
         })
     }
 
@@ -448,6 +451,9 @@ pub struct InboundInfo {
     pub name: String,
     pub bytes: u64,
     pub path: PathBuf,
+    pub mime: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 #[derive(Debug)]

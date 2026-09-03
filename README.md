@@ -362,7 +362,7 @@ ppx --name alice         # override display name
 ppx --port 7777          # bind a specific TCP port
 ppx --theme amber        # default | solarized | monochrome | neon | amber
 ppx --config /tmp/c.toml # alternate config path
-ppx --no-mouse           # disable mouse capture (default is ON)
+ppx --no-mouse           # explicitly keep native terminal mouse selection
 ppx --gen-identity       # print fingerprint + peer_id and exit
 ppx --version
 ppx --help
@@ -451,10 +451,10 @@ plus a `Peers` shortcut that focuses the sidebar.
 
 ### Mouse
 
-Mouse capture is **on by default** — the sidebar, chat pane, scroll
-wheel, and the settings popup are all clickable out of the box. If you
-need native drag-select (e.g. inside tmux), disable capture with
-`--no-mouse` or `mouse = false` in your `config.toml`. With capture on:
+Native terminal mouse selection is **on by default** so chat text can be
+selected and copied exactly like normal terminal output. Set
+`mouse = true` in `config.toml` when you prefer clickable panes and
+scroll-wheel navigation. With capture on:
 
 * Left-click a row in the sidebar to select that peer and focus the sidebar.
 * Left-click the chat pane to focus the chat.
@@ -478,8 +478,8 @@ config back to `config.toml`. Click the right half of any row to apply
 the same as `Enter`. The popup renders a `Tabs` widget for sub-nav and
 a `Table` for the rows — both with the active theme's accent color.
 
-Capture breaks tmux / native drag-select inside the TUI; run with
-`--no-mouse` to recover native selection.
+Mouse capture temporarily replaces the terminal's native drag selection;
+run with `--no-mouse` to recover it.
 
 ### Pasting
 
@@ -492,6 +492,11 @@ Pastes of 20 or more lines are offered as encrypted `.txt` attachments
 instead of giant chat bubbles. The recipient can preview the first lines in
 the offer, accept the download, and review the complete file at the saved
 path after transfer.
+
+PNG and JPEG images can be pasted with `/paste-image` or dragged from a file
+manager into the composer. The receiver gets an inline terminal preview after
+accepting the encrypted transfer; the original is kept under the received
+files directory.
 
 ## Discovery
 
@@ -547,7 +552,7 @@ The TUI ships a retro amber-phosphor CRT vibe out of the box:
 [ui]
 theme = "default"        # default | solarized | monochrome | neon | amber
 show_footer = true
-mouse = true
+mouse = false              # preserve native terminal selection by default
 scrollback = 500          # max chat history lines; clamped to 16..50_000
 ```
 

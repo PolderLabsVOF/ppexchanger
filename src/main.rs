@@ -8,7 +8,7 @@
 //!   * `--port <port>`       override TCP listen port (default: 0 = ephemeral)
 //!   * `--theme <name>`      override theme for this run
 //!   * `--config <path>`     override config path
-//!   * `--no-mouse`          disable mouse capture
+//!   * `--no-mouse`          disable mouse capture (also the default)
 //!   * no flags              start the TUI
 
 use ppexchanger::config::{config_dir, history_path, identity_path};
@@ -190,27 +190,6 @@ fn hex(b: &[u8]) -> String {
         s.push_str(&format!("{:02x}", x));
     }
     s
-}
-
-/// Copy selected chat text using the terminal-native OSC-52 clipboard
-/// protocol. This keeps copy support dependency-free and works over SSH in
-/// terminals that permit clipboard forwarding.
-fn copy_to_terminal_clipboard(text: &str) {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = text.as_bytes();
-    let mut encoded = String::with_capacity((bytes.len() + 2) / 3 * 4);
-    for chunk in bytes.chunks(3) {
-        let a = chunk[0] as usize;
-        let b = chunk.get(1).copied().unwrap_or(0) as usize;
-        let c = chunk.get(2).copied().unwrap_or(0) as usize;
-        encoded.push(TABLE[a >> 2] as char);
-        encoded.push(TABLE[((a & 0x03) << 4) | (b >> 4)] as char);
-        encoded.push(if chunk.len() > 1 { TABLE[((b & 0x0f) << 2) | (c >> 6)] as char } else { '=' });
-        encoded.push(if chunk.len() > 2 { TABLE[c & 0x3f] as char } else { '=' });
-    }
-    let mut stdout = std::io::stdout();
-    let _ = stdout.write_all(format!("\x1b]52;c;{}\x07", encoded).as_bytes());
-    let _ = stdout.flush();
 }
 
 /// Best-effort desktop notification for an inbound message. The in-app toast
@@ -1048,6 +1027,9 @@ fn start_tui(
                                         name: info.name,
                                         bytes: info.bytes,
                                         saved_to: info.path,
+                                        mime: info.mime,
+                                        width: info.width,
+                                        height: info.height,
                                     });
                                 }
                                 FinalizeOutcome::Failed(_e) => {
@@ -1652,26 +1634,6 @@ fn start_tui(
                         false
                     };
                     if !navigated_sidebar {
-                        let copied = if let crossterm::event::Event::Key(key) = &ev {
-                            if key.kind == crossterm::event::KeyEventKind::Press
-                                && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-                                && matches!(
-                                    key.code,
-                                    crossterm::event::KeyCode::Char('c')
-                                        | crossterm::event::KeyCode::Char('C')
-                                )
-                            {
-                                state.lock().unwrap().take_selected_message_text()
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                        if let Some(text) = copied {
-                        copy_to_terminal_clipboard(&text);
-                        state.lock().unwrap().status = "message copied to clipboard".into();
-                        } else {
                         match editor.on_key(&ev) {
                         ppexchanger::tui::EditorEvent::SubmitTextFile(text) => {
                             if let Some(target) = resolve_target(&state, "") {
@@ -1724,13 +1686,29 @@ fn start_tui(
                                 // it as a FileOffer. Otherwise fall
                                 // through to plain text.
                                 let body = strip_routing(&text);
-                                if let Some(path) = looks_like_existing_file(&body) {
+                                let dropped_path = dropped_file_path(&body);
+                                if let Some(path) = dropped_path.or_else(|| looks_like_existing_file(&body)) {
+                                    let image_meta = image_file_metadata(&path);
+                                    if let Some((mime, width, height)) = image_meta.as_ref() {
+                                        if let Ok(meta) = std::fs::metadata(&path) {
+                                            state.lock().unwrap().push_outgoing_image(
+                                                target,
+                                                ppexchanger::tui::ImageMeta {
+                                                    path: path.clone(),
+                                                    mime: mime.clone(),
+                                                    width: *width,
+                                                    height: *height,
+                                                    bytes: meta.len(),
+                                                },
+                                            );
+                                        }
+                                    }
                                     let _ = bus.tx_actions.send(Action::SendFile {
                                         to: target,
                                         path,
-                                        mime: None,
-                                        width: None,
-                                        height: None,
+                                        mime: image_meta.as_ref().map(|(mime, _, _)| mime.clone()),
+                                        width: image_meta.as_ref().map(|(_, width, _)| *width),
+                                        height: image_meta.as_ref().map(|(_, _, height)| *height),
                                         persist_to: None,
                                     });
                                 } else {
@@ -1864,7 +1842,6 @@ fn start_tui(
                     ppexchanger::tui::EditorEvent::Edited
                     | ppexchanger::tui::EditorEvent::MenuAction(_)
                     | ppexchanger::tui::EditorEvent::None => {}
-                        }
                     }
                     }
                     // File-offer modal: Enter accepts, Esc rejects.
@@ -2119,9 +2096,6 @@ fn handle_mouse(
             }
             tui::Hit::Chat => {
                 s.focus = tui::Focus::Chat;
-                if let Some(index) = s.message_index_at_chat_row(areas.chat, m.row) {
-                    s.begin_message_selection(index);
-                }
             }
             tui::Hit::Footer => {
                 // Clicks in the footer (input line) intentionally
@@ -2142,12 +2116,6 @@ fn handle_mouse(
                 return Some(ppexchanger::tui::EditorEvent::MenuAction(action));
             }
         },
-        MouseEventKind::Drag(MouseButton::Left) if matches!(&hit, tui::Hit::Chat) => {
-            if let Some(index) = s.message_index_at_chat_row(areas.chat, m.row) {
-                s.extend_message_selection(index);
-            }
-        }
-        MouseEventKind::Up(MouseButton::Left) => s.finish_message_selection(),
         MouseEventKind::ScrollUp if s.focus == tui::Focus::Chat => s.scroll_back(2),
         MouseEventKind::ScrollDown if s.focus == tui::Focus::Chat => s.scroll_forward(2),
         _ => {}
@@ -2182,6 +2150,59 @@ fn looks_like_existing_file(body: &str) -> Option<PathBuf> {
         return None;
     }
     Some(p.to_path_buf())
+}
+
+/// Terminals commonly deliver a file-manager drag as a `file://` URI through
+/// bracketed paste. Decode that URI without pulling in a URL dependency and
+/// only accept an existing regular file.
+fn dropped_file_path(body: &str) -> Option<PathBuf> {
+    let token = body.trim().trim_matches('<').trim_matches('>');
+    let encoded = token.strip_prefix("file://")?;
+    // `file://localhost/tmp/x` is the URI form for a local POSIX path;
+    // preserve the leading slash after removing the optional host.
+    let encoded = encoded
+        .strip_prefix("localhost/")
+        .map(|rest| format!("/{}", rest))
+        .unwrap_or_else(|| encoded.to_string());
+    let decoded = percent_decode(&encoded)?;
+    let path = if cfg!(windows) && decoded.starts_with('/') {
+        PathBuf::from(decoded.trim_start_matches('/'))
+    } else {
+        PathBuf::from(decoded)
+    };
+    path.is_file().then_some(path)
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = (bytes[index + 1] as char).to_digit(16)? as u8;
+            let lo = (bytes[index + 2] as char).to_digit(16)? as u8;
+            out.push((hi << 4) | lo);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn image_file_metadata(path: &PathBuf) -> Option<(String, u32, u32)> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        _ => return None,
+    };
+    let (width, height) = image::image_dimensions(path).ok()?;
+    Some((mime.into(), width, height))
 }
 
 
@@ -2411,6 +2432,23 @@ fn handle_command(
                     let persist = ppexchanger::config::config_dir()
                         .ok()
                         .map(|cfg| cfg.join("sent").join(&tmp_name));
+                    {
+                        let mut s = state.lock().unwrap();
+                        s.push_outgoing_image(
+                            to,
+                            ppexchanger::tui::ImageMeta {
+                                // Keep the local echo pointed at the live
+                                // temporary source so the preview renders
+                                // immediately. The action thread copies it
+                                // to `persist` after the transfer completes.
+                                path: tmp_path.clone(),
+                                mime: img.mime.clone(),
+                                width: img.width,
+                                height: img.height,
+                                bytes: img.bytes.len() as u64,
+                            },
+                        );
+                    }
                     let _ = tx_actions.send(Action::SendFile {
                         to,
                         path: tmp_path,
@@ -2630,6 +2668,35 @@ mod tests {
         let s = dir.to_str().unwrap();
         // An existing directory must not be accepted; only regular files.
         assert_eq!(looks_like_existing_file(s), None);
+    }
+
+    #[test]
+    fn dropped_file_uri_decodes_spaces_and_localhost() {
+        let dir = std::env::temp_dir().join(format!(
+            "ppx-drop-{}-{}",
+            std::process::id(),
+            rand_u64()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a picture.png");
+        std::fs::write(&path, b"not a real image").unwrap();
+        let encoded = path.to_string_lossy().replace(' ', "%20");
+        assert_eq!(
+            dropped_file_path(&format!("file://{}", encoded)),
+            Some(path.clone())
+        );
+        let localhost = encoded.trim_start_matches('/');
+        assert_eq!(
+            dropped_file_path(&format!("file://localhost/{}", localhost)),
+            Some(path.clone())
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dropped_file_uri_rejects_malformed_escape_and_directories() {
+        assert_eq!(dropped_file_path("file:///tmp/bad%2"), None);
+        assert_eq!(dropped_file_path("file:///tmp/"), None);
     }
 
     fn rand_u64() -> u64 {

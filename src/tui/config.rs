@@ -93,11 +93,11 @@ impl Default for UiConfig {
         Self {
             theme: ThemeName::Default,
             show_footer: true,
-            // Mouse capture is on by default — clicking the sidebar, the
-            // chat pane, and the settings popup is the main interaction.
-            // Disable with `--no-mouse` or `mouse = false` in config.toml
-            // when you need native drag-select (e.g. inside tmux).
-            mouse: true,
+            // Leave mouse reporting off by default so the terminal keeps
+            // native drag-selection and copy behavior for chat text. Enable
+            // it with `mouse = true` when pane clicks and wheel scrolling
+            // are preferred.
+            mouse: false,
             scrollback: DEFAULT_SCROLLBACK,
             notify_sound: false,
             auto_trust_seen: false,
@@ -266,8 +266,8 @@ mod tests {
         let c = UiConfig::parse("").unwrap();
         assert_eq!(c.theme, ThemeName::Default);
         assert!(c.show_footer);
-        // Mouse capture defaults to ON — see Default impl.
-        assert!(c.mouse);
+        // Native terminal selection is preserved by default.
+        assert!(!c.mouse);
         assert_eq!(c.scrollback, DEFAULT_SCROLLBACK);
         // v0.5.0 settings: all the new toggles default to off / conservative.
         assert!(!c.notify_sound);

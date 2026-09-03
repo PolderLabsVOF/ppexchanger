@@ -102,6 +102,9 @@ pub enum Event {
         name: String,
         bytes: u64,
         saved_to: PathBuf,
+        mime: Option<String>,
+        width: Option<u32>,
+        height: Option<u32>,
     },
     /// A transfer (outbound or inbound) was aborted. `reason` is
     /// human-readable; `partial` is set to the on-disk path if any

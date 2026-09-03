@@ -731,7 +731,7 @@ mod tests {
 
         let def = UiConfig::default();
         assert_eq!(cfg.theme, def.theme);
-        assert!(cfg.mouse);
+        assert!(!cfg.mouse);
         assert!(cfg.show_footer);
         assert_eq!(cfg.scrollback, DEFAULT_SCROLLBACK);
         assert!(!cfg.notify_sound);
