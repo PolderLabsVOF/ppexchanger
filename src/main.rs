@@ -1813,7 +1813,7 @@ fn start_tui(
                             }
                         }
                         ppexchanger::tui::EditorEvent::Submit(text) => {
-                            if text.starts_with('/') {
+                            if is_known_slash_command(&text) {
                                 handle_command(
                                     &text,
                                     &bus.tx_events,
@@ -2410,6 +2410,18 @@ fn strip_routing(text: &str) -> String {
     text.to_string()
 }
 
+/// Absolute filesystem paths also begin with `/`; only dispatch the input to
+/// the command router when its first token is a command ppx actually knows.
+/// This keeps a dragged `/home/.../picture.png` path on the file-transfer
+/// path instead of reporting "unknown command".
+fn is_known_slash_command(text: &str) -> bool {
+    let command = text.split_whitespace().next().unwrap_or_default();
+    ppexchanger::tui::input::COMMANDS
+        .iter()
+        .any(|(known, _)| *known == command)
+        || command == "/paste-image"
+}
+
 /// `/theme <name>` switches the active theme and persists it; `/peers`,
 /// `/trust <name>`, `/revoke <name>`, `/discover`, `/quit` are passthrough
 /// commands. `/discover` opens the modal and spawns a UDP multicast scan +
@@ -2829,6 +2841,14 @@ mod tests {
         let s = dir.to_str().unwrap();
         // An existing directory must not be accepted; only regular files.
         assert_eq!(looks_like_existing_file(s), None);
+    }
+
+    #[test]
+    fn absolute_paths_are_not_misclassified_as_commands() {
+        assert!(!is_known_slash_command("/home/alice/Pictures/photo.png"));
+        assert!(is_known_slash_command("/send /home/alice/Pictures/photo.png"));
+        assert!(is_known_slash_command("/paste-image"));
+        assert!(!is_known_slash_command("/unknown-command"));
     }
 
     #[test]

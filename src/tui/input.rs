@@ -98,6 +98,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/revoke", "revoke a peer: /revoke <name>"),
     ("/theme", "change the color theme"),
     ("/send", "send a file: /send <path>"),
+    ("/paste-image", "send an image from the clipboard"),
     ("/settings", "open settings"),
     ("/clear", "clear all chat messages"),
     ("/quit", "quit ppexchanger"),
