@@ -60,6 +60,11 @@ the `latest` npm channel; beta and RC releases use the `beta` channel. The
 repository is configured for npm trusted publishing (OIDC), so no long-lived
 npm token is required.
 
+The one-time npm setup is in the package settings: add this GitHub repository
+and the `release.yml` workflow as a trusted publisher for `ppexchanger`. A
+repository `NPM_TOKEN` secret can be used instead when trusted publishing is
+not available.
+
 ### npm
 
 Install the native binary through npm (the command installed is still `ppx`):

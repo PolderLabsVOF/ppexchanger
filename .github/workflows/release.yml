@@ -216,7 +216,9 @@ jobs:
 
   publish:
     name: publish release
-    needs: [validate, build]
+    # Publish npm first so a missing/invalid npm credential cannot leave a
+    # GitHub release that users cannot install through npm.
+    needs: [validate, build, publish-npm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -265,7 +267,7 @@ jobs:
 
   publish-npm:
     name: publish npm package
-    needs: [validate, publish]
+    needs: [validate, build]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -283,7 +285,14 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TAG: ${{ needs.validate.outputs.npm_tag }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          EXPECTED_VERSION="${RELEASE_TAG#v}"
+          if [[ "$PACKAGE_VERSION" != "$EXPECTED_VERSION" ]]; then
+            echo "npm package version $PACKAGE_VERSION does not match release tag $RELEASE_TAG"
+            exit 1
+          fi
           # Preferred authentication is npm trusted publishing (OIDC). For
           # repositories that still use a token, NPM_TOKEN is supported as a
           # fallback without changing the workflow.
