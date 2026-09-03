@@ -1,6 +1,7 @@
 {
   "name": "ppexchanger",
-  "version": "0.7.2",
+  "version": "0.7.3",
+  "nativeVersion": "0.7.2",
   "description": "A private, encrypted LAN messenger for your terminal",
   "license": "MIT",
   "repository": {

@@ -10,7 +10,9 @@ const https = require('https');
 const cp = require('child_process');
 
 const pkg = require('../package.json');
-const version = String(process.env.PPX_VERSION || pkg.version).replace(/^v/, '');
+// The npm wrapper can ship a small packaging fix without requiring a new
+// native release. PPX_VERSION remains an explicit override for pinning.
+const version = String(process.env.PPX_VERSION || pkg.nativeVersion || pkg.version).replace(/^v/, '');
 const targets = {
   'linux:x64': 'x86_64-unknown-linux-gnu',
   'linux:arm64': 'aarch64-unknown-linux-gnu',
