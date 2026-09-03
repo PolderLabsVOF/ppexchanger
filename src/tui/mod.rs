@@ -174,6 +174,11 @@ pub struct UiState {
     /// Identity of the text attachment currently expanded inline in chat.
     expanded_text: Option<(PeerId, u64, bool)>,
     expanded_text_offset: usize,
+    /// Largest valid source-line offset for the expanded text viewport. This
+    /// is refreshed by `draw_chat` once the terminal height is known, keeping
+    /// wheel/PageUp scrolling bounded to the actual content instead of
+    /// allowing the preview to drift into an almost-empty final line.
+    expanded_text_max_offset: usize,
     /// Exact rendered row ranges for file attachments. Used by mouse hit
     /// testing so clicks on empty chat space never open or expand anything.
     attachment_rows: Vec<(u16, u16, (PeerId, u64, bool))>,
@@ -362,6 +367,7 @@ impl UiState {
             text_preview: None,
             expanded_text: None,
             expanded_text_offset: 0,
+            expanded_text_max_offset: 0,
             attachment_rows: Vec::new(),
             discovery: None,
             settings: None,
@@ -841,6 +847,7 @@ impl UiState {
         self.selecting_message = None;
         self.expanded_text = None;
         self.expanded_text_offset = 0;
+        self.expanded_text_max_offset = 0;
         self.attachment_rows.clear();
         self.history_dirty = true;
     }
@@ -1101,9 +1108,11 @@ impl UiState {
         if self.expanded_text == Some(key) {
             self.expanded_text = None;
             self.expanded_text_offset = 0;
+            self.expanded_text_max_offset = 0;
         } else {
             self.expanded_text = Some(key);
             self.expanded_text_offset = 0;
+            self.expanded_text_max_offset = 0;
         }
         self.scroll = 0;
         true
@@ -1227,6 +1236,7 @@ impl UiState {
         self.selecting_message = None;
         self.expanded_text = None;
         self.expanded_text_offset = 0;
+        self.expanded_text_max_offset = 0;
         self.attachment_rows.clear();
     }
 
@@ -1239,7 +1249,10 @@ impl UiState {
 
     pub fn scroll_back(&mut self, lines: usize) {
         if self.expanded_text.is_some() {
-            self.expanded_text_offset = self.expanded_text_offset.saturating_add(lines);
+            self.expanded_text_offset = self
+                .expanded_text_offset
+                .saturating_add(lines)
+                .min(self.expanded_text_max_offset);
             return;
         }
         // Cap so the viewport at the top of history stays full of the
@@ -2390,14 +2403,23 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
                         Ok(content) => {
                             let all_lines: Vec<&str> = content.lines().collect();
                             let total_lines = all_lines.len();
-                            let start = state
-                                .expanded_text_offset
-                                .min(total_lines.saturating_sub(1));
                             // Keep the expanded chunk bounded to the current
                             // viewport. PageUp/PageDown and the mouse wheel
                             // move this window through the complete file.
                             let room = budget.saturating_sub(m_lines.len() + 2).max(1);
-                            let shown = all_lines.iter().skip(start).take(room);
+                            // Clamp to the last *full* viewport. Previously
+                            // the offset could grow without bound, leaving
+                            // only the final source line visible and making
+                            // wheel scrolling appear to jump or stop. Store
+                            // the bound on state so input events can apply it
+                            // before the next frame is drawn.
+                            let max_offset = total_lines.saturating_sub(room);
+                            state.expanded_text_max_offset = max_offset;
+                            state.expanded_text_offset = state
+                                .expanded_text_offset
+                                .min(max_offset);
+                            let start = state.expanded_text_offset;
+                            let shown: Vec<&str> = all_lines.iter().skip(start).take(room).copied().collect();
                             m_lines.push(Line::from(Span::styled(
                                 format!(
                                     "  ┌─ pasted text · lines {}–{} of {} ─────────",
@@ -3165,6 +3187,30 @@ mod tests {
         assert_eq!(s.scroll, 8);
         s.scroll_forward(99);
         assert_eq!(s.scroll, 0);
+    }
+
+    #[test]
+    fn expanded_text_scroll_stays_inside_viewport() {
+        let id = Identity {
+            peer_id: [0u8; 16],
+            keypair: crate::crypto::Keypair::generate(),
+            name: "alice".into(),
+            hostname: "test-host".into(),
+        };
+        let mut s = UiState::from_identity(&id);
+        s.expanded_text = Some(([1u8; 16], 42, false));
+        // A 12-line attachment rendered into a six-line viewport has six
+        // valid starting positions (0..=6). Large wheel bursts must stop at
+        // the final full viewport rather than exposing a lone trailing line.
+        s.expanded_text_max_offset = 6;
+        s.scroll_back(99);
+        assert_eq!(s.expanded_text_offset, 6);
+        s.scroll_back(2);
+        assert_eq!(s.expanded_text_offset, 6);
+        s.scroll_forward(3);
+        assert_eq!(s.expanded_text_offset, 3);
+        s.scroll_forward(99);
+        assert_eq!(s.expanded_text_offset, 0);
     }
 
     #[test]
