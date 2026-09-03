@@ -2,6 +2,14 @@
 
 All notable ppexchanger updates are listed here in plain language.
 
+## 0.7.4 — 2026-09-03
+
+### Reliable releases
+
+- Stable releases now publish the matching npm launcher automatically.
+- Install the latest version with one global npm command, without script approval prompts.
+- Release checks keep the native app and npm launcher versions in sync.
+
 ## 0.7.2 — 2026-09-03
 
 ### Cleaner npm installs
