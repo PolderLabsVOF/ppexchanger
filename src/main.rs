@@ -2281,11 +2281,14 @@ fn handle_mouse(
 /// stray word like `pdf` from being treated as a filename.
 fn looks_like_existing_file(body: &str) -> Option<PathBuf> {
     use std::path::{Component, Path};
-    let trimmed = body.trim();
+    let trimmed = body
+        .trim()
+        .trim_matches(['"', '\''])
+        .replace("\\ ", " ");
     if trimmed.is_empty() {
         return None;
     }
-    let p = Path::new(trimmed);
+    let p = Path::new(&trimmed);
     let looks_like_path = p.components().count() > 1
         || trimmed.starts_with('~')
         || trimmed.starts_with("./")
@@ -2313,7 +2316,11 @@ fn dropped_file_path(body: &str) -> Option<PathBuf> {
     let token = body
         .lines()
         .map(str::trim)
-        .map(|line| line.trim_matches('<').trim_matches('>'))
+        .map(|line| {
+            line.trim_matches('<')
+                .trim_matches('>')
+                .trim_matches(['"', '\''])
+        })
         .find(|line| line.starts_with("file://"))?;
     let encoded = token.strip_prefix("file://")?;
     // `file://localhost/tmp/x` is the URI form for a local POSIX path;
@@ -2532,15 +2539,7 @@ fn handle_command(
             let path = PathBuf::from(rest.trim());
             let pid = {
                 let s = state.lock().unwrap();
-                s.selected()
-                    .filter(|p| p.state == tui::PeerState::Connected)
-                    .map(|p| p.peer_id)
-                    .or_else(|| {
-                        s.peers
-                            .iter()
-                            .find(|p| p.state == tui::PeerState::Connected)
-                            .map(|p| p.peer_id)
-                    })
+                s.selected().map(|p| p.peer_id)
             };
             if let Some(to) = pid {
                 let _ = tx_actions.send(Action::SendFile {
@@ -2552,9 +2551,7 @@ fn handle_command(
                     persist_to: None,
                 });
             } else {
-                let _ = tx_events.send(Event::Info(
-                    "/send: no connected peer selected".into(),
-                ));
+                let _ = tx_events.send(Event::Info("/send: no peer selected".into()));
             }
         }
         "/settings" => {
@@ -2571,19 +2568,11 @@ fn handle_command(
             // being wiped.
             let pid = {
                 let s = state.lock().unwrap();
-                s.selected()
-                    .filter(|p| p.state == tui::PeerState::Connected)
-                    .map(|p| p.peer_id)
-                    .or_else(|| {
-                        s.peers
-                            .iter()
-                            .find(|p| p.state == tui::PeerState::Connected)
-                            .map(|p| p.peer_id)
-                    })
+                s.selected().map(|p| p.peer_id)
             };
             let Some(to) = pid else {
                 let _ = tx_events.send(Event::Info(
-                    "/paste-image: no connected peer selected".into(),
+                    "/paste-image: no peer selected".into(),
                 ));
                 return;
             };
