@@ -363,6 +363,7 @@ ppx --port 7777          # bind a specific TCP port
 ppx --theme amber        # default | solarized | monochrome | neon | amber
 ppx --config /tmp/c.toml # alternate config path
 ppx --no-mouse           # explicitly keep native terminal mouse selection
+ppx update               # install the latest release (source-build fallback)
 ppx --gen-identity       # print fingerprint + peer_id and exit
 ppx --version
 ppx --help
@@ -573,8 +574,9 @@ above the `[ui]` header in a non-overwritten file.
   <name>` to mark a peer as verified (typically after checking their
   fingerprint out-of-band). The trusted/untrusted flag persists in
   peerdb.
-- **No server, no telemetry, no update channel** — the binary doesn't
-  phone home. Run `ppx --gen-identity` to dump your fingerprint for
+- **No server, no telemetry** — normal operation never phones home. The
+  explicit `ppx update` command only contacts GitHub to fetch a release or
+  source tree. Run `ppx --gen-identity` to dump your fingerprint for
   out-of-band verification with a peer before you `/trust` them.
 
 ## Layout

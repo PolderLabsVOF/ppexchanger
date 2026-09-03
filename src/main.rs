@@ -9,6 +9,7 @@
 //!   * `--theme <name>`      override theme for this run
 //!   * `--config <path>`     override config path
 //!   * `--no-mouse`          disable mouse capture (also the default)
+//!   * `update`              install the latest release (build from source if needed)
 //!   * no flags              start the TUI
 
 use ppexchanger::config::{config_dir, history_path, identity_path};
@@ -110,6 +111,7 @@ fn main() {
             }
             "--no-mouse" => mouse_override = Some(false),
             "--gen-identity" => mode = Mode::GenIdentity,
+            "update" => mode = Mode::Update,
             other => {
                 eprintln!("unknown argument: {}", other);
                 print_help();
@@ -131,6 +133,7 @@ fn main() {
 enum Mode {
     Tui,
     GenIdentity,
+    Update,
 }
 
 fn print_help() {
@@ -143,7 +146,110 @@ fn print_help() {
                     Linux/macOS, %APPDATA%\\ppexchanger\\config.toml on Windows)\n  --no-mouse        disable mouse capture (mouse is ON by default)\n  --gen-identity    generate a new identity and exit\n  --help, -h        print this help\n  --version, -V     print version",
         version = VERSION
     );
-    println!("{}", help.replace("mouse is ON by default", "native terminal selection is the default"));
+    println!(
+        "{}",
+        help.replace("mouse is ON by default", "native terminal selection is the default")
+            .replace(
+                "  ppx --gen-identity",
+                "  ppx update\n  ppx --gen-identity",
+            )
+    );
+}
+
+/// Update the installed binary from the latest GitHub release. The release
+/// installer performs target detection, checksum verification, and atomic
+/// replacement. If a prebuilt asset is unavailable (or curl/bash is missing),
+/// fall back to a locked source build so `ppx update` remains useful on new
+/// architectures and development platforms.
+fn update_install() {
+    const INSTALLER_URL: &str =
+        "https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh";
+    let stamp = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let script = std::env::temp_dir().join(format!("ppx-update-{}-{}.sh", std::process::id(), stamp));
+    let install_dir = preferred_install_dir();
+    let downloaded = std::process::Command::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--retry",
+            "3",
+            "--max-time",
+            "120",
+            INSTALLER_URL,
+            "--output",
+        ])
+        .arg(&script)
+        .status()
+        .is_ok_and(|status| status.success());
+    if downloaded {
+        let mut command = std::process::Command::new("bash");
+        command.arg(&script).args(["--yes", "--method", "binary"]);
+        if let Some(dir) = install_dir.as_ref() {
+            command.env("PPX_INSTALL_DIR", dir);
+        }
+        if command.status().is_ok_and(|status| status.success()) {
+            let _ = std::fs::remove_file(&script);
+            println!("ppx updated successfully");
+            return;
+        }
+        eprintln!("prebuilt update unavailable; trying a source build…");
+    } else {
+        eprintln!("could not download the release installer; trying a source build…");
+    }
+    let _ = std::fs::remove_file(&script);
+
+    let source = std::env::temp_dir().join(format!("ppx-update-src-{}-{}", std::process::id(), stamp));
+    let cloned = std::process::Command::new("git")
+        .args([
+            "clone",
+            "--depth",
+            "1",
+            "https://github.com/PolderLabsVOF/ppexchanger.git",
+        ])
+        .arg(&source)
+        .status()
+        .is_ok_and(|status| status.success());
+    if !cloned {
+        let _ = std::fs::remove_dir_all(&source);
+        eprintln!("ppx update failed: git is unavailable or the repository could not be cloned");
+        return;
+    }
+    let target_bin = install_dir.unwrap_or_else(|| {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".local")
+            .join("bin")
+    });
+    let root = target_bin
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let built = std::process::Command::new("cargo")
+        .current_dir(&source)
+        .args(["install", "--path", ".", "--locked", "--root"])
+        .arg(&root)
+        .status()
+        .is_ok_and(|status| status.success());
+    let _ = std::fs::remove_dir_all(&source);
+    if built {
+        println!("ppx updated successfully from source");
+    } else {
+        eprintln!("ppx update failed: cargo source build did not complete");
+    }
+}
+
+fn preferred_install_dir() -> Option<PathBuf> {
+    let path = std::env::current_exe().ok()?;
+    let parent = path.parent()?.to_path_buf();
+    let is_cargo_target = parent.file_name().is_some_and(|name| name == "debug" || name == "release")
+        && parent.parent().and_then(|path| path.file_name()).is_some_and(|name| name == "target");
+    (!is_cargo_target).then_some(parent)
 }
 
 fn run(
@@ -154,6 +260,10 @@ fn run(
     config_override: Option<PathBuf>,
     mouse_override: Option<bool>,
 ) {
+    if matches!(mode, Mode::Update) {
+        update_install();
+        return;
+    }
     // First-run migration from the v0.4.x `lanchat/` config dir. Best-effort:
     // a permission error just prints to stderr and we continue with the new
     // (empty) dir. Idempotent — a no-op once the files have been copied.
@@ -181,6 +291,7 @@ fn run(
             return;
         }
         Mode::Tui => {}
+        Mode::Update => unreachable!("update handled before identity loading"),
     }
     start_tui(id, port, theme_override, config_override, mouse_override);
 }

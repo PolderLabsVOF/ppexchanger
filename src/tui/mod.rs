@@ -48,7 +48,7 @@ use ratatui::widgets::{
 use ratatui::Terminal;
 use std::collections::VecDeque;
 use std::io::{stdout, Stdout};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Layout constants shared between `render()` and `hit_test()`. The
 /// sidebar has room for connection metadata; the body always retains a
@@ -1413,15 +1413,33 @@ pub fn enter_terminal(
 ) -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
     use crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
     use crossterm::terminal::{EnterAlternateScreen, SetTitle};
-    crossterm::terminal::enable_raw_mode()?;
     let mut out = stdout();
+    reset_terminal_input_modes(&mut out);
+    crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(out, EnableBracketedPaste)?;
     if mouse_enabled {
         crossterm::execute!(out, EnableMouseCapture)?;
     }
     crossterm::execute!(out, EnterAlternateScreen, SetTitle("ppexchanger"))?;
+    // A previous crash can leave mouse reports queued in the pty. Consume
+    // only those stale mouse events before the first frame; never discard a
+    // key or paste that belongs to the new session.
+    while crossterm::event::poll(Duration::ZERO).unwrap_or(false) {
+        match crossterm::event::read() {
+            Ok(crossterm::event::Event::Mouse(_)) => {}
+            Ok(_) | Err(_) => break,
+        }
+    }
     let backend = CrosstermBackend::new(out);
     Terminal::new(backend)
+}
+
+fn reset_terminal_input_modes(out: &mut Stdout) {
+    let _ = std::io::Write::write_all(
+        out,
+        b"\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l",
+    );
+    let _ = std::io::Write::flush(out);
 }
 
 /// Restore the terminal to its previous state. The teardown mirrors
@@ -1467,11 +1485,21 @@ impl Drop for TuiGuard {
         // setup. This prevents queued SGR mouse payloads from leaking into
         // the shell prompt after ppx exits.
         let mut out = stdout();
-        let _ = std::io::Write::write_all(
-            &mut out,
-            b"\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?25h",
-        );
+        reset_terminal_input_modes(&mut out);
+        let _ = std::io::Write::write_all(&mut out, b"\x1b[?25h");
         let _ = std::io::Write::flush(&mut out);
+        // Discard any mouse reports already buffered by the terminal while
+        // raw mode is still active, otherwise the shell will print their
+        // numeric SGR payload after LeaveAlternateScreen.
+        let deadline = Instant::now() + Duration::from_millis(30);
+        while Instant::now() < deadline {
+            if !crossterm::event::poll(Duration::from_millis(2)).unwrap_or(false) {
+                break;
+            }
+            if !matches!(crossterm::event::read(), Ok(crossterm::event::Event::Mouse(_))) {
+                break;
+            }
+        }
         use crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
         use crossterm::terminal::LeaveAlternateScreen;
         if self.mouse_enabled {
