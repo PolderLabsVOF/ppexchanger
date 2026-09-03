@@ -1502,9 +1502,9 @@ impl Drop for TuiGuard {
         }
         use crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
         use crossterm::terminal::LeaveAlternateScreen;
-        if self.mouse_enabled {
-            let _ = crossterm::execute!(stdout(), DisableMouseCapture);
-        }
+        // Emit the typed command even when our state says capture was off;
+        // this also cleans up a mode left behind by an earlier crashed run.
+        let _ = crossterm::execute!(stdout(), DisableMouseCapture);
         let _ = crossterm::execute!(stdout(), DisableBracketedPaste, LeaveAlternateScreen);
         // crossterm 0.28 dropped the typed `ShowCursor` command; emit
         // the raw escape sequence instead. DCS show-cursor = ESC [ ? 25 h.

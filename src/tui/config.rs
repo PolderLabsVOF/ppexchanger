@@ -93,11 +93,11 @@ impl Default for UiConfig {
         Self {
             theme: ThemeName::Default,
             show_footer: true,
-            // Leave mouse reporting off by default so the terminal keeps
-            // native drag-selection and copy behavior for chat text. Enable
-            // it with `mouse = true` when pane clicks and wheel scrolling
-            // are preferred.
-            mouse: false,
+            // Mouse reporting keeps pane clicks and wheel scrolling usable.
+            // Native terminal selection remains available through the
+            // terminal's Shift-drag bypass; use --no-mouse for pure native
+            // selection mode.
+            mouse: true,
             scrollback: DEFAULT_SCROLLBACK,
             notify_sound: false,
             auto_trust_seen: false,
@@ -266,8 +266,9 @@ mod tests {
         let c = UiConfig::parse("").unwrap();
         assert_eq!(c.theme, ThemeName::Default);
         assert!(c.show_footer);
-        // Native terminal selection is preserved by default.
-        assert!(!c.mouse);
+        // Mouse interaction is enabled by default; Shift-drag remains the
+        // terminal-native selection escape hatch.
+        assert!(c.mouse);
         assert_eq!(c.scrollback, DEFAULT_SCROLLBACK);
         // v0.5.0 settings: all the new toggles default to off / conservative.
         assert!(!c.notify_sound);

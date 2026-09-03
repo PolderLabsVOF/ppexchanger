@@ -148,7 +148,7 @@ fn print_help() {
     );
     println!(
         "{}",
-        help.replace("mouse is ON by default", "native terminal selection is the default")
+        help.replace("mouse is ON by default", "mouse interaction is enabled by default; Shift-drag selects natively")
             .replace(
                 "  ppx --gen-identity",
                 "  ppx update\n  ppx --gen-identity",
@@ -432,10 +432,12 @@ fn start_tui(
     if let Some(m) = mouse_override {
         ui_cfg.mouse = m;
     }
-    // Native terminal selection is the canonical chat interaction. Older
-    // config files may still contain `mouse = true`; never enable reporting
-    // capture here, otherwise the terminal cannot start a normal selection.
-    ui_cfg.mouse = false;
+    // Keep pane clicks and wheel scrolling available by default. The chat
+    // renderer never implements its own text selection; terminals that
+    // support mouse reporting use Shift-drag to invoke native selection.
+    if mouse_override.is_none() {
+        ui_cfg.mouse = true;
+    }
 
     let theme = ppexchanger::tui::Theme::by_name(ui_cfg.theme);
     let glyphs = ppexchanger::tui::detect_glyphs();
@@ -1270,8 +1272,8 @@ fn start_tui(
     }
 
     // TUI loop.
-    let mut _guard = tui::TuiGuard::new(false).unwrap();
-    let mut terminal = tui::enter_terminal(false).unwrap();
+    let mut _guard = tui::TuiGuard::new(ui_cfg.mouse).unwrap();
+    let mut terminal = tui::enter_terminal(ui_cfg.mouse).unwrap();
     let mut editor = ppexchanger::tui::LineEditor::new();
     // Active mutable copy of the config — `/theme` updates it, so we can
     // persist on change without re-reading from disk.
@@ -1431,8 +1433,6 @@ fn start_tui(
                                             let settings = s.settings.as_mut().unwrap();
                                             settings.selected = row;
                                             route_settings_key(&key, settings, &mut live_cfg, &mut _guard);
-                                            live_cfg.mouse = false;
-                                            let _ = _guard.set_mouse(false);
                                         }
                                         MouseTarget::Close => {
                                             let name = {
@@ -1644,8 +1644,6 @@ fn start_tui(
                                     &mut live_cfg,
                                     &mut _guard,
                                 );
-                                live_cfg.mouse = false;
-                                let _ = _guard.set_mouse(false);
                                 let close = k.code == crossterm::event::KeyCode::Esc;
                                 (close, s.settings.as_ref().unwrap().dirty)
                             };
@@ -2008,6 +2006,12 @@ fn start_tui(
             break;
         }
     }
+
+    // Stop mouse reporting immediately, before flushing history or joining
+    // network workers. Those operations can take a moment; leaving capture
+    // enabled while the UI loop is no longer reading events queues SGR
+    // reports that the shell would later print as `35;...M` garbage.
+    let _ = _guard.set_mouse(false);
 
     // Flush the final in-memory batch before stopping worker threads. This
     // covers a message received just before the user exits or a save retry

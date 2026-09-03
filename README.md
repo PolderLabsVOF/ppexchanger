@@ -362,7 +362,7 @@ ppx --name alice         # override display name
 ppx --port 7777          # bind a specific TCP port
 ppx --theme amber        # default | solarized | monochrome | neon | amber
 ppx --config /tmp/c.toml # alternate config path
-ppx --no-mouse           # explicitly keep native terminal mouse selection
+ppx --no-mouse           # disable ppx mouse capture for pure native selection
 ppx update               # install the latest release (source-build fallback)
 ppx --gen-identity       # print fingerprint + peer_id and exit
 ppx --version
@@ -452,9 +452,10 @@ plus a `Peers` shortcut that focuses the sidebar.
 
 ### Mouse
 
-Native terminal mouse selection is always enabled so chat text can be
-selected and copied exactly like normal terminal output. The legacy mouse
-capture setting is ignored for chat selection.
+Mouse interaction is enabled by default for pane clicks and wheel scrolling.
+The TUI never implements its own text selection: hold **Shift** while
+dragging in terminals that use mouse reporting to invoke native selection,
+or run with `--no-mouse` for unmodified terminal drag-selection.
 
 * Left-click a row in the sidebar to select that peer and focus the sidebar.
 * Left-click the chat pane to focus the chat.
@@ -478,8 +479,8 @@ config back to `config.toml`. Click the right half of any row to apply
 the same as `Enter`. The popup renders a `Tabs` widget for sub-nav and
 a `Table` for the rows — both with the active theme's accent color.
 
-The TUI does not intercept drag selection; selecting a region may include
-surrounding chrome, just like selecting text in any terminal application.
+With `--no-mouse`, the terminal owns selection completely and selecting a
+region may include surrounding chrome, just like any terminal application.
 
 ### Pasting
 
@@ -552,7 +553,7 @@ The TUI ships a retro amber-phosphor CRT vibe out of the box:
 [ui]
 theme = "default"        # default | solarized | monochrome | neon | amber
 show_footer = true
-mouse = false              # retained for compatibility; native selection is always used
+mouse = true               # pane clicks + scrolling; Shift-drag selects natively
 scrollback = 500          # max chat history lines; clamped to 16..50_000
 ```
 
