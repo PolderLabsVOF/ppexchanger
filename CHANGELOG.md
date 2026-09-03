@@ -2,7 +2,7 @@
 
 All notable ppexchanger updates are listed here in plain language.
 
-## 0.7.4 — 2026-09-03
+## 0.7.5 — 2026-09-03
 
 ### Reliable releases
 

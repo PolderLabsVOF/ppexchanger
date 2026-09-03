@@ -278,14 +278,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.validate.outputs.tag }}
+      # npm trusted publishing requires npm 11.5.1+ and Node 22.14+.
+      # Pin a current Node release and npm CLI so OIDC auth works reliably
+      # on GitHub's rotating runner images.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Ensure trusted-publishing capable npm
+        run: |
+          npm install --global npm@11.5.1
+          npm --version
       - name: Publish package with provenance
         working-directory: npm/ppx
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TAG: ${{ needs.validate.outputs.npm_tag }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
@@ -295,7 +302,6 @@ jobs:
             echo "npm package version $PACKAGE_VERSION does not match release tag $RELEASE_TAG"
             exit 1
           fi
-          # Preferred authentication is npm trusted publishing (OIDC). For
-          # repositories that still use a token, NPM_TOKEN is supported as a
-          # fallback without changing the workflow.
+          # npm trusted publishing uses the GitHub OIDC token automatically.
+          # No long-lived npm token is required.
           npm publish --access public --provenance --tag "$NPM_TAG"
