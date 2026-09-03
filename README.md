@@ -451,10 +451,9 @@ plus a `Peers` shortcut that focuses the sidebar.
 
 ### Mouse
 
-Native terminal mouse selection is **on by default** so chat text can be
-selected and copied exactly like normal terminal output. Set
-`mouse = true` in `config.toml` when you prefer clickable panes and
-scroll-wheel navigation. With capture on:
+Native terminal mouse selection is always enabled so chat text can be
+selected and copied exactly like normal terminal output. The legacy mouse
+capture setting is ignored for chat selection.
 
 * Left-click a row in the sidebar to select that peer and focus the sidebar.
 * Left-click the chat pane to focus the chat.
@@ -478,8 +477,8 @@ config back to `config.toml`. Click the right half of any row to apply
 the same as `Enter`. The popup renders a `Tabs` widget for sub-nav and
 a `Table` for the rows — both with the active theme's accent color.
 
-Mouse capture temporarily replaces the terminal's native drag selection;
-run with `--no-mouse` to recover it.
+The TUI does not intercept drag selection; selecting a region may include
+surrounding chrome, just like selecting text in any terminal application.
 
 ### Pasting
 
@@ -552,7 +551,7 @@ The TUI ships a retro amber-phosphor CRT vibe out of the box:
 [ui]
 theme = "default"        # default | solarized | monochrome | neon | amber
 show_footer = true
-mouse = false              # preserve native terminal selection by default
+mouse = false              # retained for compatibility; native selection is always used
 scrollback = 500          # max chat history lines; clamped to 16..50_000
 ```
 

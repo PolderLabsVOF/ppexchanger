@@ -321,6 +321,10 @@ fn start_tui(
     if let Some(m) = mouse_override {
         ui_cfg.mouse = m;
     }
+    // Native terminal selection is the canonical chat interaction. Older
+    // config files may still contain `mouse = true`; never enable reporting
+    // capture here, otherwise the terminal cannot start a normal selection.
+    ui_cfg.mouse = false;
 
     let theme = ppexchanger::tui::Theme::by_name(ui_cfg.theme);
     let glyphs = ppexchanger::tui::detect_glyphs();
@@ -1155,8 +1159,8 @@ fn start_tui(
     }
 
     // TUI loop.
-    let mut _guard = tui::TuiGuard::new(ui_cfg.mouse).unwrap();
-    let mut terminal = tui::enter_terminal(ui_cfg.mouse).unwrap();
+    let mut _guard = tui::TuiGuard::new(false).unwrap();
+    let mut terminal = tui::enter_terminal(false).unwrap();
     let mut editor = ppexchanger::tui::LineEditor::new();
     // Active mutable copy of the config — `/theme` updates it, so we can
     // persist on change without re-reading from disk.
@@ -1316,6 +1320,8 @@ fn start_tui(
                                             let settings = s.settings.as_mut().unwrap();
                                             settings.selected = row;
                                             route_settings_key(&key, settings, &mut live_cfg, &mut _guard);
+                                            live_cfg.mouse = false;
+                                            let _ = _guard.set_mouse(false);
                                         }
                                         MouseTarget::Close => {
                                             let name = {
@@ -1527,6 +1533,8 @@ fn start_tui(
                                     &mut live_cfg,
                                     &mut _guard,
                                 );
+                                live_cfg.mouse = false;
+                                let _ = _guard.set_mouse(false);
                                 let close = k.code == crossterm::event::KeyCode::Esc;
                                 (close, s.settings.as_ref().unwrap().dirty)
                             };
