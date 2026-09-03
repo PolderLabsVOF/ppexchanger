@@ -635,31 +635,19 @@ impl UiState {
                 from_name,
                 offer,
             } => {
-                // Open the modal unless one is already up — the first
-                // offer wins; subsequent ones get logged to the chat.
-                if self.file_offer.is_none() {
-                    self.file_offer = Some(file_offer_popup::FileOfferPrompt {
-                        from_peer: *from_peer,
-                        from_name: from_name.clone(),
-                        offer: offer.clone(),
-                        decision: file_offer_popup::Decision::Pending,
-                    });
-                } else {
-                    self.push_message(UiMessage {
-                        from_peer: *from_peer,
-                        from_name: "[file]".into(),
-                        body: format!(
-                            "{} offers file: {} ({} bytes) — busy with another",
-                            from_name,
-                            offer.name,
-                            offer.size
-                        ),
-                        outgoing: false,
-                        pending: false,
-                        ts_unix: now_unix(),
-                        image: None,
-                    });
-                }
+                // Offers are auto-accepted by the action thread. Keep this
+                // event path non-modal for compatibility with older peers:
+                // surface a status line instead of blocking the conversation.
+                self.status = format!("receiving {} from {}", offer.name, from_name);
+                self.push_message(UiMessage {
+                    from_peer: *from_peer,
+                    from_name: "[file]".into(),
+                    body: format!("{} sent {} ({} bytes)", from_name, offer.name, offer.size),
+                    outgoing: false,
+                    pending: false,
+                    ts_unix: now_unix(),
+                    image: None,
+                });
             }
             Event::FileReceived {
                 from_peer,
@@ -1579,9 +1567,6 @@ pub fn render(
                 discovery_popup::render(f, theme, glyphs, d);
             }
         }
-        if let Some(p) = &state.file_offer {
-            file_offer_popup::render(f, theme, glyphs, p);
-        }
         if let Some(preview) = &state.text_preview {
             render_text_preview(f, theme, preview);
         }
@@ -1908,6 +1893,7 @@ struct ImagePreview {
     meta: ImageMeta,
     height: u16,
     width: u16,
+    outgoing: bool,
 }
 
 fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyphs: &Glyphs) {
@@ -2101,8 +2087,8 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         }
         // Maximum rows / columns we'll spend on an inline preview.
         // Keeps a single image from monopolising the chat viewport.
-        const MAX_IMAGE_ROWS: u16 = 12;
-        const MAX_IMAGE_COLS: u16 = 40;
+        const MAX_IMAGE_ROWS: u16 = 20;
+        const MAX_IMAGE_COLS: u16 = 64;
         let mut chunks: Vec<Chunk<'_>> = Vec::new();
         let mut lines_used: usize = 0;
         let mut prev: Option<&UiMessage> = None;
@@ -2196,6 +2182,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
                     meta: img.clone(),
                     height: rows_for_image,
                     width: cols_for_image,
+                    outgoing: m.outgoing,
                 })
             } else {
                 None
@@ -2403,7 +2390,12 @@ fn render_image_preview(
         let protocol = picker.new_resize_protocol(dyn_img);
         state.image_protocols.insert(cache_key.clone(), protocol);
     }
-    let rect = Rect::new(interior.x, abs_y, preview.width, preview.height);
+    let x = if preview.outgoing {
+        interior.right().saturating_sub(preview.width)
+    } else {
+        interior.x
+    };
+    let rect = Rect::new(x, abs_y, preview.width, preview.height);
     let protocol = match state.image_protocols.get_mut(&cache_key) {
         Some(p) => p,
         None => return,

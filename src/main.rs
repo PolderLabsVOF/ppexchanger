@@ -1112,11 +1112,18 @@ fn start_tui(
                                 ),
                             );
                             if accepted {
-                                let _ = act_bus_tx.send(Event::FileOffer {
-                                    from_peer: peer,
-                                    from_name,
-                                    offer,
-                                });
+                                // File transfers are trusted at the session
+                                // layer; do not block delivery behind a UI
+                                // confirmation dialog. Accept immediately so
+                                // dropped images arrive and preview without
+                                // requiring a second click.
+                                if let Some(sender) = outbound.get(&peer) {
+                                    let _ = sender.send(FrameBody::FileAccept { id: offer.id });
+                                }
+                                let _ = act_bus_tx.send(Event::Info(format!(
+                                    "receiving {} from {}",
+                                    offer.name, from_name
+                                )));
                             }
                         }
                         InboundFileEvent::Accept { peer: _, id } => {
