@@ -1234,7 +1234,7 @@ fn start_tui(
                 for result in outbox.step_all(|peer| outbound.get(&peer).cloned()) {
                     use ppexchanger::net::file_xfer::StepResult;
                     match result {
-                        StepResult::Completed { id, peer: _, to_name, name, bytes, source_path } => {
+                        StepResult::Completed { id, peer, to_name, name, bytes, source_path } => {
                             // If the caller asked us to persist the
                             // source bytes after a successful send
                             // (e.g. clipboard image, whose source
@@ -1252,6 +1252,11 @@ fn start_tui(
                                     )));
                                 }
                             }
+                            let _ = act_bus_tx.send(Event::FileSent {
+                                peer_id: peer,
+                                name: name.clone(),
+                                bytes,
+                            });
                             let _ = act_bus_tx.send(Event::Info(format!(
                                 "sent {} ({} bytes) to {}",
                                 name, bytes, to_name
@@ -1821,8 +1826,25 @@ fn start_tui(
                         ppexchanger::tui::EditorEvent::SubmitTextFile(text) => {
                             if let Some(target) = resolve_target(&state, "") {
                                 let line_count = text.lines().count();
+                                let target_name = state
+                                    .lock()
+                                    .unwrap()
+                                    .peers
+                                    .iter()
+                                    .find(|peer| peer.peer_id == target)
+                                    .map(|peer| peer.name.clone())
+                                    .unwrap_or_else(|| "peer".into());
                                 match create_pasted_text_file(&text) {
                                     Ok(path) => {
+                                        let bytes = std::fs::metadata(&path)
+                                            .map(|meta| meta.len())
+                                            .unwrap_or_else(|_| text.len() as u64);
+                                        state.lock().unwrap().push_outgoing_text_file(
+                                            target,
+                                            path.clone(),
+                                            bytes,
+                                            line_count,
+                                        );
                                         let _ = bus.tx_actions.send(Action::SendFile {
                                             to: target,
                                             path,
@@ -1832,8 +1854,8 @@ fn start_tui(
                                             persist_to: None,
                                         });
                                         let _ = bus.tx_events.send(Event::Info(format!(
-                                            "text file ready · {} lines · waiting for peer approval",
-                                            line_count
+                                            "text file queued · {} lines · sending to {}",
+                                            line_count, target_name
                                         )));
                                     }
                                     Err(error) => {
@@ -2284,6 +2306,12 @@ fn handle_mouse(
             }
             tui::Hit::Chat => {
                 s.focus = tui::Focus::Chat;
+                // Text attachments are compact rows in the conversation.
+                // Clicking their row opens the bounded preview so the full
+                // pasted document can be inspected without flooding chat.
+                if let Some(index) = s.message_index_at_chat_row(areas.chat, m.row) {
+                    let _ = s.open_text_preview_at(index);
+                }
             }
             tui::Hit::Footer => {
                 // Clicks in the footer (input line) intentionally

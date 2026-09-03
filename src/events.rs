@@ -74,6 +74,12 @@ pub enum Event {
     /// Confirmation emitted by the session driver after the encrypted text
     /// frame has been written to the peer socket.
     TextDelivered { peer_id: PeerId, body: String },
+    /// An outbound file was fully written to the encrypted session.
+    FileSent {
+        peer_id: PeerId,
+        name: String,
+        bytes: u64,
+    },
     /// Decryption failed for a peer's frame — usually means their pubkey changed.
     DecryptFailed { peer_id: PeerId, from_name: String },
     /// A peer's TCP connection dropped.

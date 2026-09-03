@@ -548,6 +548,27 @@ impl UiState {
                     self.history_dirty = true;
                 }
             }
+            Event::FileSent {
+                peer_id,
+                name,
+                bytes,
+            } => {
+                if let Some(message) = self.messages.iter_mut().rev().find(|message| {
+                    message.outgoing
+                        && message.pending
+                        && message.from_peer == *peer_id
+                        && message
+                            .image
+                            .as_ref()
+                            .and_then(|meta| meta.path.file_name())
+                            .and_then(|value| value.to_str())
+                            .is_some_and(|file_name| file_name == name)
+                }) {
+                    message.pending = false;
+                    self.history_dirty = true;
+                }
+                self.status = format!("sent {} ({} bytes)", name, bytes);
+            }
             Event::DecryptFailed { peer_id, from_name } => {
                 self.push_message(UiMessage {
                     from_peer: *peer_id,
@@ -663,9 +684,10 @@ impl UiState {
                 } else {
                     None
                 };
-                if image.is_none() && is_text_attachment(name) {
-                    if let Ok(bytes) = std::fs::read(saved_to) {
-                        let content: String = String::from_utf8_lossy(&bytes)
+                let is_text = image.is_none() && is_text_attachment(name);
+                if is_text {
+                    if let Ok(file_bytes) = std::fs::read(saved_to) {
+                        let content: String = String::from_utf8_lossy(&file_bytes)
                             .chars()
                             .take(8_000)
                             .collect();
@@ -683,6 +705,17 @@ impl UiState {
                     // preview anchor is stable and the thumbnail stays
                     // aligned with the left edge of the peer's messages.
                     self.push_inbound_image(*from_peer, from_name.clone(), image);
+                } else if is_text {
+                    let line_count = std::fs::read_to_string(saved_to)
+                        .map(|content| content.lines().count())
+                        .unwrap_or(0);
+                    self.push_inbound_text_file(
+                        *from_peer,
+                        from_name.clone(),
+                        saved_to.clone(),
+                        *bytes,
+                        line_count,
+                    );
                 } else {
                     self.push_message(UiMessage {
                         from_peer: *from_peer,
@@ -953,6 +986,46 @@ impl UiState {
         self.scroll = 0;
     }
 
+    /// Add a local echo for a pasted text attachment. Text files use the
+    /// existing attachment descriptor so the row survives encrypted history
+    /// reloads; the renderer treats the non-image MIME as a compact,
+    /// expandable document row rather than trying to draw pixels.
+    pub fn push_outgoing_text_file(
+        &mut self,
+        to_peer: PeerId,
+        path: PathBuf,
+        bytes: u64,
+        lines: usize,
+    ) {
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("pasted-text.txt")
+            .to_string();
+        let body = format!(
+            "[text file {} · {} lines · {:.1} KB · click to expand]",
+            name,
+            lines,
+            bytes as f64 / 1024.0
+        );
+        self.push_message(UiMessage {
+            from_peer: to_peer,
+            from_name: self.self_name.clone(),
+            body,
+            outgoing: true,
+            pending: true,
+            ts_unix: now_unix(),
+            image: Some(ImageMeta {
+                path,
+                mime: "text/plain; charset=utf-8".into(),
+                width: lines.min(u32::MAX as usize) as u32,
+                height: 0,
+                bytes,
+            }),
+        });
+        self.scroll = 0;
+    }
+
     /// Add an inbound image row. The body is the metadata line; the
     /// renderer uses `image.path` for the preview source.
     pub fn push_inbound_image(
@@ -986,6 +1059,77 @@ impl UiState {
             ts_unix: now_unix(),
             image: Some(image),
         });
+    }
+
+    /// Add an inbound text attachment row while retaining the saved file as
+    /// the source for the expandable preview.
+    pub fn push_inbound_text_file(
+        &mut self,
+        from_peer: PeerId,
+        from_name: String,
+        path: PathBuf,
+        bytes: u64,
+        lines: usize,
+    ) {
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("received-text.txt")
+            .to_string();
+        self.push_message(UiMessage {
+            from_peer,
+            from_name,
+            body: format!(
+                "[text file {} · {} lines · {:.1} KB · click to expand]",
+                name,
+                lines,
+                bytes as f64 / 1024.0
+            ),
+            outgoing: false,
+            pending: false,
+            ts_unix: now_unix(),
+            image: Some(ImageMeta {
+                path,
+                mime: "text/plain; charset=utf-8".into(),
+                width: lines.min(u32::MAX as usize) as u32,
+                height: 0,
+                bytes,
+            }),
+        });
+    }
+
+    /// Open a text attachment selected in the chat. The preview is capped so
+    /// a large paste never blocks the render loop or allocates unbounded UI
+    /// state. Returns whether the row was a readable text attachment.
+    pub fn open_text_preview_at(&mut self, index: usize) -> bool {
+        let Some(message) = self.messages.get(index).cloned() else {
+            return false;
+        };
+        let Some(meta) = message.image.filter(|meta| meta.mime.starts_with("text/")) else {
+            return false;
+        };
+        let Ok(bytes) = std::fs::read(&meta.path) else {
+            self.status = format!("text attachment unavailable: {}", meta.path.display());
+            return false;
+        };
+        let content: String = String::from_utf8_lossy(&bytes).chars().take(8_000).collect();
+        let name = meta
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("text attachment")
+            .to_string();
+        self.text_preview = Some(TextFilePreview {
+            from_name: if message.outgoing {
+                self.self_name.clone()
+            } else {
+                message.from_name
+            },
+            name,
+            path: meta.path,
+            content,
+        });
+        true
     }
 
     /// Replace the in-memory ring with history loaded from disk. Loading is
@@ -2154,7 +2298,11 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
             }
 
             // Bubble body.
-            let image_preview = if let Some(img) = m.image.as_ref() {
+            let image_preview = if let Some(img) = m
+                .image
+                .as_ref()
+                .filter(|img| img.mime.starts_with("image/"))
+            {
                 // Reserve a cell budget for the preview. The picker
                 // gives us the actual cell-pixel mapping, but for the
                 // line-budget reservation a 1-row-per-cell-rows
