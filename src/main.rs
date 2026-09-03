@@ -880,8 +880,8 @@ fn start_tui(
                             Ok(t) => {
                                 let id = t.id();
                                 let offer = t.offer().clone();
-                                if let Some(tx) = outbound.get(&to) {
-                                    let _ = tx.send(FrameBody::FileOffer {
+                                if let Some(tx) = outbound.get(&to).cloned() {
+                                    if tx.send(FrameBody::FileOffer {
                                         id,
                                         name: offer.name.clone(),
                                         size: offer.size,
@@ -889,7 +889,9 @@ fn start_tui(
                                         width: offer.width,
                                         height: offer.height,
                                         preview: offer.preview.clone(),
-                                    });
+                                    }).is_err() {
+                                        outbound.remove(&to);
+                                    }
                                 }
                                 outbox.insert(t);
                                 // If the caller asked us to persist
@@ -1016,6 +1018,22 @@ fn start_tui(
                         } => {
                             peer_names.insert(peer_id, name);
                             outbound.insert(peer_id, sender.clone());
+                            // A file drop can arrive just before a newly
+                            // connected session is registered. Announce all
+                            // still-pending offers now so the selected peer,
+                            // rather than whichever peer connected first,
+                            // receives the offer.
+                            for offer in outbox.offers_for_peer(peer_id) {
+                                let _ = sender.send(FrameBody::FileOffer {
+                                    id: offer.id,
+                                    name: offer.name,
+                                    size: offer.size,
+                                    mime: offer.mime,
+                                    width: offer.width,
+                                    height: offer.height,
+                                    preview: offer.preview,
+                                });
+                            }
                             // Flush messages accumulated while this peer was
                             // offline. Keep each entry until its driver emits
                             // TextDelivered, allowing a failed reconnect to
@@ -2514,10 +2532,15 @@ fn handle_command(
             let path = PathBuf::from(rest.trim());
             let pid = {
                 let s = state.lock().unwrap();
-                s.peers
-                    .iter()
-                    .find(|p| p.state == tui::PeerState::Connected)
+                s.selected()
+                    .filter(|p| p.state == tui::PeerState::Connected)
                     .map(|p| p.peer_id)
+                    .or_else(|| {
+                        s.peers
+                            .iter()
+                            .find(|p| p.state == tui::PeerState::Connected)
+                            .map(|p| p.peer_id)
+                    })
             };
             if let Some(to) = pid {
                 let _ = tx_actions.send(Action::SendFile {
@@ -2548,10 +2571,15 @@ fn handle_command(
             // being wiped.
             let pid = {
                 let s = state.lock().unwrap();
-                s.peers
-                    .iter()
-                    .find(|p| p.state == tui::PeerState::Connected)
+                s.selected()
+                    .filter(|p| p.state == tui::PeerState::Connected)
                     .map(|p| p.peer_id)
+                    .or_else(|| {
+                        s.peers
+                            .iter()
+                            .find(|p| p.state == tui::PeerState::Connected)
+                            .map(|p| p.peer_id)
+                    })
             };
             let Some(to) = pid else {
                 let _ = tx_events.send(Event::Info(

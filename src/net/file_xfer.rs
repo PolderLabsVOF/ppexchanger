@@ -198,6 +198,17 @@ impl OutboundMap {
         self.by_id.insert(t.offer.id, t);
     }
 
+    /// Return pending offers for a peer so a transfer created while the
+    /// session was racing its registry registration can be announced as soon
+    /// as the sender becomes available.
+    pub fn offers_for_peer(&self, peer: PeerId) -> Vec<FileOffer> {
+        self.by_id
+            .values()
+            .filter(|transfer| transfer.peer == peer)
+            .map(|transfer| transfer.offer.clone())
+            .collect()
+    }
+
     pub fn accept(&mut self, id: FileId) -> bool {
         if let Some(t) = self.by_id.get_mut(&id) {
             t.mark_accepted();
