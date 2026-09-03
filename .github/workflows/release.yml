@@ -1,5 +1,8 @@
 # Release workflow — builds the single-binary tarball + SHA256SUMS and
-# publishes them to a GitHub release whenever a `v*` tag is pushed. The
+# publishes it to the correct release channel whenever a version tag is
+# pushed. Stable `vX.Y.Z` tags must point to `main`; beta/RC
+# `vX.Y.Z-beta.N` / `vX.Y.Z-rc.N` tags must point to `beta`.
+# The
 # install.sh lives at the repo root and is uploaded alongside the artifacts
 # so the one-line `curl | bash` install always fetches the script that
 # matches the binary it installs.
