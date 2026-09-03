@@ -28,21 +28,50 @@ jobs:
   validate:
     name: validate release ref
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.validate.outputs.tag }}
+      channel: ${{ steps.validate.outputs.channel }}
+      source_branch: ${{ steps.validate.outputs.source_branch }}
+      prerelease: ${{ steps.validate.outputs.prerelease }}
     steps:
-      - name: Require a version tag
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate tag and source branch
+        id: validate
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Release workflows must run for a semantic version tag (got: $RELEASE_TAG)"
+          if [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            CHANNEL=stable
+            SOURCE_BRANCH=main
+            PRERELEASE=false
+          elif [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(beta|rc)(\.[0-9A-Za-z.-]+)?$ ]]; then
+            CHANNEL=beta
+            SOURCE_BRANCH=beta
+            PRERELEASE=true
+          else
+            echo "Use vX.Y.Z for stable releases or vX.Y.Z-beta.N / vX.Y.Z-rc.N for beta releases (got: $RELEASE_TAG)"
             exit 1
           fi
+
+          git fetch origin main beta --tags --force
+          RELEASE_SHA="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          if ! git merge-base --is-ancestor "$RELEASE_SHA" "origin/$SOURCE_BRANCH"; then
+            echo "$RELEASE_TAG must point to a commit reachable from $SOURCE_BRANCH (got $RELEASE_SHA)"
+            exit 1
+          fi
+
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "source_branch=$SOURCE_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Validated $CHANNEL release $RELEASE_TAG from $SOURCE_BRANCH"
 
   build:
     name: build ${{ matrix.target }}
     needs: validate
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.allow_failure }}
     strategy:
       fail-fast: false
       matrix:
@@ -50,19 +79,15 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             binary_name: ppx
-            allow_failure: false
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             binary_name: ppx
-            allow_failure: false
           - target: x86_64-apple-darwin
             os: macos-latest
             binary_name: ppx
-            allow_failure: true
           - target: aarch64-apple-darwin
             os: macos-latest
             binary_name: ppx
-            allow_failure: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             binary_name: ppx.exe
@@ -75,11 +100,10 @@ jobs:
             # Keep Windows required: the job below explicitly selects the
             # Visual Studio linker instead of Git Bash's unrelated `link`
             # utility, so this target is now a supported release artifact.
-            allow_failure: false
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.validate.outputs.tag }}
 
       - name: Install Rust toolchain (host)
         uses: dtolnay/rust-toolchain@stable
@@ -149,7 +173,7 @@ jobs:
 
       - name: Compose tarball + checksums
         env:
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           TARGET: ${{ matrix.target }}
           BINARY_NAME: ${{ matrix.binary_name }}
         run: |
@@ -189,7 +213,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.validate.outputs.tag }}
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -210,8 +234,12 @@ jobs:
       - name: Create / update GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          name: ppexchanger ${{ inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.validate.outputs.tag }}
+          name: ppexchanger ${{ needs.validate.outputs.tag }}
+          body: |
+            Built from the `${{ needs.validate.outputs.source_branch }}` branch.
+
+            ${{ needs.validate.outputs.channel == 'beta' && 'This beta build is for testing upcoming changes. It may change before the next stable release.' || 'This stable release is ready for everyday use.' }}
           generate_release_notes: true
           files: |
             SHA256SUMS
@@ -224,4 +252,5 @@ jobs:
           # has no matches.
           fail_on_unmatched_files: false
           draft: false
-          prerelease: false
+          prerelease: ${{ needs.validate.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.validate.outputs.prerelease != 'true' }}

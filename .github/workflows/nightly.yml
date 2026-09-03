@@ -6,6 +6,12 @@ on:
     # avoids competing with the regular release workflow.
     - cron: '17 2 * * *'
   workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Development branch to build'
+        required: true
+        default: dev
+        type: string
 
 concurrency:
   group: nightly
@@ -46,6 +52,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # Scheduled workflows run from the repository default branch. Keep
+          # the workflow definition on main, but always build the active
+          # development branch so nightly artifacts never represent main.
+          ref: ${{ inputs.branch || 'dev' }}
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Set up MSVC build environment
@@ -100,7 +110,6 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -121,7 +130,7 @@ jobs:
           tag_name: nightly
           name: ppexchanger nightly
           body: |
-            Automated build from the latest `main` commit.
+            Automated build from the latest `${{ inputs.branch || 'dev' }}` commit.
 
             This build is for testing the newest changes and may change every night.
             For the stable version, use the latest numbered release instead.
