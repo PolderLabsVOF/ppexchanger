@@ -200,6 +200,15 @@ pub struct UiState {
     /// viewport stays full of the oldest messages instead of
     /// scrolling past the top and leaving empty rows behind.
     pub visible_chat_rows: usize,
+    /// Message selected by mouse for copy. The key survives deque index
+    /// changes while keeping selection scoped to one concrete message.
+    message_selection: Option<(PeerId, u64, bool)>,
+    selecting_message: Option<usize>,
+    /// Number of messages in the currently selected conversation. This is
+    /// refreshed by `draw_chat` and keeps scrolling bounded after switching
+    /// between peers with different history lengths.
+    pub active_chat_message_count: usize,
+    pub active_chat_peer: Option<PeerId>,
     history_dirty: bool,
     contacts_dirty: bool,
     /// Terminal graphics-protocol picker. Initialised lazily on the
@@ -337,6 +346,10 @@ impl UiState {
             scroll: 0,
             max_scrollback: DEFAULT_SCROLLBACK,
             visible_chat_rows: 0,
+            message_selection: None,
+            selecting_message: None,
+            active_chat_message_count: 0,
+            active_chat_peer: None,
             history_dirty: false,
             contacts_dirty: false,
             image_picker: None,
@@ -521,7 +534,7 @@ impl UiState {
                     image: None,
                 });
             }
-            Event::PeerGone { peer_id, name: _ } => {
+            Event::PeerGone { peer_id, name } => {
                 // Connection-state changes are surfaced through the peer
                 // list's status indicator; we deliberately do not push an
                 // inline chat message for them.
@@ -529,6 +542,7 @@ impl UiState {
                 if let Some(p) = self.peers.iter_mut().find(|p| &p.peer_id == peer_id) {
                     p.state = PeerState::Gone;
                 }
+                self.status = format!("{} offline", name);
             }
             Event::Info(s) => {
                 self.status = s.clone();
@@ -737,6 +751,8 @@ impl UiState {
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.scroll = 0;
+        self.message_selection = None;
+        self.selecting_message = None;
         self.history_dirty = true;
     }
 
@@ -765,6 +781,69 @@ impl UiState {
         if self.scroll > 0 {
             self.scroll = (self.scroll + 1).min(self.messages.len().saturating_sub(1));
         }
+    }
+
+    /// Map a screen row in the chat pane to the nearest message in the
+    /// selected conversation. Group headers and gutters are intentionally
+    /// tolerated so a drag can begin on either the header or bubble.
+    pub fn message_index_at_chat_row(&self, chat: Rect, row: u16) -> Option<usize> {
+        let top = chat.y.saturating_add(1);
+        let bottom = chat.bottom().saturating_sub(1);
+        let peer_id = self.active_chat_peer.or_else(|| self.selected().map(|p| p.peer_id))?;
+        if row < top || row >= bottom {
+            return None;
+        }
+        let indices: Vec<usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| (message.from_peer == peer_id).then_some(index))
+            .collect();
+        if indices.is_empty() {
+            return None;
+        }
+        let visible_end = indices.len().saturating_sub(self.scroll);
+        let visible_start = visible_end.saturating_sub(self.visible_chat_rows.max(1));
+        let offset = (row - top) as usize;
+        indices
+            .get((visible_start + offset).min(visible_end.saturating_sub(1)))
+            .copied()
+    }
+
+    pub fn begin_message_selection(&mut self, index: usize) {
+        if let Some(message) = self.messages.get(index) {
+            self.selecting_message = Some(index);
+            self.message_selection = Some((message.from_peer, message.ts_unix, message.outgoing));
+        }
+    }
+
+    pub fn extend_message_selection(&mut self, index: usize) {
+        let Some(anchor) = self.selecting_message else { return; };
+        let Some(peer_id) = self.active_chat_peer.or_else(|| self.selected().map(|p| p.peer_id)) else { return; };
+        let (start, end) = if anchor <= index { (anchor, index) } else { (index, anchor) };
+        if let Some(message) = self.messages.get(start.min(self.messages.len().saturating_sub(1))) {
+            self.message_selection = Some((peer_id, message.ts_unix, message.outgoing));
+        }
+        self.selecting_message = Some(end);
+    }
+
+    pub fn finish_message_selection(&mut self) {
+        self.selecting_message = None;
+    }
+
+    pub fn take_selected_message_text(&mut self) -> Option<String> {
+        let (peer_id, ts, outgoing) = self.message_selection.take()?;
+        self.selecting_message = None;
+        self.messages
+            .iter()
+            .find(|message| message.from_peer == peer_id && message.ts_unix == ts && message.outgoing == outgoing)
+            .map(|message| message.body.clone())
+    }
+
+    pub fn message_is_selected(&self, message: &UiMessage) -> bool {
+        self.message_selection.is_some_and(|(peer_id, ts, outgoing)| {
+            message.from_peer == peer_id && message.ts_unix == ts && message.outgoing == outgoing
+        })
     }
 
     /// Add an optimistic local echo for a message accepted by the composer.
@@ -881,6 +960,7 @@ impl UiState {
     /// alphabetical by name. Called once after each event drain so the
     /// sidebar order stays stable as peers come and go.
     pub fn sort_peers(&mut self) {
+        let selected_id = self.selected().map(|peer| peer.peer_id);
         self.peers.sort_by(|a, b| {
             let ra = match a.state {
                 PeerState::Connected => 0,
@@ -894,7 +974,12 @@ impl UiState {
             };
             ra.cmp(&rb).then_with(|| a.name.cmp(&b.name))
         });
-        // Keep selection on the same peer (or clamp if it moved).
+        // Keep selection on the same peer (or clamp if it was removed).
+        if let Some(peer_id) = selected_id {
+            if let Some(index) = self.peers.iter().position(|peer| peer.peer_id == peer_id) {
+                self.selected_peer = index;
+            }
+        }
         if self.selected_peer >= self.peers.len() {
             self.selected_peer = self.peers.len().saturating_sub(1);
         }
@@ -908,7 +993,25 @@ impl UiState {
         }
         let cur = self.selected_peer as i32;
         let next = (cur + delta).clamp(0, self.peers.len() as i32 - 1) as usize;
-        self.selected_peer = next;
+        self.select_peer(next);
+    }
+
+    /// Select a concrete sidebar row. Changing peers resets the conversation
+    /// viewport and any message selection so keyboard, mouse, and programmatic
+    /// navigation all have identical behavior.
+    pub fn select_peer(&mut self, index: usize) {
+        if index >= self.peers.len() || index == self.selected_peer {
+            return;
+        }
+        self.selected_peer = index;
+        self.scroll = 0;
+        self.active_chat_peer = None;
+        self.active_chat_message_count = 0;
+        // A selection belongs to the conversation that was visible when it
+        // was made. Drop it as soon as navigation changes peers so a
+        // subsequent copy can never leak text from another chat.
+        self.message_selection = None;
+        self.selecting_message = None;
     }
 
     pub fn cycle_focus(&mut self) {
@@ -927,10 +1030,26 @@ impl UiState {
         // callers before the first draw) keeps the cap sane; the
         // value is refreshed by `draw_chat` before any scroll input
         // can land.
-        let max_scroll = if self.visible_chat_rows <= 1 {
-            self.messages.len().saturating_sub(1)
+        let message_count = if self.active_chat_peer.is_some() {
+            self.active_chat_message_count
         } else {
-            let total_rows = self.messages.len() + count_groups(&self.messages);
+            self.messages.len()
+        };
+        let max_scroll = if self.visible_chat_rows <= 1 {
+            message_count.saturating_sub(1)
+        } else {
+            let mut groups = 0usize;
+            let mut previous = None;
+            for message in self.messages.iter().filter(|message| {
+                self.active_chat_peer
+                    .is_none_or(|peer_id| message.from_peer == peer_id)
+            }) {
+                if previous != Some(message.outgoing) {
+                    groups += 1;
+                    previous = Some(message.outgoing);
+                }
+            }
+            let total_rows = message_count + groups;
             total_rows.saturating_sub(self.visible_chat_rows)
         };
         self.scroll = (self.scroll + lines).min(max_scroll);
@@ -997,6 +1116,7 @@ fn day_bucket(ts: u64) -> u64 {
 /// group emits exactly one header row during rendering, so this count
 /// plus `messages.len()` equals the total rendered content rows — used
 /// by `scroll_back` to keep the viewport full at the top of history.
+#[allow(dead_code)]
 fn count_groups(messages: &VecDeque<UiMessage>) -> usize {
     if messages.is_empty() {
         return 0;
@@ -1641,8 +1761,12 @@ struct ImagePreview {
 
 fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyphs: &Glyphs) {
     let active = state.focus == Focus::Chat;
-    let selected = state.selected();
-    let selected_name = selected.map(|p| p.name.clone()).unwrap_or_default();
+    let selected = state.selected().cloned();
+    let selected_peer_id = selected.as_ref().map(|p| p.peer_id);
+    let selected_name = selected
+        .as_ref()
+        .map(|p| p.name.clone())
+        .unwrap_or_default();
 
     // Conversation header follows the selected peer and is deliberately
     // separate from the app chrome, so context survives scrolling.
@@ -1656,11 +1780,12 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         )])
     } else {
         let fp = selected
+            .as_ref()
             .map(|peer| peer.fingerprint.as_str())
             .filter(|fingerprint| !fingerprint.is_empty())
             .map(|fingerprint| format!(" · {}", truncate_tail(fingerprint, 12)))
             .unwrap_or_default();
-        let (dot, dot_color, status_text, status_role) = match selected.map(|p| p.state) {
+        let (dot, dot_color, status_text, status_role) = match selected.as_ref().map(|p| p.state) {
             Some(PeerState::Connected) => (
                 glyphs.dot_connected,
                 theme.status_online,
@@ -1709,14 +1834,29 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
     // then drops chunks from the front when the budget fills so the
     // newest stays anchored to the bottom of the viewport while
     // older messages overflow off the top as the reader scrolls back.
-    let total = state.messages.len();
+    // Each message belongs to exactly one peer. Keep the global encrypted
+    // history, but render only the conversation currently selected in the
+    // sidebar so switching peers never leaks another chat into this pane.
+    let conversation: Vec<UiMessage> = selected_peer_id
+        .map(|peer_id| {
+            state
+                .messages
+                .iter()
+                .filter(|message| message.from_peer == peer_id)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let total = conversation.len();
+    state.active_chat_peer = selected_peer_id;
+    state.active_chat_message_count = total;
     let visible_n = (area.height as usize).saturating_sub(2); // minus borders
     // Publish the chat interior height so `scroll_back` can clamp the
     // scroll offset to keep the viewport full at the top of history.
     state.visible_chat_rows = visible_n;
 
     // Empty state: show improved welcome message
-    let empty = state.messages.is_empty();
+    let empty = conversation.is_empty();
     // `image_anchors` records (Y offset inside the chat interior,
     // ImagePreview) pairs so a second pass can overlay StatefulImage
     // widgets at the right row. We compute Y offsets by walking the
@@ -1735,7 +1875,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         // header is anchored to its group's first message, so it does
         // not chase the newest message as more bubbles arrive within
         // the same group.
-        let bubble = Style::default().fg(theme.fg).bg(theme.status_bg);
+        let bubble_base = Style::default().fg(theme.fg).bg(theme.status_bg);
         let gutter = Line::from("");
         let today_bucket = day_bucket(now_unix());
         // Line budget for rendered chat rows. The chat block paints a
@@ -1767,28 +1907,18 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         // Build a single header line for a bubble that opens a new
         // sender group. The sender name is dominant (BOLD in their
         // accent color) and the timestamp rides muted gray to its right.
-        // Outgoing groups right-align the label so it sits flush against
-        // the outgoing bubble column; incoming groups pad the left edge
-        // with the sender's accent color so the header visually anchors
-        // to the incoming bubble below.
+        // Every header starts at the same left edge. Direction is conveyed by
+        // the sender color and bubble rail rather than shifting whole rows.
         let build_header = |m: &UiMessage| -> Line<'_> {
             let who = resolve_who(m);
             let who_style = who_style_for(m).add_modifier(Modifier::BOLD);
             let ts_style = theme.role_style(StyleRole::TextMuted);
             let ts = chrono_timestamp(&Some(m.ts_unix));
-            if m.outgoing {
-                Line::from(vec![
-                    Span::styled(format!("{} ", who), who_style),
-                    Span::styled(format!(" {}", ts), ts_style),
-                ])
-                .right_aligned()
-            } else {
-                Line::from(vec![
-                    Span::styled(" ", who_style),
-                    Span::styled(format!("{} ", who), who_style),
-                    Span::styled(format!(" {}", ts), ts_style),
-                ])
-            }
+            Line::from(vec![
+                Span::styled(if m.outgoing { "› " } else { "‹ " }, who_style),
+                Span::styled(format!("{} ", who), who_style),
+                Span::styled(format!("{}", ts), ts_style),
+            ])
         };
 
         // Respect the user's scroll anchor: when scrolled back, only
@@ -1797,8 +1927,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         let visible_end_index = total.saturating_sub(state.scroll);
         // Snapshot the visible slice into a contiguous Vec so we can
         // borrow it as `&[UiMessage]` for the forward walk below.
-        let slice: Vec<UiMessage> = state
-            .messages
+        let slice: Vec<UiMessage> = conversation
             .iter()
             .take(visible_end_index)
             .cloned()
@@ -1829,6 +1958,11 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         let mut prev_outgoing: Option<bool> = None;
 
         for (i, m) in slice.iter().enumerate() {
+            let bubble = if state.message_is_selected(m) {
+                bubble_base.add_modifier(Modifier::REVERSED)
+            } else {
+                bubble_base
+            };
             // Lines for this single message: optional group header +
             // optional day separator + bubble.
             let mut m_lines: Vec<Line> = Vec::new();
@@ -1857,7 +1991,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
             // past the slice so a scroll anchor that lands on a new day
             // is labelled.
             let prev_for_day: Option<&UiMessage> = if i == 0 {
-                state.messages.get(visible_end_index)
+                conversation.get(visible_end_index)
             } else {
                 prev
             };
@@ -1911,29 +2045,23 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
                 None
             };
             //
-            // Outgoing: subtle tone (status_bg) so the eye lands on the
-            //   reader's own messages without per-row rectangles. The
-            //   delivery chip occupies its own column on the right
-            //   with two cells of breathing room between body and
-            //   scrollbar. Chip color follows the semantic policy —
-            //   dim for both pending and delivered; the protocol only
-            //   exposes one ack state, so we keep the single `✓` glyph.
-            // Incoming: no fill, alignment only. Two cells of indent
-            //   under the header create the breathing room the spec
-            //   calls for without any background tone.
+            // Every bubble is left-aligned. Outgoing delivery state gets a
+            // padded right-hand chip so only the status reaches the pane
+            // edge; this keeps message text in a stable readable column.
             if m.outgoing {
                 let chip_char = if m.pending { " ⏳" } else { " ✓" };
                 let chip_style = theme.role_style(StyleRole::TextMuted);
-                m_lines.push(
-                    Line::from(vec![
-                        Span::styled("  ", bubble),
-                        Span::styled(m.body.clone(), bubble),
-                        Span::styled("  ", bubble),
-                        Span::styled(chip_char, chip_style),
-                        Span::styled(" ", Style::default().bg(theme.bg)),
-                    ])
-                    .right_aligned(),
-                );
+                let mut bubble_line = vec![
+                    Span::styled("  ", bubble),
+                    Span::styled(m.body.clone(), bubble),
+                    Span::styled("  ", bubble),
+                ];
+                let chip = Span::styled(chip_char, chip_style);
+                let used = bubble_line.iter().map(Span::width).sum::<usize>() + chip.width();
+                let inner_width = area.width.saturating_sub(2) as usize;
+                bubble_line.push(Span::raw(" ".repeat(inner_width.saturating_sub(used))));
+                bubble_line.push(chip);
+                m_lines.push(Line::from(bubble_line).left_aligned());
             } else {
                 let indent_style = Style::default().bg(theme.bg);
                 m_lines.push(Line::from(vec![
@@ -2279,6 +2407,7 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs
         hint("Enter", "send"),
         hint("Esc", "clear"),
         hint("Tab", "focus"),
+        hint("drag", "select · Ctrl-C copy"),
         hint("?", "help"),
     ] {
         right_spans.extend(h);
@@ -2722,6 +2851,33 @@ mod tests {
         assert_eq!(s.focus, Focus::Sidebar);
         s.cycle_focus();
         assert_eq!(s.focus, Focus::Chat);
+    }
+
+    #[test]
+    fn selecting_another_peer_resets_chat_viewport() {
+        let id = Identity {
+            peer_id: [0u8; 16],
+            keypair: crate::crypto::Keypair::generate(),
+            name: "alice".into(),
+            hostname: "test-host".into(),
+        };
+        let mut s = UiState::from_identity(&id);
+        for (peer_id, name) in [([1u8; 16], "bob"), ([2u8; 16], "carol")] {
+            s.apply(&Event::PeerSeen {
+                peer_id,
+                name: name.into(),
+                hostname: "host".into(),
+                public_key: [0u8; 32],
+                fingerprint: "fp".into(),
+                addr: "127.0.0.1:1".parse().unwrap(),
+            });
+        }
+        s.scroll = 4;
+        s.active_chat_peer = Some([1u8; 16]);
+        s.select_peer(1);
+        assert_eq!(s.selected_peer, 1);
+        assert_eq!(s.scroll, 0);
+        assert_eq!(s.active_chat_peer, None);
     }
 
     #[test]

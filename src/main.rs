@@ -192,6 +192,27 @@ fn hex(b: &[u8]) -> String {
     s
 }
 
+/// Copy selected chat text using the terminal-native OSC-52 clipboard
+/// protocol. This keeps copy support dependency-free and works over SSH in
+/// terminals that permit clipboard forwarding.
+fn copy_to_terminal_clipboard(text: &str) {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes = text.as_bytes();
+    let mut encoded = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0] as usize;
+        let b = chunk.get(1).copied().unwrap_or(0) as usize;
+        let c = chunk.get(2).copied().unwrap_or(0) as usize;
+        encoded.push(TABLE[a >> 2] as char);
+        encoded.push(TABLE[((a & 0x03) << 4) | (b >> 4)] as char);
+        encoded.push(if chunk.len() > 1 { TABLE[((b & 0x0f) << 2) | (c >> 6)] as char } else { '=' });
+        encoded.push(if chunk.len() > 2 { TABLE[c & 0x3f] as char } else { '=' });
+    }
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(format!("\x1b]52;c;{}\x07", encoded).as_bytes());
+    let _ = stdout.flush();
+}
+
 /// Copy the transferred bytes to `dest`, creating the parent
 /// directory if needed. Used by the clipboard-image flow so the
 /// sent image survives a reboot instead of being wiped with `/tmp`.
@@ -550,7 +571,7 @@ fn start_tui(
                     Ok(Action::Connect {
                         addr,
                         name_hint,
-                        public_key: _,
+                        public_key,
                         reverse,
                     }) => {
                         // peer::connect dials, handshakes, spawns the
@@ -586,6 +607,16 @@ fn start_tui(
                                         .unwrap_or_else(|| "?".into()),
                                     trusted: false,
                                     addr,
+                                });
+                            } else if public_key != [0u8; 32] {
+                                // A saved contact that is asleep is a normal
+                                // startup/reconnect state. Mark it offline
+                                // in the sidebar so the UI does not present
+                                // a misleading connection-refused failure.
+                                let peer_id = ppexchanger::net::listener::peer_id_from_pubkey(&public_key);
+                                let _ = tx_clone.send(Event::PeerGone {
+                                    peer_id,
+                                    name: name_hint,
                                 });
                             } else if let Some((control_addr, target_peer_id)) = reverse {
                                 // Try the advertised endpoint first, then the
@@ -1481,7 +1512,54 @@ fn start_tui(
                         }
                     }
                 } else {
-                    match editor.on_key(&ev) {
+                    // Sidebar navigation is handled before the line editor.
+                    // This prevents Up/Down from recalling command history
+                    // into the composer while the peers pane is focused.
+                    let navigated_sidebar = if let crossterm::event::Event::Key(key) = &ev {
+                        if key.kind == crossterm::event::KeyEventKind::Press
+                            && key.modifiers.is_empty()
+                            && matches!(
+                                key.code,
+                                crossterm::event::KeyCode::Up
+                                    | crossterm::event::KeyCode::Down
+                            )
+                            && state.lock().unwrap().focus == tui::Focus::Sidebar
+                        {
+                            let mut s = state.lock().unwrap();
+                            s.move_selection(if key.code == crossterm::event::KeyCode::Up {
+                                -1
+                            } else {
+                                1
+                            });
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !navigated_sidebar {
+                        let copied = if let crossterm::event::Event::Key(key) = &ev {
+                            if key.kind == crossterm::event::KeyEventKind::Press
+                                && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                                && matches!(
+                                    key.code,
+                                    crossterm::event::KeyCode::Char('c')
+                                        | crossterm::event::KeyCode::Char('C')
+                                )
+                            {
+                                state.lock().unwrap().take_selected_message_text()
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(text) = copied {
+                        copy_to_terminal_clipboard(&text);
+                        state.lock().unwrap().status = "message copied to clipboard".into();
+                        } else {
+                        match editor.on_key(&ev) {
                         ppexchanger::tui::EditorEvent::Submit(text) => {
                             if text.starts_with('/') {
                                 handle_command(
@@ -1576,6 +1654,13 @@ fn start_tui(
                         let mut s = state.lock().unwrap();
                         s.show_peer_picker = !s.show_peer_picker;
                     }
+                    ppexchanger::tui::EditorEvent::ActivateSelection => {
+                        let mut s = state.lock().unwrap();
+                        if s.focus == tui::Focus::Sidebar && !s.peers.is_empty() {
+                            s.focus = tui::Focus::Chat;
+                            s.dismiss_logo();
+                        }
+                    }
                     ppexchanger::tui::EditorEvent::PageUp => {
                         let mut s = state.lock().unwrap();
                         if s.focus == tui::Focus::Chat {
@@ -1608,11 +1693,35 @@ fn start_tui(
                             s.dismiss_logo();
                         }
                     }
-                    ppexchanger::tui::EditorEvent::HistoryPrev
-                    | ppexchanger::tui::EditorEvent::HistoryNext
-                    | ppexchanger::tui::EditorEvent::Edited
+                    ppexchanger::tui::EditorEvent::HistoryPrev => {
+                        let mut s = state.lock().unwrap();
+                        if s.focus == tui::Focus::Sidebar {
+                            s.move_selection(-1);
+                        }
+                    }
+                    ppexchanger::tui::EditorEvent::HistoryNext => {
+                        let mut s = state.lock().unwrap();
+                        if s.focus == tui::Focus::Sidebar {
+                            s.move_selection(1);
+                        }
+                    }
+                    ppexchanger::tui::EditorEvent::PeerPrev => {
+                        let mut s = state.lock().unwrap();
+                        if s.focus == tui::Focus::Sidebar {
+                            s.move_selection(-1);
+                        }
+                    }
+                    ppexchanger::tui::EditorEvent::PeerNext => {
+                        let mut s = state.lock().unwrap();
+                        if s.focus == tui::Focus::Sidebar {
+                            s.move_selection(1);
+                        }
+                    }
+                    ppexchanger::tui::EditorEvent::Edited
                     | ppexchanger::tui::EditorEvent::MenuAction(_)
                     | ppexchanger::tui::EditorEvent::None => {}
+                        }
+                    }
                     }
                     // File-offer modal: Enter accepts, Esc rejects.
                     // Closed by either choice; the FileReceived /
@@ -1857,11 +1966,14 @@ fn handle_mouse(
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => match hit {
             tui::Hit::Sidebar(idx) => {
-                s.selected_peer = idx;
+                s.select_peer(idx);
                 s.focus = tui::Focus::Sidebar;
             }
             tui::Hit::Chat => {
                 s.focus = tui::Focus::Chat;
+                if let Some(index) = s.message_index_at_chat_row(areas.chat, m.row) {
+                    s.begin_message_selection(index);
+                }
             }
             tui::Hit::Footer => {
                 // Clicks in the footer (input line) intentionally
@@ -1882,6 +1994,12 @@ fn handle_mouse(
                 return Some(ppexchanger::tui::EditorEvent::MenuAction(action));
             }
         },
+        MouseEventKind::Drag(MouseButton::Left) if matches!(&hit, tui::Hit::Chat) => {
+            if let Some(index) = s.message_index_at_chat_row(areas.chat, m.row) {
+                s.extend_message_selection(index);
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => s.finish_message_selection(),
         MouseEventKind::ScrollUp if s.focus == tui::Focus::Chat => s.scroll_back(2),
         MouseEventKind::ScrollDown if s.focus == tui::Focus::Chat => s.scroll_forward(2),
         _ => {}

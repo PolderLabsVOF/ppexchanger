@@ -18,6 +18,9 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 pub enum EditorEvent {
     /// User pressed Enter with non-empty buffer.
     Submit(String),
+    /// Enter on an empty composer. The main loop uses this to open the
+    /// currently highlighted peer when the sidebar has focus.
+    ActivateSelection,
     /// Ctrl-C — main loop should quit.
     Cancel,
     /// Tab — cycle focus between sidebar and chat.
@@ -26,8 +29,12 @@ pub enum EditorEvent {
     HistoryPrev,
     /// Down arrow with empty buffer — recall next input from history.
     HistoryNext,
-    /// Up/Down with non-empty buffer — ignored (let terminal handle).
+    /// No editor action was needed for the key event.
     None,
+    /// Up/Down while the peers pane has focus. Kept separate from command
+    /// history so a non-empty composer never gets mutated by navigation.
+    PeerPrev,
+    PeerNext,
     /// Esc — cancel current input.
     Clear,
     /// Ctrl-L — clear input buffer.
@@ -210,7 +217,7 @@ impl LineEditor {
                     self.push_history(&out);
                 }
                 if out.is_empty() {
-                    EditorEvent::None
+                    EditorEvent::ActivateSelection
                 } else {
                     EditorEvent::Submit(out)
                 }
@@ -223,14 +230,14 @@ impl LineEditor {
                 if self.buffer.is_empty() {
                     self.recall_history(-1)
                 } else {
-                    EditorEvent::None
+                    EditorEvent::PeerPrev
                 }
             }
             KeyCode::Down => {
                 if self.buffer.is_empty() {
                     self.recall_history(1)
                 } else {
-                    EditorEvent::None
+                    EditorEvent::PeerNext
                 }
             }
             KeyCode::Char(c) => {
@@ -334,6 +341,26 @@ mod tests {
         // Up arrow on empty buffer recalls last history entry.
         let _ = ed.on_key(&press(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(ed.buffer, "hi");
+    }
+
+    #[test]
+    fn empty_enter_activates_peer_selection() {
+        let mut ed = LineEditor::new();
+        assert_eq!(
+            ed.on_key(&press(KeyCode::Enter, KeyModifiers::NONE)),
+            EditorEvent::ActivateSelection
+        );
+    }
+
+    #[test]
+    fn arrow_navigation_does_not_mutate_nonempty_composer() {
+        let mut ed = LineEditor::new();
+        ed.buffer = "draft".into();
+        assert_eq!(
+            ed.on_key(&press(KeyCode::Up, KeyModifiers::NONE)),
+            EditorEvent::PeerPrev
+        );
+        assert_eq!(ed.buffer, "draft");
     }
 
     #[test]
