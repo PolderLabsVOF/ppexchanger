@@ -134,7 +134,7 @@ enum Mode {
 }
 
 fn print_help() {
-    println!(
+    let help = format!(
         "ppexchanger {version} — fully-local LAN P2P encrypted terminal messenger\n\
          \n\
          USAGE:\n  ppx [--name <name>] [--port <port>] [--theme <name>] [--config <path>] [--no-mouse]\n  ppx --gen-identity\n  ppx --help | --version\n\
@@ -143,6 +143,7 @@ fn print_help() {
                     Linux/macOS, %APPDATA%\\ppexchanger\\config.toml on Windows)\n  --no-mouse        disable mouse capture (mouse is ON by default)\n  --gen-identity    generate a new identity and exit\n  --help, -h        print this help\n  --version, -V     print version",
         version = VERSION
     );
+    println!("{}", help.replace("mouse is ON by default", "native terminal selection is the default"));
 }
 
 fn run(
