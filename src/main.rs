@@ -304,8 +304,8 @@ fn hex(b: &[u8]) -> String {
     s
 }
 
-/// Best-effort desktop notification for an inbound message. The in-app toast
-/// is always rendered by `UiState`; this helper adds a native notification
+/// Best-effort desktop notification for an inbound message. The TUI keeps
+/// the conversation unobstructed; this helper adds a native notification
 /// when the host provides one, falling back to the terminal's OSC-777
 /// notification protocol for terminals that support it.
 fn notify_received_message(name: &str, body: &str) {
@@ -1417,7 +1417,11 @@ fn start_tui(
                 break;
             }
         }
-        if crossterm::event::poll(Duration::from_millis(150)).unwrap_or(false) {
+        // Keep the redraw/input cadence responsive while idle. Network
+        // events are drained at the top of each iteration, so a shorter
+        // poll timeout makes a newly received message visible promptly
+        // without busy-spinning the UI thread.
+        if crossterm::event::poll(Duration::from_millis(75)).unwrap_or(false) {
             if let Ok(ev) = crossterm::event::read() {
                 // Mouse + paste never reach on_key: crossterm's on_key
                 // returns None for non-Key events, which would silently
