@@ -1916,18 +1916,23 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         // Build a single header line for a bubble that opens a new
         // sender group. The sender name is dominant (BOLD in their
         // accent color) and the timestamp rides muted gray to its right.
-        // Every header starts at the same left edge. Direction is conveyed by
-        // the sender color and bubble rail rather than shifting whole rows.
+        // Match each header to its bubble column so the conversation reads
+        // naturally at a glance: peers on the left, us on the right.
         let build_header = |m: &UiMessage| -> Line<'_> {
             let who = resolve_who(m);
             let who_style = who_style_for(m).add_modifier(Modifier::BOLD);
             let ts_style = theme.role_style(StyleRole::TextMuted);
             let ts = chrono_timestamp(&Some(m.ts_unix));
-            Line::from(vec![
+            let line = Line::from(vec![
                 Span::styled(if m.outgoing { "› " } else { "‹ " }, who_style),
                 Span::styled(format!("{} ", who), who_style),
                 Span::styled(format!("{}", ts), ts_style),
-            ])
+            ]);
+            if m.outgoing {
+                line.right_aligned()
+            } else {
+                line.left_aligned()
+            }
         };
 
         // Respect the user's scroll anchor: when scrolled back, only
