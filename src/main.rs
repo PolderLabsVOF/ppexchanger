@@ -930,19 +930,14 @@ fn start_tui(
                         // patched in from the registry when the offer
                         // was first delivered.
                         match inbox.accept(id) {
-                            Ok(Some(offer)) => {
+                            Ok(Some(_offer)) => {
                                 if let Some(tx) = outbound.get(&from_peer) {
                                     let _ = tx.send(FrameBody::FileAccept { id });
                                 }
-                                let from_name = peer_names
-                                    .get(&from_peer)
-                                    .cloned()
-                                    .unwrap_or_else(|| hex(&from_peer));
-                                let _ = act_bus_tx.send(Event::FileOffer {
-                                    from_peer,
-                                    from_name,
-                                    offer,
-                                });
+                                // Acceptance is an internal transfer action;
+                                // never re-emit the offer to the UI, which
+                                // would resurrect a confirmation popup after
+                                // auto-acceptance.
                             }
                             Ok(None) => {
                                 let _ = act_bus_tx.send(Event::Info(format!(
@@ -2234,8 +2229,7 @@ fn handle_mouse(
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut s = state.lock().unwrap();
     let areas = tui::compute_layout(size, !s.sidebar_hidden);
-    let modal_open = s.file_offer.is_some()
-        || s.text_preview.is_some()
+    let modal_open = s.text_preview.is_some()
         || s.show_help
         || s.discovery.is_some()
         || s.settings.is_some();

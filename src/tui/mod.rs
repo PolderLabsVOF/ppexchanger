@@ -39,7 +39,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Scrollbar,
@@ -638,6 +638,7 @@ impl UiState {
                 // Offers are auto-accepted by the action thread. Keep this
                 // event path non-modal for compatibility with older peers:
                 // surface a status line instead of blocking the conversation.
+                self.file_offer = None;
                 self.status = format!("receiving {} from {}", offer.name, from_name);
                 self.push_message(UiMessage {
                     from_peer: *from_peer,
@@ -691,21 +692,28 @@ impl UiState {
                         self.status = format!("downloaded {} · preview ready", name);
                     }
                 }
-                self.push_message(UiMessage {
-                    from_peer: *from_peer,
-                    from_name: "[file]".into(),
-                    body: format!(
-                        "{} sent {} ({} bytes) → {}",
-                        from_name,
-                        name,
-                        bytes,
-                        saved_to.display()
-                    ),
-                    outgoing: false,
-                    pending: false,
-                    ts_unix: now_unix(),
-                    image,
-                });
+                if let Some(image) = image {
+                    // Keep image rows compact (filename + dimensions) so the
+                    // preview anchor is stable and the thumbnail stays
+                    // aligned with the left edge of the peer's messages.
+                    self.push_inbound_image(*from_peer, from_name.clone(), image);
+                } else {
+                    self.push_message(UiMessage {
+                        from_peer: *from_peer,
+                        from_name: "[file]".into(),
+                        body: format!(
+                            "{} sent {} ({} bytes) → {}",
+                            from_name,
+                            name,
+                            bytes,
+                            saved_to.display()
+                        ),
+                        outgoing: false,
+                        pending: false,
+                        ts_unix: now_unix(),
+                        image: None,
+                    });
+                }
             }
             Event::FileAborted {
                 from_peer,
@@ -932,13 +940,20 @@ impl UiState {
     /// the in-terminal preview.
     pub fn push_outgoing_image(&mut self, to_peer: PeerId, image: ImageMeta) {
         let kb = image.bytes as f64 / 1024.0;
+        let label = image
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image")
+            .to_string();
+        let label = truncate_tail(&label, 28);
         let body = format!(
-            "[image {}×{} · {:.1} KB · {} → {}]",
+            "[image {} · {}×{} · {:.1} KB · {}]",
+            label,
             image.width,
             image.height,
             kb,
-            image.mime,
-            image.path.display()
+            image.mime
         );
         self.push_message(UiMessage {
             from_peer: to_peer,
@@ -961,13 +976,20 @@ impl UiState {
         image: ImageMeta,
     ) {
         let kb = image.bytes as f64 / 1024.0;
+        let label = image
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image")
+            .to_string();
+        let label = truncate_tail(&label, 28);
         let body = format!(
-            "[image {}×{} · {:.1} KB · {} → {}]",
+            "[image {} · {}×{} · {:.1} KB · {}]",
+            label,
             image.width,
             image.height,
             kb,
-            image.mime,
-            image.path.display()
+            image.mime
         );
         self.push_message(UiMessage {
             from_peer,
@@ -1995,7 +2017,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
     // Empty state: show improved welcome message
     let empty = conversation.is_empty();
     // `image_anchors` records (Y offset inside the chat interior,
-    // ImagePreview) pairs so a second pass can overlay StatefulImage
+    // ImagePreview) pairs so a second pass can overlay the pixel preview
     // widgets at the right row. We compute Y offsets by walking the
     // same row counts the Paragraph is about to consume.
     let mut image_anchors: Vec<(u16, ImagePreview)> = Vec::new();
@@ -2084,6 +2106,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         // recorded into `image_anchors` for the second-pass overlay.
         struct Chunk<'a> {
             rows: Vec<Line<'a>>,
+            preview: Option<ImagePreview>,
         }
         // Maximum rows / columns we'll spend on an inline preview.
         // Keeps a single image from monopolising the chat viewport.
@@ -2238,16 +2261,13 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
                 }
             }
             lines_used += m_lines.len();
-            // Record the image preview anchor with the cumulative
-            // line count so the second pass can place it at the
-            // right Y row inside the chat interior. The preview
-            // sits at the END of the chunk (after the metadata
-            // bubble), so its top row is `lines_used - height`.
-            if let Some(preview) = image_preview.as_ref() {
-                let top = lines_used.saturating_sub(preview.height as usize) as u16;
-                image_anchors.push((top, preview.clone()));
-            }
-            chunks.push(Chunk { rows: m_lines });
+            // Keep the preview attached to its chunk. Anchors are computed
+            // after old chunks are dropped, avoiding stale Y offsets when
+            // the conversation scrollback exceeds the viewport.
+            chunks.push(Chunk {
+                rows: m_lines,
+                preview: image_preview.clone(),
+            });
             prev = Some(m);
             prev_outgoing = Some(m.outgoing);
         }
@@ -2257,6 +2277,10 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         let mut rows: Vec<Line> = Vec::with_capacity(lines_used);
         for chunk in &chunks {
             rows.extend(chunk.rows.iter().cloned());
+            if let Some(preview) = chunk.preview.as_ref() {
+                let top = rows.len().saturating_sub(preview.height as usize) as u16;
+                image_anchors.push((top, preview.clone()));
+            }
         }
         rows
     };
@@ -2267,10 +2291,9 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         .style(Style::default().fg(theme.fg).bg(theme.bg));
     f.render_widget(para, area);
 
-    // Second pass: overlay StatefulImage widgets at the Y offsets
-    // recorded during the chunk walk. The StatefulProtocol in the
-    // cache keys on file path so re-rendering the same image is
-    // cheap after the first decode.
+    // Second pass: overlay pixel previews at the Y offsets recorded during
+    // the chunk walk. Rendering is terminal-independent Unicode halfblocks,
+    // so this also works in terminals without Kitty/iTerm graphics support.
     if !empty {
         let interior = area.inner(Margin { vertical: 1, horizontal: 1 });
         for (y_offset, preview) in image_anchors {
@@ -2361,47 +2384,51 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
 /// dimensions and path.
 fn render_image_preview(
     f: &mut Frame,
-    state: &mut UiState,
+    _state: &mut UiState,
     interior: Rect,
     abs_y: u16,
     preview: &ImagePreview,
 ) {
-    // Lazy-init the picker on first draw. `from_query_stdio` queries
-    // terminal escape sequences; doing it inside `render` means the
-    // TUI is fully wired before the query goes out.
-    if state.image_picker.is_none() {
-        // Avoid terminal capability queries here: they write private escape
-        // probes to stdout and can interfere with native selection or leave
-        // responses queued on exit. A conservative cell size works across
-        // terminals and guarantees a halfblock preview.
-        let mut p = ratatui_image::picker::Picker::from_fontsize((8, 16));
-        p.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
-        state.image_picker = Some(p);
-    }
-    let Some(mut picker) = state.image_picker else {
-        return;
+    let image = match image::open(&preview.meta.path) {
+        Ok(image) => image,
+        Err(_) => return,
     };
-    let cache_key = preview.meta.path.clone();
-    if !state.image_protocols.contains_key(&cache_key) {
-        let dyn_img = match image::open(&preview.meta.path) {
-            Ok(img) => img,
-            Err(_) => return,
-        };
-        let protocol = picker.new_resize_protocol(dyn_img);
-        state.image_protocols.insert(cache_key.clone(), protocol);
-    }
+    // Keep the image fully inside the pane even on narrow terminals. The
+    // outgoing edge uses the same right boundary as the message bubbles;
+    // incoming previews share the left gutter with peer messages.
+    let width = preview.width.min(interior.width);
+    let height = preview.height.min(interior.height.saturating_sub(abs_y.saturating_sub(interior.y)));
     let x = if preview.outgoing {
-        interior.right().saturating_sub(preview.width)
+        interior.right().saturating_sub(width)
     } else {
         interior.x
     };
-    let rect = Rect::new(x, abs_y, preview.width, preview.height);
-    let protocol = match state.image_protocols.get_mut(&cache_key) {
-        Some(p) => p,
-        None => return,
-    };
-    use ratatui_image::StatefulImage;
-    f.render_stateful_widget(StatefulImage::new(None), rect, protocol);
+    let rect = Rect::new(x, abs_y, width, height);
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    // Render directly with Unicode halfblocks. This works consistently in
+    // every terminal and preserves two vertical source pixels per cell.
+    let resized = image
+        .resize_exact(
+            rect.width as u32,
+            rect.height as u32 * 2,
+            image::imageops::FilterType::Lanczos3,
+        )
+        .to_rgba8();
+    let mut lines = Vec::with_capacity(rect.height as usize);
+    for row in 0..rect.height as u32 {
+        let mut spans = Vec::with_capacity(rect.width as usize);
+        for col in 0..rect.width as u32 {
+            let upper = resized.get_pixel(col, row * 2);
+            let lower = resized.get_pixel(col, row * 2 + 1);
+            let upper = Color::Rgb(upper[0], upper[1], upper[2]);
+            let lower = Color::Rgb(lower[0], lower[1], lower[2]);
+            spans.push(Span::styled("▀", Style::default().fg(upper).bg(lower)));
+        }
+        lines.push(Line::from(spans));
+    }
+    f.render_widget(Paragraph::new(lines), rect);
 }
 
 /// Render the footer (composer + status row).
@@ -2498,7 +2525,6 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs
     // Place the terminal cursor at the logical end of the visible draft.
     let modal_open = state.show_help
         || state.discovery.is_some()
-        || state.file_offer.is_some()
         || state.settings.is_some()
         || state.show_peer_picker;
     if state.focus == Focus::Chat && !modal_open && !is_empty {
@@ -3068,7 +3094,7 @@ mod tests {
         assert!(s.messages.is_empty());
 
         let any_modal = |s: &UiState| {
-            s.show_help || s.discovery.is_some() || s.file_offer.is_some() || s.settings.is_some()
+            s.show_help || s.discovery.is_some() || s.settings.is_some()
         };
         assert!(!any_modal(&s));
 
