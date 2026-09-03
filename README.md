@@ -35,11 +35,24 @@ published alongside the release, and drops the binary into
 
 ### Nightly builds
 
-The `main` branch is built automatically every night for Linux, macOS, and
+The `dev` branch is built automatically every night for Linux, macOS, and
 Windows. Nightly downloads are available from the [rolling nightly
 release](https://github.com/PolderLabsVOF/ppexchanger/releases/tag/nightly).
 Use a numbered release for everyday use; nightlies are for trying the newest
 changes before they become stable.
+
+### Branches and release channels
+
+- **`dev`** — active development. Every commit is validated by CI and is the
+  source for nightly builds.
+- **`beta`** — integration and user testing. Tags such as `v0.8.0-beta.1` or
+  `v0.8.0-rc.1` publish a pre-release from this branch.
+- **`main`** — stable, production-ready code. Tags such as `v0.8.0` publish
+  the official release; the workflow rejects tags that do not point to a
+  commit on `main`.
+
+This keeps experimental work out of stable downloads while making it easy to
+try the next version early.
 
 ### Linux
 
