@@ -137,6 +137,10 @@ pub struct UiState {
     /// Bounded message ring; older entries are dropped when full.
     pub messages: VecDeque<UiMessage>,
     pub status: String,
+    /// Short-lived in-app notification for a newly received message. Keeping
+    /// this separate from `status` lets the footer remain useful while the
+    /// notification toast is visible.
+    pub notification: Option<UiNotification>,
     /// The draft displayed in the composer. Keeping it in UI state lets the
     /// renderer draw a real input field without overloading `status`.
     pub composer: String,
@@ -222,6 +226,16 @@ pub struct UiState {
     /// resize+encode once per area change; we keep the result so
     /// subsequent frames just render pixels without re-decoding.
     pub image_protocols: HashMap<PathBuf, ratatui_image::protocol::StatefulProtocol>,
+}
+
+/// A transient inbound-message notification rendered above the chat. The
+/// payload is intentionally plain text: it is escaped by ratatui and never
+/// interpreted as terminal control data.
+#[derive(Debug, Clone)]
+pub struct UiNotification {
+    pub title: String,
+    pub body: String,
+    pub created_unix: u64,
 }
 
 /// Snapshot of an in-flight `/discover` scan.
@@ -326,6 +340,7 @@ impl UiState {
             peer_name_overrides: HashMap::new(),
             messages: VecDeque::new(),
             status: "starting…".into(),
+            notification: None,
             composer: String::new(),
             selected_peer: 0,
             focus: Focus::Chat,
@@ -502,6 +517,12 @@ impl UiState {
                 from_name,
                 body,
             } => {
+                let display_name = self
+                    .peers
+                    .iter()
+                    .find(|peer| peer.peer_id == *from_peer)
+                    .map(|peer| peer.name.clone())
+                    .unwrap_or_else(|| from_name.clone());
                 self.push_message(UiMessage {
                     from_peer: *from_peer,
                     from_name: from_name.clone(),
@@ -510,6 +531,12 @@ impl UiState {
                     pending: false,
                     ts_unix: now_unix(),
                     image: None,
+                });
+                self.status = format!("new message from {}", display_name);
+                self.notification = Some(UiNotification {
+                    title: display_name,
+                    body: body.clone(),
+                    created_unix: now_unix(),
                 });
             }
             Event::TextDelivered { peer_id, body } => {
@@ -1408,6 +1435,16 @@ pub fn render(
     // CRT scanline phase flips each render so the alternating DIM
     // modifier on chat rows appears to crawl downward.
     state.scanline_tick = !state.scanline_tick;
+    // Notifications are intentionally transient. The render loop runs even
+    // when no key is pressed, so stale toasts disappear without another
+    // network event or user interaction.
+    if state
+        .notification
+        .as_ref()
+        .is_some_and(|notification| now_unix().saturating_sub(notification.created_unix) >= 6)
+    {
+        state.notification = None;
+    }
     terminal.draw(|f| {
         let area = f.area();
         // Paint the complete canvas first. This prevents stale cells when a
@@ -1429,6 +1466,8 @@ pub fn render(
         if state.show_footer {
             draw_footer(f, areas.footer, state, theme, glyphs);
         }
+
+        draw_notification(f, area, state, theme);
 
         if state.show_help {
             help::render(f, theme, glyphs);
@@ -2462,6 +2501,52 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs
     }
 }
 
+/// Render a transient inbound-message toast. It lives outside the footer so
+/// long messages never overwrite connection status, and modals rendered
+/// later can naturally take precedence over it.
+fn draw_notification(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme) {
+    let Some(notification) = state.notification.as_ref() else {
+        return;
+    };
+    if area.width < 30 || area.height < 7 {
+        return;
+    }
+    let width = area.width.saturating_sub(2).min(58).max(30);
+    let height = 5.min(area.height.saturating_sub(2));
+    // Keep the app header/menu unobstructed; the toast floats in the
+    // conversation area beneath it. Clamp the fallback for very small
+    // terminals so the widget always stays inside the frame.
+    let preferred_y = area.y.saturating_add(MENU_HEIGHT + 1);
+    let y = if preferred_y.saturating_add(height) <= area.bottom() {
+        preferred_y
+    } else {
+        area.bottom().saturating_sub(height)
+    };
+    let popup = Rect::new(area.right().saturating_sub(width + 1), y, width, height);
+    let body: String = notification.body.chars().take(240).collect();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme.role_style(StyleRole::BorderFocused))
+        .title(Span::styled(
+            " new message ",
+            theme.role_style(StyleRole::TextAccent),
+        ));
+    let lines = vec![
+        Line::from(Span::styled(
+            notification.title.clone(),
+            theme.self_message_style().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(body, theme.role_style(StyleRole::TextSecondary))),
+    ];
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
 /// Show matching slash commands immediately above the borderless composer.
 /// It is deliberately contextual: ordinary message drafting never loses chat
 /// space to a permanently visible command menu.
@@ -2654,6 +2739,8 @@ mod tests {
         });
         assert_eq!(s.messages.len(), 1);
         assert_eq!(s.messages[0].body, "hi");
+        assert_eq!(s.status, "new message from bob");
+        assert_eq!(s.notification.as_ref().map(|n| n.body.as_str()), Some("hi"));
     }
 
     #[test]

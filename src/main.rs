@@ -213,6 +213,58 @@ fn copy_to_terminal_clipboard(text: &str) {
     let _ = stdout.flush();
 }
 
+/// Best-effort desktop notification for an inbound message. The in-app toast
+/// is always rendered by `UiState`; this helper adds a native notification
+/// when the host provides one, falling back to the terminal's OSC-777
+/// notification protocol for terminals that support it.
+fn notify_received_message(name: &str, body: &str) {
+    let title = format!("ppx · {}", notification_text(name, 80));
+    let body = notification_text(body, 240);
+
+    #[cfg(target_os = "linux")]
+    let delivered = std::process::Command::new("notify-send")
+        .args(["--app-name", "ppx", &title, &body])
+        .spawn()
+        .is_ok();
+    #[cfg(target_os = "macos")]
+    let delivered = {
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            apple_script_escape(&body),
+            apple_script_escape(&title)
+        );
+        std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn()
+            .is_ok()
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let delivered = false;
+
+    if !delivered {
+        let osc_title = notification_text(&title, 80);
+        let osc_body = notification_text(&body, 240);
+        let mut stderr = std::io::stderr();
+        let _ = stderr.write_all(
+            format!("\x1b]777;notify;{};{}\x07", osc_title, osc_body).as_bytes(),
+        );
+        let _ = stderr.flush();
+    }
+}
+
+fn notification_text(value: &str, max_chars: usize) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(max_chars)
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn apple_script_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Copy the transferred bytes to `dest`, creating the parent
 /// directory if needed. Used by the clipboard-image flow so the
 /// sent image survives a reboot instead of being wiped with `/tmp`.
@@ -1155,6 +1207,25 @@ fn start_tui(
             }
             // Stable sidebar ordering: Connected > Seen > Gone, then name.
             s.sort_peers();
+            if text_count > 0 {
+                if let Some((name, body)) = s
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| !message.outgoing)
+                    .map(|message| {
+                        let name = s
+                            .peers
+                            .iter()
+                            .find(|peer| peer.peer_id == message.from_peer)
+                            .map(|peer| peer.name.clone())
+                            .unwrap_or_else(|| message.from_name.clone());
+                        (name, message.body.clone())
+                    })
+                {
+                    notify_received_message(&name, &body);
+                }
+            }
             // Notify-bell: when a fresh chat message arrived and the
             // user opted in, ring the terminal bell on stderr. Avoids
             // stdout (which the renderer owns). Fits in one byte so
