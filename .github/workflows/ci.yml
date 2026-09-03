@@ -113,4 +113,7 @@ jobs:
         with:
           tool: cargo-audit
       - name: Audit locked dependencies
-        run: cargo audit --locked
+        # cargo-audit reads Cargo.lock directly; it does not support Cargo's
+        # `--locked` flag. The lockfile is still committed and validated by
+        # the build/test jobs above.
+        run: cargo audit
