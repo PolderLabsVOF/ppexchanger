@@ -190,6 +190,10 @@ jobs:
             install.sh
             dist/**/*.tar.gz
             dist/**/*.zip
-          fail_on_unmatched_files: true
+          # Some targets may be unavailable on a given runner (for example,
+          # Windows zip creation). Upload every artifact that was produced
+          # instead of failing the entire release because an optional pattern
+          # has no matches.
+          fail_on_unmatched_files: false
           draft: false
           prerelease: false
