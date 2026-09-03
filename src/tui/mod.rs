@@ -229,6 +229,11 @@ pub struct UiState {
     /// resize+encode once per area change; we keep the result so
     /// subsequent frames just render pixels without re-decoding.
     pub image_protocols: HashMap<PathBuf, ratatui_image::protocol::StatefulProtocol>,
+    /// Terminal-independent halfblock previews. Decoding and resizing an
+    /// image is relatively expensive, so cache the finished styled lines by
+    /// source path and cell dimensions. A new terminal size naturally gets a
+    /// separate entry without invalidating existing conversations.
+    image_rasters: HashMap<(PathBuf, u16, u16), Vec<Line<'static>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -381,6 +386,7 @@ impl UiState {
             contacts_dirty: false,
             image_picker: None,
             image_protocols: HashMap::new(),
+            image_rasters: HashMap::new(),
         }
     }
 
@@ -2384,15 +2390,11 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
 /// dimensions and path.
 fn render_image_preview(
     f: &mut Frame,
-    _state: &mut UiState,
+    state: &mut UiState,
     interior: Rect,
     abs_y: u16,
     preview: &ImagePreview,
 ) {
-    let image = match image::open(&preview.meta.path) {
-        Ok(image) => image,
-        Err(_) => return,
-    };
     // Keep the image fully inside the pane even on narrow terminals. The
     // outgoing edge uses the same right boundary as the message bubbles;
     // incoming previews share the left gutter with peer messages.
@@ -2407,28 +2409,46 @@ fn render_image_preview(
     if rect.width == 0 || rect.height == 0 {
         return;
     }
-    // Render directly with Unicode halfblocks. This works consistently in
-    // every terminal and preserves two vertical source pixels per cell.
-    let resized = image
-        .resize_exact(
-            rect.width as u32,
-            rect.height as u32 * 2,
-            image::imageops::FilterType::Lanczos3,
-        )
-        .to_rgba8();
-    let mut lines = Vec::with_capacity(rect.height as usize);
-    for row in 0..rect.height as u32 {
-        let mut spans = Vec::with_capacity(rect.width as usize);
-        for col in 0..rect.width as u32 {
-            let upper = resized.get_pixel(col, row * 2);
-            let lower = resized.get_pixel(col, row * 2 + 1);
-            let upper = Color::Rgb(upper[0], upper[1], upper[2]);
-            let lower = Color::Rgb(lower[0], lower[1], lower[2]);
-            spans.push(Span::styled("▀", Style::default().fg(upper).bg(lower)));
+    let key = (preview.meta.path.clone(), rect.width, rect.height);
+    if !state.image_rasters.contains_key(&key) {
+        let image = match image::open(&preview.meta.path) {
+            Ok(image) => image,
+            Err(_) => {
+                // Remember missing/unreadable files too; otherwise a stale
+                // history entry would retry filesystem decoding every frame.
+                state.image_rasters.insert(key.clone(), Vec::new());
+                return;
+            }
+        };
+        // Render directly with Unicode halfblocks. This works consistently in
+        // every terminal and preserves two vertical source pixels per cell.
+        let resized = image
+            .resize_exact(
+                rect.width as u32,
+                rect.height as u32 * 2,
+                image::imageops::FilterType::Lanczos3,
+            )
+            .to_rgba8();
+        let mut lines = Vec::with_capacity(rect.height as usize);
+        for row in 0..rect.height as u32 {
+            let mut spans = Vec::with_capacity(rect.width as usize);
+            for col in 0..rect.width as u32 {
+                let upper = resized.get_pixel(col, row * 2);
+                let lower = resized.get_pixel(col, row * 2 + 1);
+                let upper = Color::Rgb(upper[0], upper[1], upper[2]);
+                let lower = Color::Rgb(lower[0], lower[1], lower[2]);
+                spans.push(Span::styled("▀", Style::default().fg(upper).bg(lower)));
+            }
+            lines.push(Line::from(spans));
         }
-        lines.push(Line::from(spans));
+        state.image_rasters.insert(key.clone(), lines);
     }
-    f.render_widget(Paragraph::new(lines), rect);
+    if let Some(lines) = state.image_rasters.get(&key) {
+        if lines.is_empty() {
+            return;
+        }
+        f.render_widget(Paragraph::new(lines.clone()), rect);
+    }
 }
 
 /// Render the footer (composer + status row).
