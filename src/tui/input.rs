@@ -91,6 +91,7 @@ const HISTORY_CAP: usize = 64;
 /// Commands surfaced by the inline command palette. Keep this catalogue next
 /// to completion so the preview and Tab behavior can never drift apart.
 pub const COMMANDS: &[(&str, &str)] = &[
+    ("/help", "show keyboard shortcuts and commands"),
     ("/discover", "find peers on the local network"),
     ("/map", "toggle the discovery peer map"),
     ("/peers", "show known peers"),
@@ -238,6 +239,21 @@ impl LineEditor {
                     self.buffer.clear();
                     self.history_idx = None;
                     return EditorEvent::SubmitTextFile(text);
+                }
+                // Enter is also an autocomplete action for slash commands:
+                // `/disc` resolves to `/discover` and is submitted in the
+                // same keypress. For ambiguous prefixes the palette order is
+                // deterministic and its first match is the selected command.
+                if self.buffer.starts_with('/') {
+                    let command_end = self
+                        .buffer
+                        .find(char::is_whitespace)
+                        .unwrap_or(self.buffer.len());
+                    let query = self.buffer[..command_end].to_string();
+                    if let Some((command, _)) = command_matches(&query).first().copied() {
+                        let suffix = self.buffer[command_end..].to_string();
+                        self.buffer = format!("{}{}", command, suffix);
+                    }
                 }
                 let out = std::mem::take(&mut self.buffer);
                 self.history_idx = None;
@@ -430,6 +446,16 @@ mod tests {
         assert_eq!(ed.on_key(&press(KeyCode::Tab, KeyModifiers::NONE)), EditorEvent::Edited);
         assert_eq!(ed.buffer, "/discover ");
         assert_eq!(command_matches("/se")[0].0, "/send");
+    }
+
+    #[test]
+    fn enter_completes_and_submits_slash_command() {
+        let mut ed = LineEditor::new();
+        ed.buffer = "/disc".into();
+        assert_eq!(
+            ed.on_key(&press(KeyCode::Enter, KeyModifiers::NONE)),
+            EditorEvent::Submit("/discover".into())
+        );
     }
 
     #[test]

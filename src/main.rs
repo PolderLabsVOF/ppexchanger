@@ -2306,11 +2306,23 @@ fn handle_mouse(
             }
             tui::Hit::Chat => {
                 s.focus = tui::Focus::Chat;
-                // Text attachments are compact rows in the conversation.
-                // Clicking their row opens the bounded preview so the full
-                // pasted document can be inspected without flooding chat.
                 if let Some(index) = s.message_index_at_chat_row(areas.chat, m.row) {
-                    let _ = s.open_text_preview_at(index);
+                    let attachment = s.messages.get(index).and_then(|message| {
+                        message.image.as_ref().map(|meta| (meta.mime.clone(), meta.path.clone()))
+                    });
+                    if let Some((mime, path)) = attachment {
+                        if mime.starts_with("image/") {
+                            match reveal_in_file_manager(&path) {
+                                Ok(()) => s.status = format!("opened {} in file manager", path.display()),
+                                Err(error) => s.status = format!("could not open {}: {}", path.display(), error),
+                            }
+                        } else if mime.starts_with("text/") {
+                            // Text attachments are compact rows in the
+                            // conversation. Clicking opens the bounded
+                            // preview so a long paste can be inspected.
+                            let _ = s.open_text_preview_at(index);
+                        }
+                    }
                 }
             }
             tui::Hit::Footer => {
@@ -2400,6 +2412,40 @@ fn dropped_file_path(body: &str) -> Option<PathBuf> {
         PathBuf::from(decoded)
     };
     path.is_file().then_some(path)
+}
+
+/// Reveal an attachment in the platform's default file manager. This keeps
+/// the TUI itself lightweight: clicking an image row hands navigation to the
+/// user's normal desktop workflow and never blocks on a viewer process.
+fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-R", path.to_string_lossy().as_ref()])
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let directory = path.parent().unwrap_or(std::path::Path::new("."));
+        std::process::Command::new("xdg-open")
+            .arg(directory)
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = path;
+        Err(std::io::Error::other("no supported file manager"))
+    }
 }
 
 fn percent_decode(value: &str) -> Option<String> {
@@ -2505,6 +2551,9 @@ fn handle_command(
     let mut it = line.split_whitespace();
     let cmd = it.next().unwrap_or("");
     match cmd {
+        "/help" => {
+            state.lock().unwrap().show_help = true;
+        }
         "/discover" => {
             {
                 let mut s = state.lock().unwrap();
@@ -2518,25 +2567,39 @@ fn handle_command(
             );
         }
         "/map" => {
-            // Flip the /discover popup to the Canvas-based map view.
-            // Idempotent — opening the popup with /discover resets it
-            // to list view, so this is the explicit toggle.
-            let mut s = state.lock().unwrap();
-            if let Some(d) = s.discovery.as_mut() {
-                d.view_map = !d.view_map;
+            // `/map` is useful on its own: start a scan when no discovery
+            // view is open, then leave the results in map mode.
+            let should_start = {
+                let mut s = state.lock().unwrap();
+                if let Some(d) = s.discovery.as_mut() {
+                    d.view_map = !d.view_map;
+                    false
+                } else {
+                    s.start_discovery();
+                    if let Some(d) = s.discovery.as_mut() {
+                        d.view_map = true;
+                    }
+                    true
+                }
+            };
+            if should_start {
+                do_discover(
+                    announce_beacon.clone(),
+                    self_peer_id,
+                    tx_events.clone(),
+                    stop,
+                );
             }
         }
         "/peers" => {
             let s = state.lock().unwrap();
-            for p in &s.peers {
-                let _ = tx_events.send(Event::Info(format!(
-                    "{} {} fp={} state={:?}",
-                    p.name,
-                    if p.trusted { "(trusted)" } else { "(untrusted)" },
-                    p.fingerprint,
-                    p.state
-                )));
-            }
+            let connected = s.peers.iter().filter(|p| p.state == tui::PeerState::Connected).count();
+            let names = s.peers.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
+            let _ = tx_events.send(Event::Info(if s.peers.is_empty() {
+                "no peers known — run /discover".into()
+            } else {
+                format!("{} peer{} ({} connected): {}", s.peers.len(), if s.peers.len() == 1 { "" } else { "s" }, connected, names)
+            }));
         }
         "/clear" => {
             // Wipe the in-memory chat history. The render loop persists
@@ -2548,24 +2611,34 @@ fn handle_command(
             let _ = tx_events.send(Event::Info("chat cleared".into()));
         }
         "/trust" => {
-            if let Some(name) = it.next() {
+            let name = it.collect::<Vec<_>>().join(" ");
+            if name.is_empty() {
+                let _ = tx_events.send(Event::Info("usage: /trust <peer name>".into()));
+            } else {
                 let pid = {
                     let s = state.lock().unwrap();
-                    s.peers.iter().find(|p| p.name == name).map(|p| p.peer_id)
+                    s.peers.iter().find(|p| p.name == name || p.name.starts_with(&name)).map(|p| p.peer_id)
                 };
                 if let Some(pid) = pid {
                     let _ = tx_actions.send(Action::Trust { peer_id: pid });
+                } else {
+                    let _ = tx_events.send(Event::Info(format!("peer not found: {}", name)));
                 }
             }
         }
         "/revoke" => {
-            if let Some(name) = it.next() {
+            let name = it.collect::<Vec<_>>().join(" ");
+            if name.is_empty() {
+                let _ = tx_events.send(Event::Info("usage: /revoke <peer name>".into()));
+            } else {
                 let pid = {
                     let s = state.lock().unwrap();
-                    s.peers.iter().find(|p| p.name == name).map(|p| p.peer_id)
+                    s.peers.iter().find(|p| p.name == name || p.name.starts_with(&name)).map(|p| p.peer_id)
                 };
                 if let Some(pid) = pid {
                     let _ = tx_actions.send(Action::Revoke { peer_id: pid });
+                } else {
+                    let _ = tx_events.send(Event::Info(format!("peer not found: {}", name)));
                 }
             }
         }
