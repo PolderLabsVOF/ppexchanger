@@ -13,7 +13,6 @@
 //!   * no flags              start the TUI
 
 use ppexchanger::config::{config_dir, history_path, identity_path};
-use ppexchanger::tui::config::StatusFormat;
 use ppexchanger::events::{Action, Bus, Event, PeerId, RegistryMsg};
 use ppexchanger::identity::load_or_create;
 use ppexchanger::net::discovery::Discovery;
@@ -22,6 +21,7 @@ use ppexchanger::net::peer;
 use ppexchanger::net::session::Session;
 use ppexchanger::peerdb::PeerDb;
 use ppexchanger::protocol::{fingerprint as pubkey_fingerprint, Beacon, FrameBody};
+use ppexchanger::tui::config::StatusFormat;
 use ppexchanger::tui::{self, PeerState, UiConfig, UiState};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -148,11 +148,11 @@ fn print_help() {
     );
     println!(
         "{}",
-        help.replace("mouse is ON by default", "mouse interaction is enabled by default; Shift-drag selects natively")
-            .replace(
-                "  ppx --gen-identity",
-                "  ppx update\n  ppx --gen-identity",
-            )
+        help.replace(
+            "mouse is ON by default",
+            "mouse interaction is enabled by default; Shift-drag selects natively"
+        )
+        .replace("  ppx --gen-identity", "  ppx update\n  ppx --gen-identity",)
     );
 }
 
@@ -168,7 +168,8 @@ fn update_install() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let script = std::env::temp_dir().join(format!("ppx-update-{}-{}.sh", std::process::id(), stamp));
+    let script =
+        std::env::temp_dir().join(format!("ppx-update-{}-{}.sh", std::process::id(), stamp));
     let install_dir = preferred_install_dir();
     let downloaded = std::process::Command::new("curl")
         .args([
@@ -203,7 +204,8 @@ fn update_install() {
     }
     let _ = std::fs::remove_file(&script);
 
-    let source = std::env::temp_dir().join(format!("ppx-update-src-{}-{}", std::process::id(), stamp));
+    let source =
+        std::env::temp_dir().join(format!("ppx-update-src-{}-{}", std::process::id(), stamp));
     let cloned = std::process::Command::new("git")
         .args([
             "clone",
@@ -247,8 +249,13 @@ fn update_install() {
 fn preferred_install_dir() -> Option<PathBuf> {
     let path = std::env::current_exe().ok()?;
     let parent = path.parent()?.to_path_buf();
-    let is_cargo_target = parent.file_name().is_some_and(|name| name == "debug" || name == "release")
-        && parent.parent().and_then(|path| path.file_name()).is_some_and(|name| name == "target");
+    let is_cargo_target = parent
+        .file_name()
+        .is_some_and(|name| name == "debug" || name == "release")
+        && parent
+            .parent()
+            .and_then(|path| path.file_name())
+            .is_some_and(|name| name == "target");
     (!is_cargo_target).then_some(parent)
 }
 
@@ -336,9 +343,8 @@ fn notify_received_message(name: &str, body: &str) {
         let osc_title = notification_text(&title, 80);
         let osc_body = notification_text(&body, 240);
         let mut stderr = std::io::stderr();
-        let _ = stderr.write_all(
-            format!("\x1b]777;notify;{};{}\x07", osc_title, osc_body).as_bytes(),
-        );
+        let _ =
+            stderr.write_all(format!("\x1b]777;notify;{};{}\x07", osc_title, osc_body).as_bytes());
         let _ = stderr.flush();
     }
 }
@@ -413,7 +419,9 @@ fn format_ui_config(cfg: &ppexchanger::tui::UiConfig) -> String {
 }
 
 fn default_config_path() -> PathBuf {
-    config_dir().map(|d| d.join("config.toml")).unwrap_or_default()
+    config_dir()
+        .map(|d| d.join("config.toml"))
+        .unwrap_or_default()
 }
 
 fn start_tui(
@@ -518,10 +526,9 @@ fn start_tui(
         }
         Ok(None) => {}
         Err(error) => {
-            let _ = bus.tx_events.send(Event::Info(format!(
-                "firewall setup skipped: {}",
-                error
-            )));
+            let _ = bus
+                .tx_events
+                .send(Event::Info(format!("firewall setup skipped: {}", error)));
         }
     }
 
@@ -570,7 +577,9 @@ fn start_tui(
                 eprintln!("announcer error: {}", e);
             }
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while std::time::Instant::now() < deadline && !announcer_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            while std::time::Instant::now() < deadline
+                && !announcer_stop.load(std::sync::atomic::Ordering::Relaxed)
+            {
                 if let Ok(Some(addr)) = d.recv_reverse_connect(beacon.peer_id) {
                     let _ = announcer_events.send(Event::Info(format!(
                         "incoming reverse connection request from {}",
@@ -712,7 +721,6 @@ fn start_tui(
     let act_thread = {
         let kp = Arc::clone(&static_kp);
         let act_reg_tx = reg_tx.clone();
-        let initial_pending_text = initial_pending_text;
         thread::spawn(move || {
             let mut outbound: HashMap<PeerId, mpsc::Sender<FrameBody>> = HashMap::new();
             let mut peer_names: HashMap<PeerId, String> = HashMap::new();
@@ -729,10 +737,8 @@ fn start_tui(
             // the source bytes (in `/tmp`) to `<config_dir>/sent/`
             // after the transfer completes. Looked up by FileId so
             // concurrent transfers on different peers can't collide.
-            let mut pending_persist: HashMap<
-                ppexchanger::events::FileId,
-                std::path::PathBuf,
-            > = HashMap::new();
+            let mut pending_persist: HashMap<ppexchanger::events::FileId, std::path::PathBuf> =
+                HashMap::new();
             while !act_stop.load(Ordering::Relaxed) {
                 // Poll the action channel with a short timeout so we can
                 // also drain the registry + inbound-file channels
@@ -783,7 +789,8 @@ fn start_tui(
                                 // startup/reconnect state. Mark it offline
                                 // in the sidebar so the UI does not present
                                 // a misleading connection-refused failure.
-                                let peer_id = ppexchanger::net::listener::peer_id_from_pubkey(&public_key);
+                                let peer_id =
+                                    ppexchanger::net::listener::peer_id_from_pubkey(&public_key);
                                 let _ = tx_clone.send(Event::PeerGone {
                                     peer_id,
                                     name: name_hint,
@@ -792,10 +799,19 @@ fn start_tui(
                                 // Try the advertised endpoint first, then the
                                 // stable control port. This also recovers from
                                 // a stale beacon published by an older build.
-                                let first = Discovery::request_reverse_connect(control_addr, target_peer_id, fallback_port);
-                                let stable = if control_addr.port() != ppexchanger::net::discovery::CONTROL_PORT {
+                                let first = Discovery::request_reverse_connect(
+                                    control_addr,
+                                    target_peer_id,
+                                    fallback_port,
+                                );
+                                let stable = if control_addr.port()
+                                    != ppexchanger::net::discovery::CONTROL_PORT
+                                {
                                     Discovery::request_reverse_connect(
-                                        SocketAddr::new(control_addr.ip(), ppexchanger::net::discovery::CONTROL_PORT),
+                                        SocketAddr::new(
+                                            control_addr.ip(),
+                                            ppexchanger::net::discovery::CONTROL_PORT,
+                                        ),
                                         target_peer_id,
                                         fallback_port,
                                     )
@@ -803,9 +819,24 @@ fn start_tui(
                                     Ok(false)
                                 };
                                 match (first, stable) {
-                                    (Ok(true), _) | (_, Ok(true)) => { let _ = tx_clone.send(Event::Info(format!("{} received the reverse-connect request", addr))); }
-                                    (Ok(false), Ok(false)) => { let _ = tx_clone.send(Event::Info(format!("{} did not acknowledge the reverse-connect request", addr))); }
-                                    (Err(e), _) | (_, Err(e)) => { let _ = tx_clone.send(Event::Info(format!("direct connection and reverse request failed: {}", e))); }
+                                    (Ok(true), _) | (_, Ok(true)) => {
+                                        let _ = tx_clone.send(Event::Info(format!(
+                                            "{} received the reverse-connect request",
+                                            addr
+                                        )));
+                                    }
+                                    (Ok(false), Ok(false)) => {
+                                        let _ = tx_clone.send(Event::Info(format!(
+                                            "{} did not acknowledge the reverse-connect request",
+                                            addr
+                                        )));
+                                    }
+                                    (Err(e), _) | (_, Err(e)) => {
+                                        let _ = tx_clone.send(Event::Info(format!(
+                                            "direct connection and reverse request failed: {}",
+                                            e
+                                        )));
+                                    }
                                 }
                             }
                         });
@@ -869,11 +900,15 @@ fn start_tui(
                     // offer, and parks until accept; AcceptFile /
                     // RejectFile route the peer response and create
                     // the destination file on accept.
-                    Ok(Action::SendFile { to, path, mime, width, height, persist_to }) => {
-                        let to_name = peer_names
-                            .get(&to)
-                            .cloned()
-                            .unwrap_or_else(|| hex(&to));
+                    Ok(Action::SendFile {
+                        to,
+                        path,
+                        mime,
+                        width,
+                        height,
+                        persist_to,
+                    }) => {
+                        let to_name = peer_names.get(&to).cloned().unwrap_or_else(|| hex(&to));
                         match ppexchanger::net::file_xfer::OutboundTransfer::open(
                             to, to_name, path, mime, width, height,
                         ) {
@@ -881,15 +916,18 @@ fn start_tui(
                                 let id = t.id();
                                 let offer = t.offer().clone();
                                 if let Some(tx) = outbound.get(&to).cloned() {
-                                    if tx.send(FrameBody::FileOffer {
-                                        id,
-                                        name: offer.name.clone(),
-                                        size: offer.size,
-                                        mime: offer.mime.clone(),
-                                        width: offer.width,
-                                        height: offer.height,
-                                        preview: offer.preview.clone(),
-                                    }).is_err() {
+                                    if tx
+                                        .send(FrameBody::FileOffer {
+                                            id,
+                                            name: offer.name.clone(),
+                                            size: offer.size,
+                                            mime: offer.mime.clone(),
+                                            width: offer.width,
+                                            height: offer.height,
+                                            preview: offer.preview.clone(),
+                                        })
+                                        .is_err()
+                                    {
                                         outbound.remove(&to);
                                     }
                                 }
@@ -912,15 +950,11 @@ fn start_tui(
                                     "offered {} ({} bytes) to {}",
                                     offer.name,
                                     offer.size,
-                                    peer_names
-                                        .get(&to)
-                                        .cloned()
-                                        .unwrap_or_else(|| hex(&to))
+                                    peer_names.get(&to).cloned().unwrap_or_else(|| hex(&to))
                                 )));
                             }
                             Err(e) => {
-                                let _ = act_bus_tx
-                                    .send(Event::Info(format!("open failed: {}", e)));
+                                let _ = act_bus_tx.send(Event::Info(format!("open failed: {}", e)));
                             }
                         }
                     }
@@ -1051,7 +1085,8 @@ fn start_tui(
                         }
                         RegistryMsg::TextDelivered { peer_id, body } => {
                             if let Some(queue) = pending_text.get_mut(&peer_id) {
-                                if let Some(index) = queue.iter().position(|queued| queued == &body) {
+                                if let Some(index) = queue.iter().position(|queued| queued == &body)
+                                {
                                     queue.remove(index);
                                 }
                                 if queue.is_empty() {
@@ -1097,15 +1132,14 @@ fn start_tui(
                     use ppexchanger::events::InboundFileEvent;
                     match ev {
                         InboundFileEvent::Offer { peer, offer } => {
-                            let from_name = peer_names
-                                .get(&peer)
-                                .cloned()
-                                .unwrap_or_else(|| hex(&peer));
-                            let accepted = inbox.offer(
-                                ppexchanger::net::file_xfer::InboundTransfer::new(
-                                    peer, from_name.clone(), offer.clone(),
-                                ),
-                            );
+                            let from_name =
+                                peer_names.get(&peer).cloned().unwrap_or_else(|| hex(&peer));
+                            let accepted =
+                                inbox.offer(ppexchanger::net::file_xfer::InboundTransfer::new(
+                                    peer,
+                                    from_name.clone(),
+                                    offer.clone(),
+                                ));
                             if accepted {
                                 // File transfers are trusted at the session
                                 // layer; do not block delivery behind a UI
@@ -1116,7 +1150,10 @@ fn start_tui(
                                 match inbox.accept(offer.id) {
                                     Ok(Some(_)) => {
                                         if let Some(sender) = outbound.get(&peer) {
-                                            if sender.send(FrameBody::FileAccept { id: offer.id }).is_ok() {
+                                            if sender
+                                                .send(FrameBody::FileAccept { id: offer.id })
+                                                .is_ok()
+                                            {
                                                 let _ = act_bus_tx.send(Event::Info(format!(
                                                     "receiving {} from {}",
                                                     offer.name, from_name
@@ -1166,9 +1203,15 @@ fn start_tui(
                                 });
                             }
                         }
-                        InboundFileEvent::Chunk { peer: _, id, offset, data } => {
+                        InboundFileEvent::Chunk {
+                            peer: _,
+                            id,
+                            offset,
+                            data,
+                        } => {
                             use ppexchanger::net::file_xfer::WriteOutcome;
-                            if let WriteOutcome::Error(reason) = inbox.write_chunk(id, offset, data) {
+                            if let WriteOutcome::Error(reason) = inbox.write_chunk(id, offset, data)
+                            {
                                 if let Some(offer) = inbox.reject(id) {
                                     let _ = act_bus_tx.send(Event::FileAborted {
                                         from_peer: [0u8; 16], // patched below
@@ -1234,16 +1277,21 @@ fn start_tui(
                 for result in outbox.step_all(|peer| outbound.get(&peer).cloned()) {
                     use ppexchanger::net::file_xfer::StepResult;
                     match result {
-                        StepResult::Completed { id, peer, to_name, name, bytes, source_path } => {
+                        StepResult::Completed {
+                            id,
+                            peer,
+                            to_name,
+                            name,
+                            bytes,
+                            source_path,
+                        } => {
                             // If the caller asked us to persist the
                             // source bytes after a successful send
                             // (e.g. clipboard image, whose source
                             // lives in `/tmp` and would otherwise be
                             // wiped), do the copy now.
                             if let Some(dest) = pending_persist.remove(&id) {
-                                if let Err(e) =
-                                    persist_transferred_file(&source_path, &dest)
-                                {
+                                if let Err(e) = persist_transferred_file(&source_path, &dest) {
                                     let _ = act_bus_tx.send(Event::Info(format!(
                                         "persist {} -> {} failed: {}",
                                         source_path.display(),
@@ -1325,7 +1373,11 @@ fn start_tui(
         let _ = bus.tx_events.send(Event::Info(format!(
             "reconnecting to {} saved peer{}…",
             reconnect_targets.len(),
-            if reconnect_targets.len() == 1 { "" } else { "s" }
+            if reconnect_targets.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
         )));
         for (addr, name, public_key) in reconnect_targets {
             let _ = bus.tx_actions.send(Action::Connect {
@@ -1370,26 +1422,27 @@ fn start_tui(
             // Persist after each batch of newly-arrived messages. Keep the
             // state lock while serializing so a concurrent optimistic echo
             // cannot be marked clean without being included in the snapshot.
-            if history_path.is_some()
-                && s.history_needs_save()
-                && (!history_save_backoff
-                    || last_history_save_attempt.elapsed() >= Duration::from_secs(2))
-            {
-                last_history_save_attempt = Instant::now();
-                let save_result = ppexchanger::chat_history::save(
-                    history_path.as_ref().unwrap(),
-                    &history_secret,
-                    &history_peer_id,
-                    &s.messages,
-                );
-                match save_result {
-                    Ok(()) => {
-                        s.mark_history_saved();
-                        history_save_backoff = false;
-                    }
-                    Err(error) => {
-                        history_save_backoff = true;
-                        s.status = format!("chat history save failed: {}", error);
+            if let Some(path) = history_path.as_ref() {
+                if s.history_needs_save()
+                    && (!history_save_backoff
+                        || last_history_save_attempt.elapsed() >= Duration::from_secs(2))
+                {
+                    last_history_save_attempt = Instant::now();
+                    let save_result = ppexchanger::chat_history::save(
+                        path,
+                        &history_secret,
+                        &history_peer_id,
+                        &s.messages,
+                    );
+                    match save_result {
+                        Ok(()) => {
+                            s.mark_history_saved();
+                            history_save_backoff = false;
+                        }
+                        Err(error) => {
+                            history_save_backoff = true;
+                            s.status = format!("chat history save failed: {}", error);
+                        }
                     }
                 }
             }
@@ -1429,9 +1482,7 @@ fn start_tui(
             if live_cfg.auto_trust_seen {
                 for p in s.peers.iter() {
                     if matches!(p.state, PeerState::Connected) && !p.trusted {
-                        let _ = bus.tx_actions.send(Action::Trust {
-                            peer_id: p.peer_id,
-                        });
+                        let _ = bus.tx_actions.send(Action::Trust { peer_id: p.peer_id });
                     }
                 }
             }
@@ -1479,7 +1530,12 @@ fn start_tui(
                             // Modal controls own their mouse interactions.
                             // Handle them before generic pane hit-testing so a
                             // click never leaks through to the chat beneath.
-                            if matches!(m.kind, crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)) {
+                            if matches!(
+                                m.kind,
+                                crossterm::event::MouseEventKind::Down(
+                                    crossterm::event::MouseButton::Left
+                                )
+                            ) {
                                 let settings_target = {
                                     let s = state.lock().unwrap();
                                     s.settings.as_ref().and_then(|settings| {
@@ -1492,7 +1548,13 @@ fn start_tui(
                                     use ppexchanger::tui::settings_popup::MouseTarget;
                                     match target {
                                         MouseTarget::Tab(tab) => {
-                                            state.lock().unwrap().settings.as_mut().unwrap().switch_tab(tab);
+                                            state
+                                                .lock()
+                                                .unwrap()
+                                                .settings
+                                                .as_mut()
+                                                .unwrap()
+                                                .switch_tab(tab);
                                         }
                                         MouseTarget::Row(row) => {
                                             let key = crossterm::event::KeyEvent::new(
@@ -1502,12 +1564,23 @@ fn start_tui(
                                             let mut s = state.lock().unwrap();
                                             let settings = s.settings.as_mut().unwrap();
                                             settings.selected = row;
-                                            route_settings_key(&key, settings, &mut live_cfg, &mut _guard);
+                                            route_settings_key(
+                                                &key,
+                                                settings,
+                                                &mut live_cfg,
+                                                &mut _guard,
+                                            );
                                         }
                                         MouseTarget::Close => {
                                             let name = {
                                                 let mut s = state.lock().unwrap();
-                                                let name = s.settings.as_ref().unwrap().name_draft.trim().to_string();
+                                                let name = s
+                                                    .settings
+                                                    .as_ref()
+                                                    .unwrap()
+                                                    .name_draft
+                                                    .trim()
+                                                    .to_string();
                                                 if !name.is_empty() {
                                                     s.self_name = name.clone();
                                                 }
@@ -1534,7 +1607,12 @@ fn start_tui(
                                     })
                                 };
                                 if let Some(file_action) = file_action {
-                                    let pending = state.lock().unwrap().file_offer.as_ref().map(|p| (p.from_peer, p.offer.id));
+                                    let pending = state
+                                        .lock()
+                                        .unwrap()
+                                        .file_offer
+                                        .as_ref()
+                                        .map(|p| (p.from_peer, p.offer.id));
                                     if let Some((peer, id)) = pending {
                                         match file_action {
                                             ppexchanger::tui::file_offer_popup::MouseAction::Accept => {
@@ -1550,18 +1628,20 @@ fn start_tui(
                                 }
                                 let pending_click = {
                                     let s = state.lock().unwrap();
-                                    let sidebar = tui::compute_layout(rect, !s.sidebar_hidden).sidebar;
+                                    let sidebar =
+                                        tui::compute_layout(rect, !s.sidebar_hidden).sidebar;
                                     s.pending_connection.as_ref().and_then(|request| {
                                         (m.column >= sidebar.x
                                             && m.column < sidebar.right()
                                             && m.row >= sidebar.y
                                             && m.row < sidebar.y.saturating_add(5))
-                                            .then(|| request.clone())
+                                        .then(|| request.clone())
                                     })
                                 };
                                 if let Some(request) = pending_click {
                                     state.lock().unwrap().pending_connection = None;
-                                    state.lock().unwrap().status = format!("accepting connection from {}…", request.name);
+                                    state.lock().unwrap().status =
+                                        format!("accepting connection from {}…", request.name);
                                     let _ = bus.tx_actions.send(Action::Connect {
                                         addr: request.addr,
                                         name_hint: request.name,
@@ -1592,7 +1672,9 @@ fn start_tui(
                                         peer
                                     };
                                     if let Some(peer) = peer {
-                                        let name = peer.name.unwrap_or_else(|| format!("peer@{}", peer.addr));
+                                        let name = peer
+                                            .name
+                                            .unwrap_or_else(|| format!("peer@{}", peer.addr));
                                         let _ = bus.tx_actions.send(Action::Connect {
                                             addr: peer.addr,
                                             name_hint: name,
@@ -1604,8 +1686,18 @@ fn start_tui(
                                 }
                                 let dismiss_overlay = {
                                     let s = state.lock().unwrap();
-                                    (s.show_help && tui::point_in_rect(tui::help::rect(rect), m.column, m.row))
-                                        || (s.discovery.is_some() && tui::point_in_rect(tui::discovery_popup::rect(rect), m.column, m.row))
+                                    (s.show_help
+                                        && tui::point_in_rect(
+                                            tui::help::rect(rect),
+                                            m.column,
+                                            m.row,
+                                        ))
+                                        || (s.discovery.is_some()
+                                            && tui::point_in_rect(
+                                                tui::discovery_popup::rect(rect),
+                                                m.column,
+                                                m.row,
+                                            ))
                                 };
                                 if dismiss_overlay {
                                     let mut s = state.lock().unwrap();
@@ -1627,31 +1719,33 @@ fn start_tui(
                             // through the same path as Ctrl-, / ? /
                             // Esc — keeping state mutation in one
                             // place.
-                            if let Some(ppexchanger::tui::EditorEvent::MenuAction(act)) = handle_mouse(m, &state, rect) {
+                            if let Some(ppexchanger::tui::EditorEvent::MenuAction(act)) =
+                                handle_mouse(m, &state, rect)
+                            {
                                 match act {
-                                        ppexchanger::tui::MenuAction::Peers => {
-                                            state.lock().unwrap().focus = tui::Focus::Sidebar;
-                                        }
-                                        ppexchanger::tui::MenuAction::Discover => {
-                                            state.lock().unwrap().start_discovery();
-                                            do_discover(
-                                                announce_beacon.clone(),
-                                                self_peer_id,
-                                                bus.tx_events.clone(),
-                                                Arc::clone(&stop),
-                                            );
-                                        }
-                                        ppexchanger::tui::MenuAction::Settings => {
-                                            state.lock().unwrap().open_settings(&live_cfg);
-                                        }
-                                        ppexchanger::tui::MenuAction::Help => {
-                                            state.lock().unwrap().show_help = true;
-                                        }
-                                        ppexchanger::tui::MenuAction::Quit => {
-                                            stop.store(true, Ordering::SeqCst);
-                                        }
+                                    ppexchanger::tui::MenuAction::Peers => {
+                                        state.lock().unwrap().focus = tui::Focus::Sidebar;
+                                    }
+                                    ppexchanger::tui::MenuAction::Discover => {
+                                        state.lock().unwrap().start_discovery();
+                                        do_discover(
+                                            announce_beacon.clone(),
+                                            self_peer_id,
+                                            bus.tx_events.clone(),
+                                            Arc::clone(&stop),
+                                        );
+                                    }
+                                    ppexchanger::tui::MenuAction::Settings => {
+                                        state.lock().unwrap().open_settings(&live_cfg);
+                                    }
+                                    ppexchanger::tui::MenuAction::Help => {
+                                        state.lock().unwrap().show_help = true;
+                                    }
+                                    ppexchanger::tui::MenuAction::Quit => {
+                                        stop.store(true, Ordering::SeqCst);
                                     }
                                 }
+                            }
                         }
                     }
                 } else if state.lock().unwrap().text_preview.is_some() {
@@ -1662,8 +1756,7 @@ fn start_tui(
                         if k.kind == crossterm::event::KeyEventKind::Press
                             && matches!(
                                 k.code,
-                                crossterm::event::KeyCode::Enter
-                                    | crossterm::event::KeyCode::Esc
+                                crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Esc
                             )
                         {
                             state.lock().unwrap().text_preview = None;
@@ -1674,9 +1767,11 @@ fn start_tui(
                         if k.kind == crossterm::event::KeyEventKind::Press {
                             match k.code {
                                 crossterm::event::KeyCode::Enter => {
-                                    let request = { state.lock().unwrap().pending_connection.take() };
+                                    let request =
+                                        { state.lock().unwrap().pending_connection.take() };
                                     if let Some(request) = request {
-                                        state.lock().unwrap().status = format!("accepting connection from {}…", request.name);
+                                        state.lock().unwrap().status =
+                                            format!("accepting connection from {}…", request.name);
                                         let _ = bus.tx_actions.send(Action::Connect {
                                             addr: request.addr,
                                             name_hint: request.name,
@@ -1694,13 +1789,7 @@ fn start_tui(
                             }
                         }
                     }
-                } else if state
-                    .lock()
-                    .unwrap()
-                    .settings
-                    .as_ref()
-                    .is_some()
-                {
+                } else if state.lock().unwrap().settings.as_ref().is_some() {
                     // Settings modal is open — every key event routes here
                     // (including Esc, which closes the modal through
                     // route_settings_key). The editor buffer is frozen.
@@ -1733,9 +1822,9 @@ fn start_tui(
                                 };
                                 match save_ui_config(&live_cfg, &live_cfg_path) {
                                     Ok(()) => {
-                                        let _ = bus.tx_events.send(Event::Info(
-                                            "settings saved".into(),
-                                        ));
+                                        let _ = bus
+                                            .tx_events
+                                            .send(Event::Info("settings saved".into()));
                                     }
                                     Err(e) => {
                                         let _ = bus.tx_events.send(Event::Info(format!(
@@ -1745,7 +1834,8 @@ fn start_tui(
                                     }
                                 }
                                 if !name_draft.is_empty() {
-                                    if let Err(e) = ppexchanger::identity::update_name(&name_draft) {
+                                    if let Err(e) = ppexchanger::identity::update_name(&name_draft)
+                                    {
                                         let _ = bus.tx_events.send(Event::Info(format!(
                                             "display name save failed: {}",
                                             e
@@ -1763,10 +1853,12 @@ fn start_tui(
                     if let crossterm::event::Event::Key(k) = &ev {
                         if k.kind == crossterm::event::KeyEventKind::Press {
                             match k.code {
-                                crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
+                                crossterm::event::KeyCode::Up
+                                | crossterm::event::KeyCode::Char('k') => {
                                     state.lock().unwrap().move_discovery_selection(-1);
                                 }
-                                crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
+                                crossterm::event::KeyCode::Down
+                                | crossterm::event::KeyCode::Char('j') => {
                                     state.lock().unwrap().move_discovery_selection(1);
                                 }
                                 crossterm::event::KeyCode::Enter => {
@@ -1780,7 +1872,9 @@ fn start_tui(
                                         peer
                                     };
                                     if let Some(peer) = peer {
-                                        let name = peer.name.unwrap_or_else(|| format!("peer@{}", peer.addr));
+                                        let name = peer
+                                            .name
+                                            .unwrap_or_else(|| format!("peer@{}", peer.addr));
                                         let _ = bus.tx_actions.send(Action::Connect {
                                             addr: peer.addr,
                                             name_hint: name,
@@ -1789,7 +1883,9 @@ fn start_tui(
                                         });
                                     }
                                 }
-                                crossterm::event::KeyCode::Esc => state.lock().unwrap().close_discovery(),
+                                crossterm::event::KeyCode::Esc => {
+                                    state.lock().unwrap().close_discovery()
+                                }
                                 _ => {}
                             }
                         }
@@ -1803,8 +1899,7 @@ fn start_tui(
                             && key.modifiers.is_empty()
                             && matches!(
                                 key.code,
-                                crossterm::event::KeyCode::Up
-                                    | crossterm::event::KeyCode::Down
+                                crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down
                             )
                             && state.lock().unwrap().focus == tui::Focus::Sidebar
                         {
@@ -1823,231 +1918,237 @@ fn start_tui(
                     };
                     if !navigated_sidebar {
                         match editor.on_key(&ev) {
-                        ppexchanger::tui::EditorEvent::SubmitTextFile(text) => {
-                            if let Some(target) = resolve_target(&state, "") {
-                                let line_count = text.lines().count();
-                                let target_name = state
-                                    .lock()
-                                    .unwrap()
-                                    .peers
-                                    .iter()
-                                    .find(|peer| peer.peer_id == target)
-                                    .map(|peer| peer.name.clone())
-                                    .unwrap_or_else(|| "peer".into());
-                                match create_pasted_text_file(&text) {
-                                    Ok(path) => {
-                                        let bytes = std::fs::metadata(&path)
-                                            .map(|meta| meta.len())
-                                            .unwrap_or_else(|_| text.len() as u64);
-                                        state.lock().unwrap().push_outgoing_text_file(
-                                            target,
-                                            path.clone(),
-                                            bytes,
-                                            line_count,
-                                        );
+                            ppexchanger::tui::EditorEvent::SubmitTextFile(text) => {
+                                if let Some(target) = resolve_target(&state, "") {
+                                    let line_count = text.lines().count();
+                                    let target_name = state
+                                        .lock()
+                                        .unwrap()
+                                        .peers
+                                        .iter()
+                                        .find(|peer| peer.peer_id == target)
+                                        .map(|peer| peer.name.clone())
+                                        .unwrap_or_else(|| "peer".into());
+                                    match create_pasted_text_file(&text) {
+                                        Ok(path) => {
+                                            let bytes = std::fs::metadata(&path)
+                                                .map(|meta| meta.len())
+                                                .unwrap_or_else(|_| text.len() as u64);
+                                            state.lock().unwrap().push_outgoing_text_file(
+                                                target,
+                                                path.clone(),
+                                                bytes,
+                                                line_count,
+                                            );
+                                            let _ = bus.tx_actions.send(Action::SendFile {
+                                                to: target,
+                                                path,
+                                                mime: Some("text/plain; charset=utf-8".into()),
+                                                width: None,
+                                                height: None,
+                                                persist_to: None,
+                                            });
+                                            let _ = bus.tx_events.send(Event::Info(format!(
+                                                "text file queued · {} lines · sending to {}",
+                                                line_count, target_name
+                                            )));
+                                        }
+                                        Err(error) => {
+                                            let _ = bus.tx_events.send(Event::Info(format!(
+                                                "could not prepare text file: {}",
+                                                error
+                                            )));
+                                        }
+                                    }
+                                } else {
+                                    let _ = bus
+                                        .tx_events
+                                        .send(Event::Info("no peer selected for text file".into()));
+                                }
+                            }
+                            ppexchanger::tui::EditorEvent::Submit(text) => {
+                                if is_known_slash_command(&text) {
+                                    handle_command(
+                                        &text,
+                                        &bus.tx_events,
+                                        &bus.tx_actions,
+                                        &state,
+                                        &mut live_cfg,
+                                        &live_cfg_path,
+                                        &announce_beacon,
+                                        self_peer_id,
+                                        Arc::clone(&stop),
+                                    );
+                                } else if let Some(target) = resolve_target(&state, &text) {
+                                    // Auto-detect: if the body (after stripping
+                                    // any `@<name>` routing prefix) is the
+                                    // path of an existing regular file, send
+                                    // it as a FileOffer. Otherwise fall
+                                    // through to plain text.
+                                    let body = strip_routing(&text);
+                                    let dropped_path = dropped_file_path(&body);
+                                    if let Some(path) =
+                                        dropped_path.or_else(|| looks_like_existing_file(&body))
+                                    {
+                                        let image_meta = image_file_metadata(&path);
+                                        if let Some((mime, width, height)) = image_meta.as_ref() {
+                                            if let Ok(meta) = std::fs::metadata(&path) {
+                                                state.lock().unwrap().push_outgoing_image(
+                                                    target,
+                                                    ppexchanger::tui::ImageMeta {
+                                                        path: path.clone(),
+                                                        mime: mime.clone(),
+                                                        width: *width,
+                                                        height: *height,
+                                                        bytes: meta.len(),
+                                                    },
+                                                );
+                                            }
+                                        }
                                         let _ = bus.tx_actions.send(Action::SendFile {
                                             to: target,
                                             path,
-                                            mime: Some("text/plain; charset=utf-8".into()),
-                                            width: None,
-                                            height: None,
+                                            mime: image_meta
+                                                .as_ref()
+                                                .map(|(mime, _, _)| mime.clone()),
+                                            width: image_meta.as_ref().map(|(_, width, _)| *width),
+                                            height: image_meta
+                                                .as_ref()
+                                                .map(|(_, _, height)| *height),
                                             persist_to: None,
                                         });
-                                        let _ = bus.tx_events.send(Event::Info(format!(
-                                            "text file queued · {} lines · sending to {}",
-                                            line_count, target_name
-                                        )));
+                                    } else {
+                                        let _ = bus
+                                            .tx_actions
+                                            .send(Action::SendText { to: target, body });
                                     }
-                                    Err(error) => {
-                                        let _ = bus.tx_events.send(Event::Info(format!(
-                                            "could not prepare text file: {}",
-                                            error
-                                        )));
-                                    }
-                                }
-                            } else {
-                                let _ = bus.tx_events.send(Event::Info(
-                                    "no peer selected for text file".into(),
-                                ));
-                            }
-                        }
-                        ppexchanger::tui::EditorEvent::Submit(text) => {
-                            if is_known_slash_command(&text) {
-                                handle_command(
-                                    &text,
-                                    &bus.tx_events,
-                                    &bus.tx_actions,
-                                    &state,
-                                    &mut live_cfg,
-                                    &live_cfg_path,
-                                    &announce_beacon,
-                                    self_peer_id,
-                                    Arc::clone(&stop),
-                                );
-                            } else if let Some(target) = resolve_target(&state, &text) {
-                                // Auto-detect: if the body (after stripping
-                                // any `@<name>` routing prefix) is the
-                                // path of an existing regular file, send
-                                // it as a FileOffer. Otherwise fall
-                                // through to plain text.
-                                let body = strip_routing(&text);
-                                let dropped_path = dropped_file_path(&body);
-                                if let Some(path) = dropped_path.or_else(|| looks_like_existing_file(&body)) {
-                                    let image_meta = image_file_metadata(&path);
-                                    if let Some((mime, width, height)) = image_meta.as_ref() {
-                                        if let Ok(meta) = std::fs::metadata(&path) {
-                                            state.lock().unwrap().push_outgoing_image(
-                                                target,
-                                                ppexchanger::tui::ImageMeta {
-                                                    path: path.clone(),
-                                                    mime: mime.clone(),
-                                                    width: *width,
-                                                    height: *height,
-                                                    bytes: meta.len(),
-                                                },
-                                            );
-                                        }
-                                    }
-                                    let _ = bus.tx_actions.send(Action::SendFile {
-                                        to: target,
-                                        path,
-                                        mime: image_meta.as_ref().map(|(mime, _, _)| mime.clone()),
-                                        width: image_meta.as_ref().map(|(_, width, _)| *width),
-                                        height: image_meta.as_ref().map(|(_, _, height)| *height),
-                                        persist_to: None,
-                                    });
                                 } else {
-                                    let _ = bus.tx_actions.send(Action::SendText {
-                                        to: target,
-                                        body,
-                                    });
+                                    let _ = bus
+                                        .tx_events
+                                        .send(Event::Info("no peer selected or matched".into()));
                                 }
-                            } else {
+                            }
+                            ppexchanger::tui::EditorEvent::Cancel => {
+                                let _ = bus.tx_actions.send(Action::Quit);
+                                break;
+                            }
+                            ppexchanger::tui::EditorEvent::Quit => {
+                                let _ = bus.tx_actions.send(Action::Quit);
+                                break;
+                            }
+                            ppexchanger::tui::EditorEvent::FocusNext => {
+                                let mut s = state.lock().unwrap();
+                                s.cycle_focus();
+                            }
+                            ppexchanger::tui::EditorEvent::ToggleTrust => {
+                                let pid = {
+                                    let s = state.lock().unwrap();
+                                    s.selected().map(|p| p.peer_id)
+                                };
+                                if let Some(pid) = pid {
+                                    let _ = bus.tx_actions.send(Action::Trust { peer_id: pid });
+                                }
+                            }
+                            ppexchanger::tui::EditorEvent::RevokePeer => {
+                                let pid = {
+                                    let s = state.lock().unwrap();
+                                    s.selected().map(|p| p.peer_id)
+                                };
+                                if let Some(pid) = pid {
+                                    let _ = bus.tx_actions.send(Action::Revoke { peer_id: pid });
+                                }
+                            }
+                            ppexchanger::tui::EditorEvent::NewChat => {
+                                // For v1 this is a no-op visual hint; peer selection
+                                // is via Up/Down on the sidebar after Tab.
                                 let _ = bus.tx_events.send(Event::Info(
-                                    "no peer selected or matched".into(),
+                                    "use Tab to focus the sidebar, then Up/Down to pick a peer"
+                                        .into(),
                                 ));
                             }
+                            ppexchanger::tui::EditorEvent::ToggleHelp => {
+                                let mut s = state.lock().unwrap();
+                                s.show_help = !s.show_help;
+                            }
+                            ppexchanger::tui::EditorEvent::OpenSettings => {
+                                let mut s = state.lock().unwrap();
+                                s.open_settings(&live_cfg);
+                            }
+                            ppexchanger::tui::EditorEvent::ToggleSidebar => {
+                                let mut s = state.lock().unwrap();
+                                s.sidebar_hidden = !s.sidebar_hidden;
+                            }
+                            ppexchanger::tui::EditorEvent::OpenPeerPicker => {
+                                let mut s = state.lock().unwrap();
+                                s.show_peer_picker = !s.show_peer_picker;
+                            }
+                            ppexchanger::tui::EditorEvent::ActivateSelection => {
+                                let mut s = state.lock().unwrap();
+                                if s.focus == tui::Focus::Sidebar && !s.peers.is_empty() {
+                                    s.focus = tui::Focus::Chat;
+                                    s.dismiss_logo();
+                                }
+                            }
+                            ppexchanger::tui::EditorEvent::PageUp => {
+                                let mut s = state.lock().unwrap();
+                                if s.focus == tui::Focus::Chat {
+                                    s.scroll_back(2);
+                                } else {
+                                    s.move_selection(-1);
+                                }
+                            }
+                            ppexchanger::tui::EditorEvent::PageDown => {
+                                let mut s = state.lock().unwrap();
+                                if s.focus == tui::Focus::Chat {
+                                    s.scroll_forward(2);
+                                } else {
+                                    s.move_selection(1);
+                                }
+                            }
+                            ppexchanger::tui::EditorEvent::ClearInput
+                            | ppexchanger::tui::EditorEvent::Clear => {
+                                // Editor already cleared its buffer. If a modal is
+                                // open, Esc also closes it. The settings popup
+                                // routes Esc through `route_settings_key`, so this
+                                // branch only fires for help / discovery / logo.
+                                let mut s = state.lock().unwrap();
+                                if s.show_help {
+                                    s.show_help = false;
+                                } else if s.discovery.is_some() {
+                                    s.close_discovery();
+                                } else {
+                                    // Fresh session: dismiss the startup logo.
+                                    s.dismiss_logo();
+                                }
+                            }
+                            ppexchanger::tui::EditorEvent::HistoryPrev => {
+                                let mut s = state.lock().unwrap();
+                                if s.focus == tui::Focus::Sidebar {
+                                    s.move_selection(-1);
+                                }
+                            }
+                            ppexchanger::tui::EditorEvent::HistoryNext => {
+                                let mut s = state.lock().unwrap();
+                                if s.focus == tui::Focus::Sidebar {
+                                    s.move_selection(1);
+                                }
+                            }
+                            ppexchanger::tui::EditorEvent::PeerPrev => {
+                                let mut s = state.lock().unwrap();
+                                if s.focus == tui::Focus::Sidebar {
+                                    s.move_selection(-1);
+                                }
+                            }
+                            ppexchanger::tui::EditorEvent::PeerNext => {
+                                let mut s = state.lock().unwrap();
+                                if s.focus == tui::Focus::Sidebar {
+                                    s.move_selection(1);
+                                }
+                            }
+                            ppexchanger::tui::EditorEvent::Edited
+                            | ppexchanger::tui::EditorEvent::MenuAction(_)
+                            | ppexchanger::tui::EditorEvent::None => {}
                         }
-                    ppexchanger::tui::EditorEvent::Cancel => {
-                        let _ = bus.tx_actions.send(Action::Quit);
-                        break;
-                    }
-                    ppexchanger::tui::EditorEvent::Quit => {
-                        let _ = bus.tx_actions.send(Action::Quit);
-                        break;
-                    }
-                    ppexchanger::tui::EditorEvent::FocusNext => {
-                        let mut s = state.lock().unwrap();
-                        s.cycle_focus();
-                    }
-                    ppexchanger::tui::EditorEvent::ToggleTrust => {
-                        let pid = {
-                            let s = state.lock().unwrap();
-                            s.selected().map(|p| p.peer_id)
-                        };
-                        if let Some(pid) = pid {
-                            let _ = bus.tx_actions.send(Action::Trust { peer_id: pid });
-                        }
-                    }
-                    ppexchanger::tui::EditorEvent::RevokePeer => {
-                        let pid = {
-                            let s = state.lock().unwrap();
-                            s.selected().map(|p| p.peer_id)
-                        };
-                        if let Some(pid) = pid {
-                            let _ = bus.tx_actions.send(Action::Revoke { peer_id: pid });
-                        }
-                    }
-                    ppexchanger::tui::EditorEvent::NewChat => {
-                        // For v1 this is a no-op visual hint; peer selection
-                        // is via Up/Down on the sidebar after Tab.
-                        let _ = bus.tx_events.send(Event::Info(
-                            "use Tab to focus the sidebar, then Up/Down to pick a peer".into(),
-                        ));
-                    }
-                    ppexchanger::tui::EditorEvent::ToggleHelp => {
-                        let mut s = state.lock().unwrap();
-                        s.show_help = !s.show_help;
-                    }
-                    ppexchanger::tui::EditorEvent::OpenSettings => {
-                        let mut s = state.lock().unwrap();
-                        s.open_settings(&live_cfg);
-                    }
-                    ppexchanger::tui::EditorEvent::ToggleSidebar => {
-                        let mut s = state.lock().unwrap();
-                        s.sidebar_hidden = !s.sidebar_hidden;
-                    }
-                    ppexchanger::tui::EditorEvent::OpenPeerPicker => {
-                        let mut s = state.lock().unwrap();
-                        s.show_peer_picker = !s.show_peer_picker;
-                    }
-                    ppexchanger::tui::EditorEvent::ActivateSelection => {
-                        let mut s = state.lock().unwrap();
-                        if s.focus == tui::Focus::Sidebar && !s.peers.is_empty() {
-                            s.focus = tui::Focus::Chat;
-                            s.dismiss_logo();
-                        }
-                    }
-                    ppexchanger::tui::EditorEvent::PageUp => {
-                        let mut s = state.lock().unwrap();
-                        if s.focus == tui::Focus::Chat {
-                            s.scroll_back(2);
-                        } else {
-                            s.move_selection(-1);
-                        }
-                    }
-                    ppexchanger::tui::EditorEvent::PageDown => {
-                        let mut s = state.lock().unwrap();
-                        if s.focus == tui::Focus::Chat {
-                            s.scroll_forward(2);
-                        } else {
-                            s.move_selection(1);
-                        }
-                    }
-                    ppexchanger::tui::EditorEvent::ClearInput
-                    | ppexchanger::tui::EditorEvent::Clear => {
-                        // Editor already cleared its buffer. If a modal is
-                        // open, Esc also closes it. The settings popup
-                        // routes Esc through `route_settings_key`, so this
-                        // branch only fires for help / discovery / logo.
-                        let mut s = state.lock().unwrap();
-                        if s.show_help {
-                            s.show_help = false;
-                        } else if s.discovery.is_some() {
-                            s.close_discovery();
-                        } else {
-                            // Fresh session: dismiss the startup logo.
-                            s.dismiss_logo();
-                        }
-                    }
-                    ppexchanger::tui::EditorEvent::HistoryPrev => {
-                        let mut s = state.lock().unwrap();
-                        if s.focus == tui::Focus::Sidebar {
-                            s.move_selection(-1);
-                        }
-                    }
-                    ppexchanger::tui::EditorEvent::HistoryNext => {
-                        let mut s = state.lock().unwrap();
-                        if s.focus == tui::Focus::Sidebar {
-                            s.move_selection(1);
-                        }
-                    }
-                    ppexchanger::tui::EditorEvent::PeerPrev => {
-                        let mut s = state.lock().unwrap();
-                        if s.focus == tui::Focus::Sidebar {
-                            s.move_selection(-1);
-                        }
-                    }
-                    ppexchanger::tui::EditorEvent::PeerNext => {
-                        let mut s = state.lock().unwrap();
-                        if s.focus == tui::Focus::Sidebar {
-                            s.move_selection(1);
-                        }
-                    }
-                    ppexchanger::tui::EditorEvent::Edited
-                    | ppexchanger::tui::EditorEvent::MenuAction(_)
-                    | ppexchanger::tui::EditorEvent::None => {}
-                    }
                     }
                     // File-offer modal: Enter accepts, Esc rejects.
                     // Closed by either choice; the FileReceived /
@@ -2210,7 +2311,14 @@ fn do_discover(
             })
             .collect();
         let label = if ports.len() > 1 {
-            format!("TCP subnet scan (ports {})", ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "))
+            format!(
+                "TCP subnet scan (ports {})",
+                ports
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         } else {
             format!("TCP subnet scan (port {})", tcp_port)
         };
@@ -2239,8 +2347,10 @@ fn multicast_scan(
     let mut d = Discovery::bind(ppexchanger::net::discovery::MULTICAST_PORT)?;
     let _ = d.announce_both(beacon);
     let deadline = std::time::Instant::now() + window;
-    let mut seen: std::collections::HashMap<ppexchanger::events::PeerId, ppexchanger::events::DiscoveredPeer> =
-        std::collections::HashMap::new();
+    let mut seen: std::collections::HashMap<
+        ppexchanger::events::PeerId,
+        ppexchanger::events::DiscoveredPeer,
+    > = std::collections::HashMap::new();
     while std::time::Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
         if let Ok(Some((src, b))) = d.recv_beacon() {
             if b.peer_id == beacon.peer_id {
@@ -2248,11 +2358,20 @@ fn multicast_scan(
             }
             let tcp_addr: SocketAddr = (src.ip(), b.tcp_port).into();
             let discovered = ppexchanger::events::DiscoveredPeer {
-                name: if b.name.is_empty() { None } else { Some(b.name) },
-                hostname: if b.hostname.is_empty() { None } else { Some(b.hostname) },
+                name: if b.name.is_empty() {
+                    None
+                } else {
+                    Some(b.name)
+                },
+                hostname: if b.hostname.is_empty() {
+                    None
+                } else {
+                    Some(b.hostname)
+                },
                 addr: tcp_addr,
                 fingerprint: Some(pubkey_fingerprint(&b.public_key)),
-                reverse: (b.control_port != 0).then(|| (SocketAddr::new(src.ip(), b.control_port), b.peer_id)),
+                reverse: (b.control_port != 0)
+                    .then(|| (SocketAddr::new(src.ip(), b.control_port), b.peer_id)),
             };
             seen.entry(b.peer_id)
                 .and_modify(|existing| {
@@ -2286,18 +2405,9 @@ fn handle_mouse(
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut s = state.lock().unwrap();
     let areas = tui::compute_layout(size, !s.sidebar_hidden);
-    let modal_open = s.text_preview.is_some()
-        || s.show_help
-        || s.discovery.is_some()
-        || s.settings.is_some();
-    let hit = tui::hit_test(
-        size,
-        m.column,
-        m.row,
-        &areas,
-        modal_open,
-        s.peers.len(),
-    );
+    let modal_open =
+        s.text_preview.is_some() || s.show_help || s.discovery.is_some() || s.settings.is_some();
+    let hit = tui::hit_test(size, m.column, m.row, &areas, modal_open, s.peers.len());
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => match hit {
             tui::Hit::Sidebar(idx) => {
@@ -2308,13 +2418,21 @@ fn handle_mouse(
                 s.focus = tui::Focus::Chat;
                 if let Some(index) = s.attachment_at_chat_row(areas.chat, m.row) {
                     let attachment = s.messages.get(index).and_then(|message| {
-                        message.image.as_ref().map(|meta| (meta.mime.clone(), meta.path.clone()))
+                        message
+                            .image
+                            .as_ref()
+                            .map(|meta| (meta.mime.clone(), meta.path.clone()))
                     });
                     if let Some((mime, path)) = attachment {
                         if mime.starts_with("image/") {
                             match reveal_in_file_manager(&path) {
-                                Ok(()) => s.status = format!("opened {} in file manager", path.display()),
-                                Err(error) => s.status = format!("could not open {}: {}", path.display(), error),
+                                Ok(()) => {
+                                    s.status = format!("opened {} in file manager", path.display())
+                                }
+                                Err(error) => {
+                                    s.status =
+                                        format!("could not open {}: {}", path.display(), error)
+                                }
                             }
                         } else if mime.starts_with("text/") {
                             // Text attachments are compact rows in the
@@ -2357,10 +2475,7 @@ fn handle_mouse(
 /// stray word like `pdf` from being treated as a filename.
 fn looks_like_existing_file(body: &str) -> Option<PathBuf> {
     use std::path::{Component, Path};
-    let trimmed = body
-        .trim()
-        .trim_matches(['"', '\''])
-        .replace("\\ ", " ");
+    let trimmed = body.trim().trim_matches(['"', '\'']).replace("\\ ", " ");
     if trimmed.is_empty() {
         return None;
     }
@@ -2473,7 +2588,10 @@ fn image_file_metadata(path: &PathBuf) -> Option<(String, u32, u32)> {
     // Detect from the file header instead of trusting the filename. Dragged
     // files from browsers and photo apps often have no extension or a generic
     // one, while `image_dimensions` can reliably parse PNG/JPEG bytes.
-    let reader = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?;
+    let reader = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
     let format = reader.format()?;
     let mime = match format {
         image::ImageFormat::Png => "image/png",
@@ -2483,7 +2601,6 @@ fn image_file_metadata(path: &PathBuf) -> Option<(String, u32, u32)> {
     let (width, height) = image::image_dimensions(path).ok()?;
     Some((mime.into(), width, height))
 }
-
 
 fn resolve_target(state: &Arc<Mutex<UiState>>, text: &str) -> Option<PeerId> {
     let s = state.lock().unwrap();
@@ -2499,14 +2616,12 @@ fn resolve_target(state: &Arc<Mutex<UiState>>, text: &str) -> Option<PeerId> {
     // Keep the selected contact routable even while it is Seen/Gone. This
     // lets the action thread retain the message in its offline queue instead
     // of rejecting the submit with "no peer selected" after a disconnect.
-    s.selected()
-        .map(|p| p.peer_id)
-        .or_else(|| {
-            s.peers
-                .iter()
-                .find(|p| p.state == tui::PeerState::Connected)
-                .map(|p| p.peer_id)
-        })
+    s.selected().map(|p| p.peer_id).or_else(|| {
+        s.peers
+            .iter()
+            .find(|p| p.state == tui::PeerState::Connected)
+            .map(|p| p.peer_id)
+    })
 }
 
 /// Strip the leading `@<name>` from a routed message, leaving just the body.
@@ -2514,7 +2629,11 @@ fn strip_routing(text: &str) -> String {
     let trimmed = text.trim_start();
     if let Some(rest) = trimmed.strip_prefix('@') {
         // Skip the first whitespace-delimited token (the name).
-        let after_name = rest.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
+        let after_name = rest
+            .split_whitespace()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join(" ");
         return after_name;
     }
     text.to_string()
@@ -2593,12 +2712,27 @@ fn handle_command(
         }
         "/peers" => {
             let s = state.lock().unwrap();
-            let connected = s.peers.iter().filter(|p| p.state == tui::PeerState::Connected).count();
-            let names = s.peers.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
+            let connected = s
+                .peers
+                .iter()
+                .filter(|p| p.state == tui::PeerState::Connected)
+                .count();
+            let names = s
+                .peers
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             let _ = tx_events.send(Event::Info(if s.peers.is_empty() {
                 "no peers known — run /discover".into()
             } else {
-                format!("{} peer{} ({} connected): {}", s.peers.len(), if s.peers.len() == 1 { "" } else { "s" }, connected, names)
+                format!(
+                    "{} peer{} ({} connected): {}",
+                    s.peers.len(),
+                    if s.peers.len() == 1 { "" } else { "s" },
+                    connected,
+                    names
+                )
             }));
         }
         "/clear" => {
@@ -2617,7 +2751,10 @@ fn handle_command(
             } else {
                 let pid = {
                     let s = state.lock().unwrap();
-                    s.peers.iter().find(|p| p.name == name || p.name.starts_with(&name)).map(|p| p.peer_id)
+                    s.peers
+                        .iter()
+                        .find(|p| p.name == name || p.name.starts_with(&name))
+                        .map(|p| p.peer_id)
                 };
                 if let Some(pid) = pid {
                     let _ = tx_actions.send(Action::Trust { peer_id: pid });
@@ -2633,7 +2770,10 @@ fn handle_command(
             } else {
                 let pid = {
                     let s = state.lock().unwrap();
-                    s.peers.iter().find(|p| p.name == name || p.name.starts_with(&name)).map(|p| p.peer_id)
+                    s.peers
+                        .iter()
+                        .find(|p| p.name == name || p.name.starts_with(&name))
+                        .map(|p| p.peer_id)
                 };
                 if let Some(pid) = pid {
                     let _ = tx_actions.send(Action::Revoke { peer_id: pid });
@@ -2658,10 +2798,8 @@ fn handle_command(
                     cfg.theme = t;
                     match save_ui_config(cfg, cfg_path) {
                         Ok(()) => {
-                            let _ = tx_events.send(Event::Info(format!(
-                                "theme set to {} (saved)",
-                                t.as_str()
-                            )));
+                            let _ = tx_events
+                                .send(Event::Info(format!("theme set to {} (saved)", t.as_str())));
                         }
                         Err(e) => {
                             let _ = tx_events.send(Event::Info(format!(
@@ -2720,16 +2858,18 @@ fn handle_command(
                 s.selected().map(|p| p.peer_id)
             };
             let Some(to) = pid else {
-                let _ = tx_events.send(Event::Info(
-                    "/paste-image: no peer selected".into(),
-                ));
+                let _ = tx_events.send(Event::Info("/paste-image: no peer selected".into()));
                 return;
             };
             let spawn = ppexchanger::clipboard::RealClipboardSpawn;
             match ppexchanger::clipboard::paste_clipboard_image(&spawn) {
                 Ok(img) => {
                     let dir = std::env::temp_dir();
-                    let ext = if img.mime == "image/jpeg" { "jpg" } else { "png" };
+                    let ext = if img.mime == "image/jpeg" {
+                        "jpg"
+                    } else {
+                        "png"
+                    };
                     let tmp_name = format!("ppx-clipboard-{}.{}", std::process::id(), ext);
                     let tmp_path = dir.join(&tmp_name);
                     if let Err(e) = std::fs::write(&tmp_path, &img.bytes) {
@@ -2769,10 +2909,7 @@ fn handle_command(
                     });
                 }
                 Err(e) => {
-                    let _ = tx_events.send(Event::Info(format!(
-                        "/paste-image: {}",
-                        e
-                    )));
+                    let _ = tx_events.send(Event::Info(format!("/paste-image: {}", e)));
                 }
             }
         }
@@ -2806,10 +2943,11 @@ fn route_settings_key(
             KeyCode::Backspace => {
                 st.name_draft.pop();
             }
-            KeyCode::Char(c) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
-                if st.name_draft.len() < 256 {
-                    st.name_draft.push(c);
-                }
+            KeyCode::Char(c)
+                if (mods.is_empty() || mods == KeyModifiers::SHIFT)
+                    && st.name_draft.len() < 256 =>
+            {
+                st.name_draft.push(c);
             }
             _ => {}
         }
@@ -2849,19 +2987,24 @@ fn route_settings_key(
                         cfg.status_format = prev;
                         st.dirty = true;
                     }
-                                        _ => { st.toggle_mouse(cfg); let _ = guard.set_mouse(cfg.mouse); }
+                    _ => {
+                        st.toggle_mouse(cfg);
+                        let _ = guard.set_mouse(cfg.mouse);
+                    }
                 },
-                Tab::Behavior => if st.selected() == 2 {
-                    // Cycle backwards through status formats.
-                    let cur = cfg.status_format;
-                    let prev = match cur {
-                        StatusFormat::NameOnly => StatusFormat::Off,
-                        StatusFormat::NameAddr => StatusFormat::NameOnly,
-                        StatusFormat::Off => StatusFormat::NameAddr,
-                    };
-                    cfg.status_format = prev;
-                    st.dirty = true;
-                },
+                Tab::Behavior => {
+                    if st.selected() == 2 {
+                        // Cycle backwards through status formats.
+                        let cur = cfg.status_format;
+                        let prev = match cur {
+                            StatusFormat::NameOnly => StatusFormat::Off,
+                            StatusFormat::NameAddr => StatusFormat::NameOnly,
+                            StatusFormat::Off => StatusFormat::NameAddr,
+                        };
+                        cfg.status_format = prev;
+                        st.dirty = true;
+                    }
+                }
                 Tab::About => {}
             },
             KeyCode::Right | KeyCode::Char('l') => match st.tab {
@@ -2877,11 +3020,16 @@ fn route_settings_key(
                     1 => {
                         let _ = st.cycle_status_format(cfg);
                     }
-                                        _ => { st.toggle_mouse(cfg); let _ = guard.set_mouse(cfg.mouse); }
+                    _ => {
+                        st.toggle_mouse(cfg);
+                        let _ = guard.set_mouse(cfg.mouse);
+                    }
                 },
-                Tab::Behavior => if st.selected() == 2 {
-                    let _ = st.cycle_status_format(cfg);
-                },
+                Tab::Behavior => {
+                    if st.selected() == 2 {
+                        let _ = st.cycle_status_format(cfg);
+                    }
+                }
                 Tab::About => {}
             },
             KeyCode::Up | KeyCode::Char('k') => st.move_selection(-1),
@@ -2907,7 +3055,10 @@ fn route_settings_key(
                     _ => {}
                 },
                 Tab::Input => match st.selected() {
-                    0 => { st.toggle_mouse(cfg); let _ = guard.set_mouse(cfg.mouse); }
+                    0 => {
+                        st.toggle_mouse(cfg);
+                        let _ = guard.set_mouse(cfg.mouse);
+                    }
                     1 => {
                         let _ = st.cycle_status_format(cfg);
                     }
@@ -2921,7 +3072,9 @@ fn route_settings_key(
                 Tab::Behavior => match st.selected() {
                     0 => st.toggle_notify_sound(cfg),
                     1 => st.toggle_auto_trust_seen(cfg),
-                    2 => { let _ = st.cycle_status_format(cfg); }
+                    2 => {
+                        let _ = st.cycle_status_format(cfg);
+                    }
                     3 => st.editing_name = true,
                     _ => {}
                 },
@@ -2983,18 +3136,17 @@ mod tests {
     #[test]
     fn absolute_paths_are_not_misclassified_as_commands() {
         assert!(!is_known_slash_command("/home/alice/Pictures/photo.png"));
-        assert!(is_known_slash_command("/send /home/alice/Pictures/photo.png"));
+        assert!(is_known_slash_command(
+            "/send /home/alice/Pictures/photo.png"
+        ));
         assert!(is_known_slash_command("/paste-image"));
         assert!(!is_known_slash_command("/unknown-command"));
     }
 
     #[test]
     fn dropped_file_uri_decodes_spaces_and_localhost() {
-        let dir = std::env::temp_dir().join(format!(
-            "ppx-drop-{}-{}",
-            std::process::id(),
-            rand_u64()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ppx-drop-{}-{}", std::process::id(), rand_u64()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("a picture.png");
         std::fs::write(&path, b"not a real image").unwrap();

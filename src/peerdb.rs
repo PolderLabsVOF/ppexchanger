@@ -104,20 +104,32 @@ impl PeerDb {
 fn load(path: &std::path::Path) -> io::Result<PeerDb> {
     let bytes = std::fs::read(path)?;
     if bytes.len() < 4 + 1 + 4 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "contacts file too short"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "contacts file too short",
+        ));
     }
     if &bytes[..4] != MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "contacts magic mismatch"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "contacts magic mismatch",
+        ));
     }
     if bytes[4] != VERSION {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "contacts version mismatch"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "contacts version mismatch",
+        ));
     }
     let count = u32::from_be_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]);
     let mut p = 9usize;
     let mut contacts = Vec::with_capacity(count as usize);
     for _ in 0..count {
         if p + 16 + 2 > bytes.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated contact"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated contact",
+            ));
         }
         let mut pid = [0u8; 16];
         pid.copy_from_slice(&bytes[p..p + 16]);
@@ -132,7 +144,10 @@ fn load(path: &std::path::Path) -> io::Result<PeerDb> {
             .to_string();
         p += name_len;
         if p + 32 + 1 > bytes.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated pubkey"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated pubkey",
+            ));
         }
         let mut pk = [0u8; 32];
         pk.copy_from_slice(&bytes[p..p + 32]);

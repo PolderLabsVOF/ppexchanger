@@ -42,7 +42,9 @@ pub fn render(
         .border_style(Style::default().fg(theme.border_active))
         .title(Span::styled(
             title,
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ));
 
     let mut lines: Vec<Line> = Vec::new();
@@ -63,7 +65,9 @@ pub fn render(
     for method in &state.results {
         lines.push(Line::from(Span::styled(
             format!(" {}", method.name),
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         )));
         if method.peers.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -105,7 +109,11 @@ pub fn render(
                         Style::default()
                             .fg(theme.peer_text)
                             .bg(if selected { theme.status_bg } else { theme.bg })
-                            .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() }),
+                            .add_modifier(if selected {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
                     ),
                 ]));
                 peer_index += 1;
@@ -223,7 +231,9 @@ pub fn render_map(
         .border_style(Style::default().fg(theme.border_active))
         .title(Span::styled(
             title,
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ));
 
     // Body: split into a Canvas plot + a footer hint line.

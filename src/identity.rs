@@ -143,9 +143,7 @@ fn load(path: &Path) -> io::Result<Identity> {
 fn save(path: &Path, id: &Identity) -> io::Result<()> {
     let secret = id.secret_bytes();
     let hostname_bytes = id.hostname.as_bytes();
-    let mut buf = Vec::with_capacity(
-        4 + 16 + 32 + 2 + id.name.len() + 2 + hostname_bytes.len(),
-    );
+    let mut buf = Vec::with_capacity(4 + 16 + 32 + 2 + id.name.len() + 2 + hostname_bytes.len());
     buf.extend_from_slice(MAGIC);
     buf.extend_from_slice(&id.peer_id);
     buf.extend_from_slice(&secret);

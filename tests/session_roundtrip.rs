@@ -109,7 +109,10 @@ fn tampered_ciphertext_rejected() {
             }
         }
         assert!(err_count > 0, "server must reject the bogus ciphertext");
-        assert_eq!(ok_count, 0, "bogus bytes must not be mistaken for a real frame");
+        assert_eq!(
+            ok_count, 0,
+            "bogus bytes must not be mistaken for a real frame"
+        );
     });
 
     let mut stream = PipeDuplex {
@@ -155,12 +158,13 @@ fn file_offer_accept_chunk_done_roundtrip() {
     })
     .unwrap();
     alice.send(&FrameBody::FileAccept { id }).unwrap();
-    alice.send(&FrameBody::FileChunk {
-        id,
-        offset: 0,
-        data: b"hello".to_vec(),
-    })
-    .unwrap();
+    alice
+        .send(&FrameBody::FileChunk {
+            id,
+            offset: 0,
+            data: b"hello".to_vec(),
+        })
+        .unwrap();
     alice.send(&FrameBody::FileDone { id }).unwrap();
 
     let offer = alice.recv().unwrap();

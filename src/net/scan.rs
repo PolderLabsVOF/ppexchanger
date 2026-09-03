@@ -80,10 +80,7 @@ fn enumerate_subnet(local: Ipv4Addr) -> Vec<Ipv4Addr> {
 
 /// Scan the full /24 on a single port, probing addresses in parallel.
 /// Loopback-only setups and unreachable networks yield an empty `Vec`.
-pub fn scan_local_subnet(
-    target_port: u16,
-    _hosts_per_side: u8,
-) -> io::Result<Vec<SocketAddrV4>> {
+pub fn scan_local_subnet(target_port: u16, _hosts_per_side: u8) -> io::Result<Vec<SocketAddrV4>> {
     let local = match local_outbound_ipv4() {
         Ok(ip) => ip,
         // On a host without a default route (common in CI), there's nothing
@@ -170,10 +167,7 @@ mod tests {
     /// Test seam: same shape as `scan_local_subnet` but parameterized on the
     /// local IP so we can verify the loopback guard without touching the
     /// kernel's network stack.
-    fn scan_loopback_offline(
-        port: u16,
-        hosts_per_side: u8,
-    ) -> io::Result<Vec<SocketAddrV4>> {
+    fn scan_loopback_offline(port: u16, hosts_per_side: u8) -> io::Result<Vec<SocketAddrV4>> {
         let local = Ipv4Addr::new(127, 0, 0, 1);
         let octets = local.octets();
         if octets[0] == 127 {
@@ -204,13 +198,7 @@ mod tests {
         assert!(!visited.contains(&50)); // never our own
     }
 
-    fn enumerate(
-        o0: u8,
-        o1: u8,
-        o2: u8,
-        own_last: u8,
-        range: i16,
-    ) -> Vec<u8> {
+    fn enumerate(o0: u8, o1: u8, o2: u8, own_last: u8, range: i16) -> Vec<u8> {
         let mut out = Vec::new();
         for delta in 1..=range {
             for sign in [-1i16, 1i16] {

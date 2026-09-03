@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  check:
+    name: check (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+          - name: macos
+            os: macos-latest
+          - name: windows
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Set up MSVC build environment
+        if: matrix.name == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Select MSVC linker
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $linker = where.exe link.exe |
+            Where-Object { $_ -match '\\VC\\Tools\\MSVC\\' } |
+            Select-Object -First 1
+          if (-not $linker) { throw 'Visual Studio MSVC linker was not found on PATH' }
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$($linker.Trim())" >> $env:GITHUB_ENV
+      - run: cargo check --locked
+
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+          - name: macos
+            os: macos-latest
+          - name: windows
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Set up MSVC build environment
+        if: matrix.name == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Select MSVC linker
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $linker = where.exe link.exe |
+            Where-Object { $_ -match '\\VC\\Tools\\MSVC\\' } |
+            Select-Object -First 1
+          if (-not $linker) { throw 'Visual Studio MSVC linker was not found on PATH' }
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$($linker.Trim())" >> $env:GITHUB_ENV
+      - run: cargo test --locked
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

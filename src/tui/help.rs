@@ -30,7 +30,9 @@ pub fn render(f: &mut Frame, theme: &super::theme::Theme, glyphs: &super::theme:
     let lines = vec![
         Line::from(Span::styled(
             "Navigation",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from("  Tab         cycle focus (sidebar <-> chat)"),
         Line::from("  Click       select peers, focus chat, use buttons"),
@@ -40,10 +42,15 @@ pub fn render(f: &mut Frame, theme: &super::theme::Theme, glyphs: &super::theme:
         Line::from(""),
         Line::from(Span::styled(
             "Actions",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from("  Enter       send message"),
-        Line::from(format!("  @<name> ..  route to peer by name ({})", glyphs.arrow)),
+        Line::from(format!(
+            "  @<name> ..  route to peer by name ({})",
+            glyphs.arrow
+        )),
         Line::from("  Ctrl-N      start a new chat with selected peer"),
         Line::from("  Ctrl-T      toggle trust on selected peer"),
         Line::from("  Ctrl-R      revoke selected peer"),
@@ -58,7 +65,9 @@ pub fn render(f: &mut Frame, theme: &super::theme::Theme, glyphs: &super::theme:
         Line::from(""),
         Line::from(Span::styled(
             "Commands",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from("  /discover   find peers on the local network"),
         Line::from("  /send       send the typed path as a file to the active peer"),

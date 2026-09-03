@@ -20,12 +20,7 @@ pub struct AcceptedPeer {
 impl AcceptedPeer {
     /// Convenience: turn an accepted peer into an `Event::PeerConnected` and a
     /// `PeerSession` for downstream handling.
-    pub fn into_event(
-        self,
-    ) -> (
-        crate::events::Event,
-        crate::events::PeerSession,
-    ) {
+    pub fn into_event(self) -> (crate::events::Event, crate::events::PeerSession) {
         let peer_id = peer_id_from_pubkey(&self.remote_static);
         let event = crate::events::Event::PeerConnected {
             peer_id,

@@ -10,7 +10,7 @@ use crate::events::FileOffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 const POPUP_W: u16 = 60;
@@ -55,7 +55,9 @@ pub fn render(
         .border_style(Style::default().fg(theme.border_active))
         .title(Span::styled(
             title,
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ));
 
     let size = human_size(state.offer.size);
@@ -66,7 +68,10 @@ pub fn render(
         .is_some_and(|mime| mime.starts_with("text/"))
         || state.offer.name.to_ascii_lowercase().ends_with(".txt");
     let body = if is_text {
-        format!("{} wants to send a text file (preview after download):", state.from_name)
+        format!(
+            "{} wants to send a text file (preview after download):",
+            state.from_name
+        )
     } else {
         format!("{} wants to send:", state.from_name)
     };
@@ -80,12 +85,18 @@ pub fn render(
                 } else {
                     "  ACCEPT (Enter)  "
                 },
-                Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.bg)
+                    .bg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("   "),
             Span::styled(
                 "  REJECT (Esc)  ",
-                Style::default().fg(theme.error).bg(theme.status_bg).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.error)
+                    .bg(theme.status_bg)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Decision::Accepted => Line::from(Span::styled("accepted — receiving…", theme.info_style())),
@@ -105,7 +116,9 @@ pub fn render(
     if let Some(preview) = state.offer.preview.as_ref() {
         lines.push(Line::from(Span::styled(
             "Preview",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         )));
         lines.extend(preview.lines().take(5).map(|line| {
             Line::from(Span::styled(

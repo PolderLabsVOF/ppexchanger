@@ -19,7 +19,7 @@
 //! (inbound). The UI thread never sees transfer data.
 
 use crate::config::config_dir;
-use crate::events::{FileOffer, FileId, PeerId};
+use crate::events::{FileId, FileOffer, PeerId};
 use crate::protocol::FrameBody;
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -121,8 +121,7 @@ impl OutboundTransfer {
     }
 
     pub fn timed_out(&self) -> bool {
-        self.phase == OutboundPhase::AwaitingAccept
-            && self.started_at.elapsed() > OFFER_TIMEOUT
+        self.phase == OutboundPhase::AwaitingAccept && self.started_at.elapsed() > OFFER_TIMEOUT
     }
 
     pub fn mark_accepted(&mut self) {
@@ -219,7 +218,9 @@ impl OutboundMap {
     }
 
     pub fn reject(&mut self, id: FileId) -> Option<AbortInfo> {
-        self.by_id.remove(&id).map(|t| t.into_aborted("peer rejected"))
+        self.by_id
+            .remove(&id)
+            .map(|t| t.into_aborted("peer rejected"))
     }
 
     pub fn tick_timeouts(&mut self) -> Vec<AbortInfo> {
@@ -412,8 +413,10 @@ impl InboundTransfer {
             });
         }
         let file = self.file.as_mut().expect("file in Receiving");
-        file.flush().map_err(|e| InboundError::Io(format!("flush: {}", e)))?;
-        file.sync_all().map_err(|e| InboundError::Io(format!("sync: {}", e)))?;
+        file.flush()
+            .map_err(|e| InboundError::Io(format!("flush: {}", e)))?;
+        file.sync_all()
+            .map_err(|e| InboundError::Io(format!("sync: {}", e)))?;
         self.file = None;
         self.phase = InboundPhase::Done;
         Ok(InboundInfo {
@@ -435,10 +438,7 @@ impl InboundTransfer {
         let partial = if self.bytes_written > 0 && self.path.exists() {
             let partial = self.path.with_extension(format!(
                 "{}.partial",
-                self.path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
+                self.path.extension().and_then(|e| e.to_str()).unwrap_or("")
             ));
             let _ = fs::rename(&self.path, &partial);
             Some(partial)
@@ -594,7 +594,12 @@ fn text_preview(path: &PathBuf, mime: Option<&str>) -> Option<String> {
         return None;
     }
     let bytes = fs::read(path).ok()?;
-    Some(String::from_utf8_lossy(&bytes).chars().take(2_000).collect())
+    Some(
+        String::from_utf8_lossy(&bytes)
+            .chars()
+            .take(2_000)
+            .collect(),
+    )
 }
 
 /// Returns `<config_dir>/received/`, creating it on first call.

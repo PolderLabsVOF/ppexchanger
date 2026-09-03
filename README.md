@@ -33,6 +33,14 @@ published alongside the release, and drops the binary into
 - [Windows](#windows)
 - [From source](#from-source) — git + cargo, with or without the installer
 
+### Nightly builds
+
+The `main` branch is built automatically every night for Linux, macOS, and
+Windows. Nightly downloads are available from the [rolling nightly
+release](https://github.com/PolderLabsVOF/ppexchanger/releases/tag/nightly).
+Use a numbered release for everyday use; nightlies are for trying the newest
+changes before they become stable.
+
 ### Linux
 
 Requires `curl`, `tar`, and `sha256sum` (all pre-installed on every

@@ -147,7 +147,9 @@ impl UiConfig {
                     }
                 }
                 "show_footer" => {
-                    if let Some(v) = unquote(value).or_else(|| value.parse().ok().map(|b: bool| b.to_string())) {
+                    if let Some(v) =
+                        unquote(value).or_else(|| value.parse().ok().map(|b: bool| b.to_string()))
+                    {
                         out.show_footer = parse_bool(&v).unwrap_or(out.show_footer);
                     }
                 }
@@ -439,9 +441,6 @@ scrollback = 1024\n";
     fn responsive_keys_default_when_absent() {
         let c = UiConfig::parse("[ui]\ntheme = \"neon\"\n").unwrap();
         assert_eq!(c.narrow_sidebar_below, DEFAULT_NARROW_SIDEBAR_BELOW);
-        assert_eq!(
-            c.min_conversation_width,
-            DEFAULT_MIN_CONVERSATION_WIDTH
-        );
+        assert_eq!(c.min_conversation_width, DEFAULT_MIN_CONVERSATION_WIDTH);
     }
 }

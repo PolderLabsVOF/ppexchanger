@@ -67,10 +67,18 @@ impl Discovery {
         // `join_multicast_v4` on the unspecified addr joins on the default
         // interface, which is enough for the common case. Loopback-only
         // setups will need to bind to 127.0.0.1 explicitly.
-        socket.join_multicast_v4(&MULTICAST_GROUP, &interface.unwrap_or(Ipv4Addr::UNSPECIFIED))?;
+        socket.join_multicast_v4(
+            &MULTICAST_GROUP,
+            &interface.unwrap_or(Ipv4Addr::UNSPECIFIED),
+        )?;
         socket.set_read_timeout(Some(Duration::from_millis(500)))?;
         let group_addr = SocketAddr::V4(SocketAddrV4::new(MULTICAST_GROUP, MULTICAST_PORT));
-        Ok(Self { socket, send_socket, group_addr, local_ip: None })
+        Ok(Self {
+            socket,
+            send_socket,
+            group_addr,
+            local_ip: None,
+        })
     }
 
     /// The local UDP port the socket is bound to.
@@ -80,9 +88,8 @@ impl Discovery {
 
     /// Send one beacon announcing our identity.
     pub fn announce(&self, beacon: &Beacon) -> io::Result<()> {
-        let bytes = encode_beacon(beacon).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "beacon encode failed")
-        })?;
+        let bytes = encode_beacon(beacon)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "beacon encode failed"))?;
         self.send_socket.send_to(&bytes, self.group_addr)?;
         Ok(())
     }
@@ -95,9 +102,7 @@ impl Discovery {
         let sock = UdpSocket::bind("0.0.0.0:0")?;
         sock.connect(probe)?;
         match sock.local_addr()? {
-            std::net::SocketAddr::V4(v4) => {
-                Ok(*v4.ip())
-            }
+            std::net::SocketAddr::V4(v4) => Ok(*v4.ip()),
             std::net::SocketAddr::V6(_) => Err(io::Error::other("no IPv4 outbound interface")),
         }
     }
@@ -112,9 +117,8 @@ impl Discovery {
 
     /// Send one beacon to the given address. Used for broadcast fallback.
     fn send_to(&self, addr: SocketAddr, beacon: &Beacon) -> io::Result<()> {
-        let bytes = encode_beacon(beacon).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "beacon encode failed")
-        })?;
+        let bytes = encode_beacon(beacon)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "beacon encode failed"))?;
         self.send_socket.send_to(&bytes, addr)?;
         Ok(())
     }
@@ -158,7 +162,9 @@ impl Discovery {
                 Some(b) => Ok(Some((addr, b))),
                 None => Ok(None),
             },
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
                 Ok(None)
             }
             Err(e) => Err(e),
@@ -194,7 +200,10 @@ impl Discovery {
             // A wildcard target is used only by the TCP scanner, which knows
             // the peer's IP but not its beacon id. Keep that request unicast
             // so every ppx instance on the LAN does not attempt the callback.
-            if !wildcard_target && control_group != addr && socket.send_to(&packet, control_group).is_ok() {
+            if !wildcard_target
+                && control_group != addr
+                && socket.send_to(&packet, control_group).is_ok()
+            {
                 sent = true;
             }
             if !sent {
@@ -210,7 +219,12 @@ impl Discovery {
                     return Ok(true);
                 }
                 Ok(_) => continue,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut =>
+                {
+                    continue
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -238,7 +252,11 @@ impl Discovery {
                 Ok((port != 0).then(|| SocketAddr::new(source.ip(), port)))
             }
             Ok(_) => Ok(None),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => Ok(None),
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
+                Ok(None)
+            }
             Err(e) => Err(e),
         }
     }

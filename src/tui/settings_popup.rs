@@ -192,10 +192,10 @@ impl SettingsState {
 
     pub fn rows_in_tab(&self) -> usize {
         match self.tab {
-            Tab::Display => 5,    // theme, footer, scrollback, notify_sound, auto_trust_seen
-            Tab::Input => 3,      // mouse, status_format, reset to defaults; (fingerprint copy, custom name) deferred — see ponytail below
-            Tab::Behavior => 4,   // auto-trust, notify, status format, custom display name
-            Tab::About => 8,      // version, build target, fingerprint (grouped), config path, received dir, peer count, last-seen, custom-name summary
+            Tab::Display => 5,  // theme, footer, scrollback, notify_sound, auto_trust_seen
+            Tab::Input => 3, // mouse, status_format, reset to defaults; (fingerprint copy, custom name) deferred — see ponytail below
+            Tab::Behavior => 4, // auto-trust, notify, status format, custom display name
+            Tab::About => 8, // version, build target, fingerprint (grouped), config path, received dir, peer count, last-seen, custom-name summary
         }
     }
 
@@ -252,7 +252,10 @@ pub fn mouse_target(area: Rect, col: u16, row: u16, state: &SettingsState) -> Op
     if row == inner.y {
         let tab_width = (inner.width / Tab::ALL.len() as u16).max(1);
         let idx = ((col.saturating_sub(inner.x)) / tab_width) as usize;
-        return Tab::ALL.get(idx.min(Tab::ALL.len() - 1)).copied().map(MouseTarget::Tab);
+        return Tab::ALL
+            .get(idx.min(Tab::ALL.len() - 1))
+            .copied()
+            .map(MouseTarget::Tab);
     }
     if row == inner.bottom().saturating_sub(1) {
         return Some(MouseTarget::Close);
@@ -291,7 +294,9 @@ pub fn render(
         .border_style(Style::default().fg(theme.border_active))
         .title(Line::from(ratatui::text::Span::styled(
             " settings ",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         )));
 
     // Keep content inside the rounded frame rather than drawing through it.
@@ -414,8 +419,7 @@ fn rows_for_tab(
         Tab::Display => {
             let theme_name = THEME_CHOICES[state.theme_idx.min(THEME_CHOICES.len() - 1)].as_str();
             let rows = vec![
-                mk("Theme", theme_name.to_string(), "←/→ cycles")
-                    .style(header_label_style),
+                mk("Theme", theme_name.to_string(), "←/→ cycles").style(header_label_style),
                 mk(
                     "Show footer",
                     if cfg.show_footer { "on" } else { "off" }.to_string(),
@@ -447,15 +451,20 @@ fn rows_for_tab(
                     if cfg.mouse { "on" } else { "off" }.to_string(),
                     "Enter toggles (live)",
                 ),
-                mk(
-                    "Status line",
-                    widget.to_string(),
-                    "←/→ cycles",
-                ),
+                mk("Status line", widget.to_string(), "←/→ cycles"),
                 mk(
                     "Reset to defaults",
-                    if state.confirm_reset { "Y to confirm" } else { "—" }.to_string(),
-                    if state.confirm_reset { "any other key cancels" } else { "Enter arms" },
+                    if state.confirm_reset {
+                        "Y to confirm"
+                    } else {
+                        "—"
+                    }
+                    .to_string(),
+                    if state.confirm_reset {
+                        "any other key cancels"
+                    } else {
+                        "Enter arms"
+                    },
                 ),
             ];
             (rows, widths)
@@ -484,7 +493,11 @@ fn rows_for_tab(
                     } else {
                         state.name_draft.clone()
                     },
-                    if state.editing_name { "type · Enter saves" } else { "Enter to edit" },
+                    if state.editing_name {
+                        "type · Enter saves"
+                    } else {
+                        "Enter to edit"
+                    },
                 ),
             ];
             (rows, widths)

@@ -127,12 +127,16 @@ fn sniff_png_dimensions(bytes: &[u8]) -> io::Result<(u32, u32)> {
             "png magic mismatch",
         ));
     }
-    let w = u32::from_be_bytes(bytes[16..20].try_into().map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "png width slice")
-    })?);
-    let h = u32::from_be_bytes(bytes[20..24].try_into().map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "png height slice")
-    })?);
+    let w = u32::from_be_bytes(
+        bytes[16..20]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "png width slice"))?,
+    );
+    let h = u32::from_be_bytes(
+        bytes[20..24]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "png height slice"))?,
+    );
     Ok((w, h))
 }
 
@@ -171,12 +175,16 @@ fn sniff_jpeg_dimensions(bytes: &[u8]) -> io::Result<(u32, u32)> {
                     "truncated jpeg SOF",
                 ));
             }
-            let h = u16::from_be_bytes(bytes[i + 3..i + 5].try_into().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "jpeg h slice")
-            })?) as u32;
-            let w = u16::from_be_bytes(bytes[i + 5..i + 7].try_into().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "jpeg w slice")
-            })?) as u32;
+            let h = u16::from_be_bytes(
+                bytes[i + 3..i + 5]
+                    .try_into()
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "jpeg h slice"))?,
+            ) as u32;
+            let w = u16::from_be_bytes(
+                bytes[i + 5..i + 7]
+                    .try_into()
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "jpeg w slice"))?,
+            ) as u32;
             return Ok((w, h));
         }
         // Stand-alone markers (no length field).
@@ -189,9 +197,11 @@ fn sniff_jpeg_dimensions(bytes: &[u8]) -> io::Result<(u32, u32)> {
                 "truncated jpeg segment",
             ));
         }
-        let seg_len = u16::from_be_bytes(bytes[i..i + 2].try_into().map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "jpeg seg len")
-        })?) as usize;
+        let seg_len = u16::from_be_bytes(
+            bytes[i..i + 2]
+                .try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "jpeg seg len"))?,
+        ) as usize;
         if seg_len < 2 || i + seg_len > bytes.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -213,7 +223,10 @@ pub fn paste_clipboard_image(spawn: &dyn ClipboardSpawn) -> io::Result<Clipboard
     // fallbacks, then macOS.
     let attempts: &[(&str, &[&str])] = &[
         ("wl-paste", &["--type", "image"]),
-        ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]),
+        (
+            "xclip",
+            &["-selection", "clipboard", "-t", "image/png", "-o"],
+        ),
         ("xsel", &["--clipboard", "--output"]),
         ("pngpaste", &[]),
     ];
@@ -237,9 +250,7 @@ pub fn paste_clipboard_image(spawn: &dyn ClipboardSpawn) -> io::Result<Clipboard
             }
         }
     }
-    let detail = last_err
-        .map(|s| format!(" ({})", s))
-        .unwrap_or_default();
+    let detail = last_err.map(|s| format!(" ({})", s)).unwrap_or_default();
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         format!("no image on clipboard or no clipboard tool found{}", detail),
@@ -252,9 +263,9 @@ mod tests {
     use std::cell::RefCell;
 
     /// In-memory clipboard stub. Each `try_tool` invocation pops the
-/// next scripted outcome in FIFO order so the test setup reads
-/// naturally: scripts[0] is returned for the first `try_tool` call,
-/// scripts[1] for the second, etc.
+    /// next scripted outcome in FIFO order so the test setup reads
+    /// naturally: scripts[0] is returned for the first `try_tool` call,
+    /// scripts[1] for the second, etc.
     struct StubSpawn {
         scripts: RefCell<std::collections::VecDeque<ToolAttempt>>,
         /// Recorded (program, args) pairs so tests can assert which
@@ -280,7 +291,7 @@ mod tests {
             self.scripts
                 .borrow_mut()
                 .pop_front()
-                .unwrap_or(Err(io::Error::new(io::ErrorKind::Other, "no script queued")))
+                .unwrap_or(Err(io::Error::other("no script queued")))
         }
     }
 
@@ -292,10 +303,8 @@ mod tests {
             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // width=1, height=1
             0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, // depth/color/etc + CRC
             0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, // IDAT len+type
-            0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05,
-            0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00,
-            0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42,
-            0x60, 0x82,
+            0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4,
+            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
         ]
     }
 
@@ -304,8 +313,8 @@ mod tests {
         let mut v = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x02];
         // SOF0: length 0x0011 (17 incl. itself), precision 8, h=2, w=3.
         v.extend_from_slice(&[
-            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x02, 0x00, 0x03, 0x01, 0x22,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x02, 0x00, 0x03, 0x01, 0x22, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00,
         ]);
         v
     }
@@ -338,12 +347,7 @@ mod tests {
     #[test]
     fn paste_returns_first_successful_tool() {
         // wl-paste returns PNG, the rest never get queried.
-        let stub = StubSpawn::new(vec![
-            Ok(Some(png_1x1())),
-            Ok(None),
-            Ok(None),
-            Ok(None),
-        ]);
+        let stub = StubSpawn::new(vec![Ok(Some(png_1x1())), Ok(None), Ok(None), Ok(None)]);
         let img = paste_clipboard_image(&stub).unwrap();
         assert_eq!(img.mime, "image/png");
         assert_eq!((img.width, img.height), (1, 1));
@@ -358,8 +362,8 @@ mod tests {
         // StubSpawn scripts are returned in FIFO order — scripts[0]
         // is what `wl-paste` sees, scripts[1] is what `xclip` sees.
         let stub = StubSpawn::new(vec![
-            Ok(None),              // wl-paste: no image
-            Ok(Some(png_1x1())),  // xclip: PNG
+            Ok(None),            // wl-paste: no image
+            Ok(Some(png_1x1())), // xclip: PNG
             Ok(None),
             Ok(None),
         ]);
@@ -386,12 +390,7 @@ mod tests {
 
     #[test]
     fn paste_reports_not_found_when_all_tools_exhausted() {
-        let stub = StubSpawn::new(vec![
-            Ok(None),
-            Ok(None),
-            Ok(None),
-            Ok(None),
-        ]);
+        let stub = StubSpawn::new(vec![Ok(None), Ok(None), Ok(None), Ok(None)]);
         let err = paste_clipboard_image(&stub).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         assert!(err.to_string().contains("no image on clipboard"));
@@ -409,12 +408,7 @@ mod tests {
 
     #[test]
     fn paste_handles_jpeg_payload() {
-        let stub = StubSpawn::new(vec![
-            Ok(None),
-            Ok(None),
-            Ok(None),
-            Ok(Some(jpeg_3x2())),
-        ]);
+        let stub = StubSpawn::new(vec![Ok(None), Ok(None), Ok(None), Ok(Some(jpeg_3x2()))]);
         let img = paste_clipboard_image(&stub).unwrap();
         assert_eq!(img.mime, "image/jpeg");
         assert_eq!((img.width, img.height), (3, 2));

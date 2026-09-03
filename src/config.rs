@@ -51,9 +51,8 @@ pub fn history_path() -> io::Result<PathBuf> {
 fn base_dir() -> io::Result<PathBuf> {
     #[cfg(windows)]
     {
-        let base = std::env::var("APPDATA").map_err(|_| {
-            io::Error::new(io::ErrorKind::NotFound, "APPDATA not set")
-        })?;
+        let base = std::env::var("APPDATA")
+            .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "APPDATA not set"))?;
         Ok(PathBuf::from(base))
     }
     #[cfg(not(windows))]
@@ -110,12 +109,14 @@ pub fn migrate_legacy_config() -> io::Result<bool> {
 /// Resolve the old `lanchat/` dir without creating it. Used by the
 /// migration probe only.
 fn legacy_dir() -> PathBuf {
-    base_dir().map(|b| b.join(LEGACY_DIRNAME)).unwrap_or_else(|_| {
-        // Best-effort fallback for environments where HOME/APPDATA are
-        // unset; the migration probe will return Ok(false) because the
-        // path won't exist.
-        PathBuf::from(LEGACY_DIRNAME)
-    })
+    base_dir()
+        .map(|b| b.join(LEGACY_DIRNAME))
+        .unwrap_or_else(|_| {
+            // Best-effort fallback for environments where HOME/APPDATA are
+            // unset; the migration probe will return Ok(false) because the
+            // path won't exist.
+            PathBuf::from(LEGACY_DIRNAME)
+        })
 }
 
 /// Test-only helper: resolve the legacy dir from an explicit base path,
@@ -185,10 +186,7 @@ mod tests {
             }
             let copied = new_dir.join("identity");
             assert!(copied.exists());
-            assert_eq!(
-                std::fs::read(&copied).unwrap(),
-                b"OLD_KEYPAIR_BYTES"
-            );
+            assert_eq!(std::fs::read(&copied).unwrap(), b"OLD_KEYPAIR_BYTES");
         });
     }
 

@@ -4,11 +4,9 @@
 # so the one-line `curl | bash` install always fetches the script that
 # matches the binary it installs.
 #
-# v0.5.0 ships linux-only: the matrix keeps the full set of targets for
-# future releases, but every non-x86_64-linux entry is marked
-# `allow_failure: true` so the publish job still succeeds off the working
-# asset. Re-enable entries by flipping the flag once the corresponding
-# runner is available.
+# Numbered releases are built for every supported desktop target. Linux ARM
+# uses GitHub's native ARM runner, while Windows explicitly selects the MSVC
+# linker so Git Bash's unrelated `link.exe` cannot be picked accidentally.
 
 name: release
 
@@ -19,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to publish (must already exist or will be created from current commit)'
+        description: 'Existing version tag to publish (for example, v0.7.0)'
         required: false
         default: ''
 
@@ -27,8 +25,22 @@ permissions:
   contents: write   # required for gh release create / upload
 
 jobs:
+  validate:
+    name: validate release ref
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a version tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release workflows must run for a semantic version tag (got: $RELEASE_TAG)"
+            exit 1
+          fi
+
   build:
     name: build ${{ matrix.target }}
+    needs: validate
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.allow_failure }}
     strategy:
@@ -40,14 +52,9 @@ jobs:
             binary_name: ppx
             allow_failure: false
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             binary_name: ppx
-            # Non-x86_64-linux entries are marked `allow_failure: true`
-            # because v0.5.0 ships linux-only. The matrix is kept intact
-            # so future releases can flip the flags without rewriting
-            # the workflow. Re-enable once the corresponding runner
-            # cross-build is verified.
-            allow_failure: true
+            allow_failure: false
           - target: x86_64-apple-darwin
             os: macos-latest
             binary_name: ppx
@@ -71,6 +78,8 @@ jobs:
             allow_failure: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust toolchain (host)
         uses: dtolnay/rust-toolchain@stable
@@ -129,11 +138,7 @@ jobs:
           # x86_64 object files into the aarch64 build.
           CARGO_TARGET_DIR: target-${{ matrix.target }}
         run: |
-          # NB: no --locked here. On a cold cargo cache, a fresh target
-          # triple triggers a registry update which --locked would block.
-          # The dep list is version-pinned and small, so an unlocked
-          # build can only add (not change) entries — safe for releases.
-          cargo build --release --target "${{ matrix.target }}"
+          cargo build --release --locked --target "${{ matrix.target }}"
           mkdir -p staging/bin
           cp "target-${{ matrix.target }}/${{ matrix.target }}/release/${{ matrix.binary_name }}" staging/bin/${{ matrix.binary_name }}
           # POSIX `strip` doesn't recognize Windows PE binaries; the
@@ -144,11 +149,11 @@ jobs:
 
       - name: Compose tarball + checksums
         env:
-          TAG_BARE: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
           TARGET: ${{ matrix.target }}
           BINARY_NAME: ${{ matrix.binary_name }}
         run: |
-          TAG_BARE="${TAG_BARE#v}"
+          TAG_BARE="${RELEASE_TAG#v}"
           ASSET="ppexchanger-${TAG_BARE}-${TARGET}.tar.gz"
           # POSIX tar works on Windows under Git Bash.
           tar -C staging -czf "${ASSET}" "bin/${BINARY_NAME}"
@@ -161,7 +166,7 @@ jobs:
           # built into Windows 10+ / Server 2019+, no extra tooling.
           if [ "${TARGET}" = "x86_64-pc-windows-msvc" ]; then
             ZIP_ASSET="ppexchanger-${TAG_BARE}-${TARGET}.zip"
-            (cd staging && powershell.exe -NoProfile -Command "Compress-Archive -Path 'bin/ppx.exe'' -DestinationPath '../${ZIP_ASSET}' -Force")
+            powershell.exe -NoProfile -Command "Compress-Archive -Path 'staging/bin/ppx.exe' -DestinationPath '${ZIP_ASSET}' -Force"
             sha256sum "${ZIP_ASSET}" >> SHA256SUMS
           fi
           cat SHA256SUMS
@@ -183,6 +188,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -203,8 +210,8 @@ jobs:
       - name: Create / update GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ppexchanger ${{ github.ref_name }}
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ppexchanger ${{ inputs.tag || github.ref_name }}
           generate_release_notes: true
           files: |
             SHA256SUMS

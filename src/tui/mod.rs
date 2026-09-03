@@ -35,8 +35,6 @@ pub use theme::{detect_glyphs, Glyphs, StyleRole, Theme, ThemeName};
 use crate::events::{Event, PeerId};
 use crate::identity::Identity;
 use crate::peerdb::{Contact, PeerDb};
-use std::collections::HashMap;
-use std::path::PathBuf;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -46,8 +44,10 @@ use ratatui::widgets::{
     ScrollbarOrientation, ScrollbarState, Wrap,
 };
 use ratatui::Terminal;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io::{stdout, Stdout};
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Layout constants shared between `render()` and `hit_test()`. The
@@ -688,7 +688,8 @@ impl UiState {
                     .is_some_and(|value| value.starts_with("image/"))
                     || is_image_attachment(name)
                 {
-                    let (detected_width, detected_height) = image::image_dimensions(saved_to).ok().unwrap_or((0, 0));
+                    let (detected_width, detected_height) =
+                        image::image_dimensions(saved_to).ok().unwrap_or((0, 0));
                     Some(ImageMeta {
                         path: saved_to.clone(),
                         mime: mime.clone().unwrap_or_else(|| "image/*".into()),
@@ -700,10 +701,8 @@ impl UiState {
                     None
                 };
                 let is_text = image.is_none() && is_text_attachment(name);
-                if is_text {
-                    if std::fs::metadata(saved_to).is_ok() {
-                        self.status = format!("downloaded {} · click the message to expand", name);
-                    }
+                if is_text && std::fs::metadata(saved_to).is_ok() {
+                    self.status = format!("downloaded {} · click the message to expand", name);
                 }
                 if let Some(image) = image {
                     // Keep image rows compact (filename + dimensions) so the
@@ -750,10 +749,7 @@ impl UiState {
                 self.push_message(UiMessage {
                     from_peer: *from_peer,
                     from_name: "[file]".into(),
-                    body: format!(
-                        "{}: transfer of {} aborted ({})",
-                        from_name, name, reason
-                    ),
+                    body: format!("{}: transfer of {} aborted ({})", from_name, name, reason),
                     outgoing: false,
                     pending: false,
                     ts_unix: now_unix(),
@@ -767,11 +763,7 @@ impl UiState {
     /// is already in flight, refresh the running flag and summary instead of
     /// spawning a second set of threads.
     pub fn start_discovery(&mut self) {
-        let already_running = self
-            .discovery
-            .as_ref()
-            .map(|d| d.running)
-            .unwrap_or(false);
+        let already_running = self.discovery.as_ref().map(|d| d.running).unwrap_or(false);
         self.discovery = Some(DiscoveryState {
             running: true,
             results: Vec::new(),
@@ -791,14 +783,20 @@ impl UiState {
     }
 
     pub fn move_discovery_selection(&mut self, delta: i32) {
-        let Some(discovery) = self.discovery.as_mut() else { return; };
-        let count = discovery.results.iter().map(|method| method.peers.len()).sum::<usize>();
+        let Some(discovery) = self.discovery.as_mut() else {
+            return;
+        };
+        let count = discovery
+            .results
+            .iter()
+            .map(|method| method.peers.len())
+            .sum::<usize>();
         if count == 0 {
             discovery.selected = 0;
             return;
         }
-        discovery.selected = (discovery.selected as i32 + delta)
-            .clamp(0, count as i32 - 1) as usize;
+        discovery.selected =
+            (discovery.selected as i32 + delta).clamp(0, count as i32 - 1) as usize;
     }
 
     pub fn selected_discovery_peer(&self) -> Option<DiscoveredPeer> {
@@ -885,7 +883,9 @@ impl UiState {
     pub fn message_index_at_chat_row(&self, chat: Rect, row: u16) -> Option<usize> {
         let top = chat.y.saturating_add(1);
         let bottom = chat.bottom().saturating_sub(1);
-        let peer_id = self.active_chat_peer.or_else(|| self.selected().map(|p| p.peer_id))?;
+        let peer_id = self
+            .active_chat_peer
+            .or_else(|| self.selected().map(|p| p.peer_id))?;
         if row < top || row >= bottom {
             return None;
         }
@@ -914,10 +914,24 @@ impl UiState {
     }
 
     pub fn extend_message_selection(&mut self, index: usize) {
-        let Some(anchor) = self.selecting_message else { return; };
-        let Some(peer_id) = self.active_chat_peer.or_else(|| self.selected().map(|p| p.peer_id)) else { return; };
-        let (start, end) = if anchor <= index { (anchor, index) } else { (index, anchor) };
-        if let Some(message) = self.messages.get(start.min(self.messages.len().saturating_sub(1))) {
+        let Some(anchor) = self.selecting_message else {
+            return;
+        };
+        let Some(peer_id) = self
+            .active_chat_peer
+            .or_else(|| self.selected().map(|p| p.peer_id))
+        else {
+            return;
+        };
+        let (start, end) = if anchor <= index {
+            (anchor, index)
+        } else {
+            (index, anchor)
+        };
+        if let Some(message) = self
+            .messages
+            .get(start.min(self.messages.len().saturating_sub(1)))
+        {
             self.message_selection = Some((peer_id, message.ts_unix, message.outgoing));
         }
         self.selecting_message = Some(end);
@@ -932,14 +946,21 @@ impl UiState {
         self.selecting_message = None;
         self.messages
             .iter()
-            .find(|message| message.from_peer == peer_id && message.ts_unix == ts && message.outgoing == outgoing)
+            .find(|message| {
+                message.from_peer == peer_id
+                    && message.ts_unix == ts
+                    && message.outgoing == outgoing
+            })
             .map(|message| message.body.clone())
     }
 
     pub fn message_is_selected(&self, message: &UiMessage) -> bool {
-        self.message_selection.is_some_and(|(peer_id, ts, outgoing)| {
-            message.from_peer == peer_id && message.ts_unix == ts && message.outgoing == outgoing
-        })
+        self.message_selection
+            .is_some_and(|(peer_id, ts, outgoing)| {
+                message.from_peer == peer_id
+                    && message.ts_unix == ts
+                    && message.outgoing == outgoing
+            })
     }
 
     /// Add an optimistic local echo for a message accepted by the composer.
@@ -977,11 +998,7 @@ impl UiState {
         let label = truncate_tail(&label, 28);
         let body = format!(
             "[image {} · {}×{} · {:.1} KB · {}]",
-            label,
-            image.width,
-            image.height,
-            kb,
-            image.mime
+            label, image.width, image.height, kb, image.mime
         );
         self.push_message(UiMessage {
             from_peer: to_peer,
@@ -1031,12 +1048,7 @@ impl UiState {
 
     /// Add an inbound image row. The body is the metadata line; the
     /// renderer uses `image.path` for the preview source.
-    pub fn push_inbound_image(
-        &mut self,
-        from_peer: PeerId,
-        from_name: String,
-        image: ImageMeta,
-    ) {
+    pub fn push_inbound_image(&mut self, from_peer: PeerId, from_name: String, image: ImageMeta) {
         let kb = image.bytes as f64 / 1024.0;
         let label = image
             .path
@@ -1047,11 +1059,7 @@ impl UiState {
         let label = truncate_tail(&label, 28);
         let body = format!(
             "[image {} · {}×{} · {:.1} KB · {}]",
-            label,
-            image.width,
-            image.height,
-            kb,
-            image.mime
+            label, image.width, image.height, kb, image.mime
         );
         self.push_message(UiMessage {
             from_peer,
@@ -1318,8 +1326,22 @@ fn now_unix() -> u64 {
 fn is_text_attachment(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     [
-        ".txt", ".md", ".markdown", ".log", ".csv", ".json", ".yaml", ".yml", ".toml",
-        ".xml", ".html", ".css", ".rs", ".py", ".js", ".ts",
+        ".txt",
+        ".md",
+        ".markdown",
+        ".log",
+        ".csv",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".xml",
+        ".html",
+        ".css",
+        ".rs",
+        ".py",
+        ".js",
+        ".ts",
     ]
     .iter()
     .any(|suffix| lower.ends_with(suffix))
@@ -1379,9 +1401,7 @@ fn count_groups(messages: &VecDeque<UiMessage>) -> usize {
     for i in 1..messages.len() {
         // SAFETY: i is bounded by messages.len(), which is also the
         // valid index range for both get(i) and get(i - 1).
-        if messages.get(i - 1).map(|m| m.outgoing)
-            != messages.get(i).map(|m| m.outgoing)
-        {
+        if messages.get(i - 1).map(|m| m.outgoing) != messages.get(i).map(|m| m.outgoing) {
             count += 1;
         }
     }
@@ -1407,9 +1427,13 @@ fn day_separator_label(bucket: u64, today_bucket: u64) -> String {
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
     let mp = (5 * doy + 2) / 153; // [0, 9]
     let d_signed = (doy as i64) - ((153 * mp as i64 + 2) / 5) + 1; // [1, 31]
-    let m_signed = if mp < 10 { mp as i64 + 3 } else { mp as i64 - 9 }; // [1, 12]
-    // Year is computed (March-based year adjustment) but not rendered
-    // since labels collapse to "Mon DD" for days older than yesterday.
+    let m_signed = if mp < 10 {
+        mp as i64 + 3
+    } else {
+        mp as i64 - 9
+    }; // [1, 12]
+       // Year is computed (March-based year adjustment) but not rendered
+       // since labels collapse to "Mon DD" for days older than yesterday.
     let _y = (yoe as i64) + era * 400 + if m_signed <= 2 { 1 } else { 0 };
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -1564,9 +1588,7 @@ pub fn hit_test(
 /// (optionally) mouse capture. Bracketed paste is always on; mouse
 /// capture is gated by `mouse_enabled` because enabling capture on
 /// tmux breaks native drag-select.
-pub fn enter_terminal(
-    mouse_enabled: bool,
-) -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
+pub fn enter_terminal(mouse_enabled: bool) -> std::io::Result<Terminal<CrosstermBackend<Stdout>>> {
     use crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
     use crossterm::terminal::{EnterAlternateScreen, SetTitle};
     let mut out = stdout();
@@ -1652,7 +1674,10 @@ impl Drop for TuiGuard {
             if !crossterm::event::poll(Duration::from_millis(2)).unwrap_or(false) {
                 break;
             }
-            if !matches!(crossterm::event::read(), Ok(crossterm::event::Event::Mouse(_))) {
+            if !matches!(
+                crossterm::event::read(),
+                Ok(crossterm::event::Event::Mouse(_))
+            ) {
                 break;
             }
         }
@@ -1903,11 +1928,19 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
             .border_style(theme.border_style(true))
             .title(Span::styled(
                 " ◌ PENDING CONNECTION ",
-                Style::default().fg(theme.status_seen).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.status_seen)
+                    .add_modifier(Modifier::BOLD),
             ));
         let prompt = Paragraph::new(vec![
-            Line::from(Span::styled(request.name.clone(), theme.peer_message_style())),
-            Line::from(Span::styled("Click / Enter accept · Esc decline", theme.dim_style())),
+            Line::from(Span::styled(
+                request.name.clone(),
+                theme.peer_message_style(),
+            )),
+            Line::from(Span::styled(
+                "Click / Enter accept · Esc decline",
+                theme.dim_style(),
+            )),
         ])
         .block(pending)
         .wrap(Wrap { trim: true });
@@ -1960,7 +1993,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
                     PeerState::Seen => (glyphs.dot_seen, theme.status_seen),
                     PeerState::Gone => (glyphs.dot_gone, theme.status_offline),
                 };
-                let trust = if p.trusted { glyphs.trusted } else { glyphs.untrusted };
+                let trust = if p.trusted {
+                    glyphs.trusted
+                } else {
+                    glyphs.untrusted
+                };
                 let name_style = theme.peer_message_style_for(&p.peer_id);
                 let detail = match p.state {
                     PeerState::Connected => "online",
@@ -2024,7 +2061,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
     f.render_stateful_widget(
         List::new(items)
             .block(block)
-            .highlight_style(Style::default().bg(theme.status_bg).add_modifier(Modifier::BOLD))
+            .highlight_style(
+                Style::default()
+                    .bg(theme.status_bg)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("› "),
         peer_area,
         &mut list_state,
@@ -2144,8 +2185,8 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
     state.active_chat_peer = selected_peer_id;
     state.active_chat_message_count = total;
     let visible_n = (area.height as usize).saturating_sub(2); // minus borders
-    // Publish the chat interior height so `scroll_back` can clamp the
-    // scroll offset to keep the viewport full at the top of history.
+                                                              // Publish the chat interior height so `scroll_back` can clamp the
+                                                              // scroll offset to keep the viewport full at the top of history.
     state.visible_chat_rows = visible_n;
 
     // Empty state: show improved welcome message
@@ -2211,7 +2252,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
             let line = Line::from(vec![
                 Span::styled(if m.outgoing { "› " } else { "‹ " }, who_style),
                 Span::styled(format!("{} ", who), who_style),
-                Span::styled(format!("{}", ts), ts_style),
+                Span::styled(ts.to_string(), ts_style),
             ]);
             if m.outgoing {
                 line.right_aligned()
@@ -2392,10 +2433,13 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
                 m_lines.push(Line::from(bubble_line).right_aligned());
             } else {
                 let indent_style = Style::default().bg(theme.bg);
-                m_lines.push(Line::from(vec![
-                    Span::styled("  ", indent_style),
-                    Span::styled(bubble_body, Style::default().fg(theme.fg).bg(theme.bg)),
-                ]).left_aligned());
+                m_lines.push(
+                    Line::from(vec![
+                        Span::styled("  ", indent_style),
+                        Span::styled(bubble_body, Style::default().fg(theme.fg).bg(theme.bg)),
+                    ])
+                    .left_aligned(),
+                );
             }
             if text_expanded {
                 if let Some(meta) = text_meta {
@@ -2415,11 +2459,10 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
                             // before the next frame is drawn.
                             let max_offset = total_lines.saturating_sub(room);
                             state.expanded_text_max_offset = max_offset;
-                            state.expanded_text_offset = state
-                                .expanded_text_offset
-                                .min(max_offset);
+                            state.expanded_text_offset = state.expanded_text_offset.min(max_offset);
                             let start = state.expanded_text_offset;
-                            let shown: Vec<&str> = all_lines.iter().skip(start).take(room).copied().collect();
+                            let shown: Vec<&str> =
+                                all_lines.iter().skip(start).take(room).copied().collect();
                             m_lines.push(Line::from(Span::styled(
                                 format!(
                                     "  ┌─ pasted text · lines {}–{} of {} ─────────",
@@ -2432,7 +2475,10 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
                             for line in shown {
                                 m_lines.push(Line::from(vec![
                                     Span::styled("  │ ", theme.role_style(StyleRole::TextMuted)),
-                                    Span::styled((*line).to_string(), theme.role_style(StyleRole::TextSecondary)),
+                                    Span::styled(
+                                        (*line).to_string(),
+                                        theme.role_style(StyleRole::TextSecondary),
+                                    ),
                                 ]));
                             }
                             m_lines.push(Line::from(Span::styled(
@@ -2499,7 +2545,8 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
                 let top = rows.len().saturating_sub(preview.height as usize) as u16;
                 image_anchors.push((top, preview.clone()));
             }
-            if let (Some(key), Some(offset)) = (chunk.attachment_key, chunk.attachment_body_offset) {
+            if let (Some(key), Some(offset)) = (chunk.attachment_key, chunk.attachment_body_offset)
+            {
                 let start = chunk_start.saturating_add(offset) as u16;
                 let end = rows.len().saturating_sub(1) as u16;
                 state.attachment_rows.push((start, end, key));
@@ -2518,7 +2565,10 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
     // the chunk walk. Rendering is terminal-independent Unicode halfblocks,
     // so this also works in terminals without Kitty/iTerm graphics support.
     if !empty {
-        let interior = area.inner(Margin { vertical: 1, horizontal: 1 });
+        let interior = area.inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        });
         for (y_offset, preview) in image_anchors {
             let abs_y = interior.y.saturating_add(y_offset);
             if abs_y + preview.height > interior.y + interior.height {
@@ -2528,11 +2578,15 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         }
     }
     if empty {
-        let body = area.inner(Margin { vertical: 1, horizontal: 1 });
+        let body = area.inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        });
         let height = 5.min(body.height);
         let empty_area = Rect::new(
             body.x,
-            body.y.saturating_add(body.height.saturating_sub(height) / 2),
+            body.y
+                .saturating_add(body.height.saturating_sub(height) / 2),
             body.width,
             height,
         );
@@ -2584,15 +2638,20 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         // column of text, not a widget assembly.
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .thumb_style(Style::default().fg(theme.border_inactive).bg(theme.bg))
-            .track_style(Style::default()
-                .fg(theme.border_inactive)
-                .bg(theme.bg)
-                .add_modifier(Modifier::DIM))
+            .track_style(
+                Style::default()
+                    .fg(theme.border_inactive)
+                    .bg(theme.bg)
+                    .add_modifier(Modifier::DIM),
+            )
             .begin_symbol(None)
             .end_symbol(None);
         f.render_stateful_widget(
             scrollbar,
-            area.inner(Margin { vertical: 1, horizontal: 0 }),
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
             &mut scrollbar_state,
         );
     }
@@ -2616,7 +2675,11 @@ fn render_image_preview(
     // outgoing edge uses the same right boundary as the message bubbles;
     // incoming previews share the left gutter with peer messages.
     let width = preview.width.min(interior.width);
-    let height = preview.height.min(interior.height.saturating_sub(abs_y.saturating_sub(interior.y)));
+    let height = preview.height.min(
+        interior
+            .height
+            .saturating_sub(abs_y.saturating_sub(interior.y)),
+    );
     let x = if preview.outgoing {
         interior.right().saturating_sub(width)
     } else {
@@ -2691,7 +2754,10 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs
     // button-styled title bar — let the border weight carry the focus
     // cue instead.
     let composer_area = Rect::new(area.x, area.y, area.width, 3);
-    let target = state.selected().map(|p| p.name.as_str()).unwrap_or("no recipient");
+    let target = state
+        .selected()
+        .map(|p| p.name.as_str())
+        .unwrap_or("no recipient");
     let target_label = truncate_tail(target, 18);
     let composer_title = if target == "no recipient" {
         " choose a peer "
@@ -2820,19 +2886,13 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs
     ] {
         right_spans.extend(h);
     }
-    let right_width: usize = right_spans
-        .iter()
-        .map(|s| s.content.chars().count())
-        .sum();
+    let right_width: usize = right_spans.iter().map(|s| s.content.chars().count()).sum();
     let row = Rect::new(area.x, area.y.saturating_add(3), area.width, 1);
     let has_room_for_hints = area.width as usize >= right_width + 10;
     if has_room_for_hints {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(right_width as u16),
-            ])
+            .constraints([Constraint::Min(1), Constraint::Length(right_width as u16)])
             .split(row);
         let left_text = format!(" {} {} ", status_icon, status);
         let left_width = chunks[0].width as usize;
@@ -2868,7 +2928,8 @@ fn render_text_preview(f: &mut Frame, theme: &Theme, preview: &TextFilePreview) 
     let height = area.height.saturating_sub(4).min(24);
     let popup = Rect::new(
         area.x.saturating_add(area.width.saturating_sub(width) / 2),
-        area.y.saturating_add(area.height.saturating_sub(height) / 2),
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
         width,
         height,
     );
@@ -2893,13 +2954,12 @@ fn render_text_preview(f: &mut Frame, theme: &Theme, preview: &TextFilePreview) 
         )),
         Line::from(""),
     ];
-    lines.extend(
-        preview
-            .content
-            .lines()
-            .take(content_rows)
-            .map(|line| Line::from(Span::styled(line.to_string(), theme.role_style(StyleRole::TextSecondary)))),
-    );
+    lines.extend(preview.content.lines().take(content_rows).map(|line| {
+        Line::from(Span::styled(
+            line.to_string(),
+            theme.role_style(StyleRole::TextSecondary),
+        ))
+    }));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Enter / Esc close · file remains available at the saved path",
@@ -2936,7 +2996,9 @@ fn draw_command_palette(f: &mut Frame, chat: Rect, state: &UiState, theme: &Them
         .border_style(theme.border_style(true))
         .title(Span::styled(
             " commands · Tab completes ",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ));
     f.render_widget(Paragraph::new(lines).block(block), popup);
 }
@@ -2948,14 +3010,22 @@ pub fn command_palette_hit(chat: Rect, composer: &str, col: u16, row: u16) -> Op
     if col < popup.x || col >= popup.right() || row <= popup.y || row >= popup.bottom() {
         return None;
     }
-    shown.get((row - popup.y - 1) as usize).map(|(command, _)| *command)
+    shown
+        .get((row - popup.y - 1) as usize)
+        .map(|(command, _)| *command)
 }
 
-fn command_palette_layout(chat: Rect, composer: &str) -> Option<(Rect, Vec<(&'static str, &'static str)>)> {
+fn command_palette_layout(
+    chat: Rect,
+    composer: &str,
+) -> Option<(Rect, Vec<(&'static str, &'static str)>)> {
     if !composer.starts_with('/') || chat.width < 30 || chat.height < 7 {
         return None;
     }
-    let shown: Vec<_> = input::command_matches(composer).into_iter().take(5).collect();
+    let shown: Vec<_> = input::command_matches(composer)
+        .into_iter()
+        .take(5)
+        .collect();
     if shown.is_empty() {
         return None;
     }
@@ -2991,9 +3061,15 @@ fn truncate_tail(value: &str, width: usize) -> String {
 
 fn status_style(status: &str, theme: &Theme) -> Style {
     let lower = status.to_ascii_lowercase();
-    if ["failed", "denied", "error", "aborted"].iter().any(|needle| lower.contains(needle)) {
+    if ["failed", "denied", "error", "aborted"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
         theme.error_style()
-    } else if ["connected", "listening", "saved", "ready"].iter().any(|needle| lower.contains(needle)) {
+    } else if ["connected", "listening", "saved", "ready"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
         theme.self_message_style()
     } else {
         theme.info_style()
@@ -3307,9 +3383,7 @@ mod tests {
         assert!(s.show_logo);
         assert!(s.messages.is_empty());
 
-        let any_modal = |s: &UiState| {
-            s.show_help || s.discovery.is_some() || s.settings.is_some()
-        };
+        let any_modal = |s: &UiState| s.show_help || s.discovery.is_some() || s.settings.is_some();
         assert!(!any_modal(&s));
 
         s.show_help = true;
@@ -3747,7 +3821,8 @@ mod tests {
         ));
         // Click below last peer but still inside the sidebar — should
         // clamp to the last index rather than fall through to Footer.
-        let below_last = areas.sidebar
+        let below_last = areas
+            .sidebar
             .y
             .saturating_add(areas.sidebar.height)
             .saturating_sub(2);

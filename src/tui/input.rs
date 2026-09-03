@@ -190,7 +190,10 @@ impl LineEditor {
         // character branch below. Ctrl-W is accepted as the familiar shell
         // word-delete alternative as well.
         if modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(code, KeyCode::Backspace | KeyCode::Char('h') | KeyCode::Char('w'))
+            && matches!(
+                code,
+                KeyCode::Backspace | KeyCode::Char('h') | KeyCode::Char('w')
+            )
         {
             self.delete_word_backwards();
             return EditorEvent::Edited;
@@ -443,7 +446,10 @@ mod tests {
     fn tab_completes_a_slash_command() {
         let mut ed = LineEditor::new();
         ed.buffer = "/disc".into();
-        assert_eq!(ed.on_key(&press(KeyCode::Tab, KeyModifiers::NONE)), EditorEvent::Edited);
+        assert_eq!(
+            ed.on_key(&press(KeyCode::Tab, KeyModifiers::NONE)),
+            EditorEvent::Edited
+        );
         assert_eq!(ed.buffer, "/discover ");
         assert_eq!(command_matches("/se")[0].0, "/send");
     }

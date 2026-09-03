@@ -266,14 +266,13 @@ fn decode(bytes: &[u8], has_pending: bool) -> io::Result<VecDeque<UiMessage>> {
                     ));
                 }
                 let path_bytes = cursor.take(path_len)?.to_vec();
-                let path = std::path::PathBuf::from(
-                    String::from_utf8(path_bytes).map_err(|_| {
+                let path =
+                    std::path::PathBuf::from(String::from_utf8(path_bytes).map_err(|_| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
                             "chat history image path is not utf-8",
                         )
-                    })?,
-                );
+                    })?);
                 Some(ImageMeta {
                     path,
                     mime,

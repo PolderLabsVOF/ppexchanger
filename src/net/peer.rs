@@ -67,6 +67,7 @@ pub fn dial(addr: SocketAddr, static_kp: &Keypair) -> std::io::Result<Session<Tc
 /// Returns:
 ///   * `peer_id` derived from the peer's static pubkey
 ///   * `discovered` summary (name hint, addr, fingerprint) for the UI
+#[allow(clippy::too_many_arguments)]
 pub fn connect(
     addr: SocketAddr,
     name_hint: Option<String>,
@@ -97,9 +98,7 @@ pub fn connect(
                     | std::io::ErrorKind::AddrNotAvailable
                     | std::io::ErrorKind::TimedOut
             ) || e.to_string().contains("connection attempts exhausted");
-            let label = name_hint
-                .clone()
-                .unwrap_or_else(|| addr.ip().to_string());
+            let label = name_hint.clone().unwrap_or_else(|| addr.ip().to_string());
             let message = if offline_kind {
                 format!("{} offline", label)
             } else {
@@ -111,7 +110,9 @@ pub fn connect(
     };
     let peer_id = peer_id_from_pubkey(&sess.remote_static);
     let fingerprint = pubkey_fingerprint(&sess.remote_static);
-    let display_name = name_hint.clone().unwrap_or_else(|| format!("peer@{}", addr));
+    let display_name = name_hint
+        .clone()
+        .unwrap_or_else(|| format!("peer@{}", addr));
     let discovered = DiscoveredPeer {
         name: Some(display_name.clone()),
         hostname: None,
@@ -145,6 +146,7 @@ pub fn connect(
 /// Spawn the per-connection driver thread for an already-handshaked session.
 /// Used by the inbound listener path (which produces the session from the
 /// responder side) and by `connect` for outbound sessions.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_session_driver(
     sess: Session<TcpStream>,
     peer_id: PeerId,
@@ -171,6 +173,7 @@ pub fn spawn_session_driver(
 /// Variant of `spawn_session_driver` that also accepts a registry channel.
 /// On exit (peer gone or AEAD failure) the driver posts `Unregister` so
 /// the action consumer can drop the outbound sender.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_session_driver_with_reg(
     mut sess: Session<TcpStream>,
     peer_id: PeerId,
@@ -185,19 +188,26 @@ pub fn spawn_session_driver_with_reg(
     std::thread::spawn(move || {
         let mut hello_sent = false;
         let mut display = fingerprint.clone();
-        let exit = |tx: &mpsc::Sender<Event>, reg_tx: &Option<mpsc::Sender<RegistryMsg>>, name: &str| {
-            let _ = tx.send(Event::PeerGone {
-                peer_id,
-                name: name.to_string(),
-            });
-            if let Some(r) = reg_tx {
-                let _ = r.send(RegistryMsg::Unregister { peer_id });
-            }
-        };
+        let exit =
+            |tx: &mpsc::Sender<Event>, reg_tx: &Option<mpsc::Sender<RegistryMsg>>, name: &str| {
+                let _ = tx.send(Event::PeerGone {
+                    peer_id,
+                    name: name.to_string(),
+                });
+                if let Some(r) = reg_tx {
+                    let _ = r.send(RegistryMsg::Unregister { peer_id });
+                }
+            };
         loop {
             if !hello_sent {
-                if let Err(e) = sess.send(&FrameBody::Hello { name: local_name.clone(), hostname: local_hostname.clone() }) {
-                    let _ = tx.send(Event::Info(format!("session hello send failed for {}: {}", display, e)));
+                if let Err(e) = sess.send(&FrameBody::Hello {
+                    name: local_name.clone(),
+                    hostname: local_hostname.clone(),
+                }) {
+                    let _ = tx.send(Event::Info(format!(
+                        "session hello send failed for {}: {}",
+                        display, e
+                    )));
                     exit(&tx, &reg_tx, &display);
                     return;
                 }
@@ -249,7 +259,10 @@ pub fn spawn_session_driver_with_reg(
                     }
                     Ok(body) => {
                         if let Err(e) = sess.send(&body) {
-                            let _ = tx.send(Event::Info(format!("session send failed for {}: {}", display, e)));
+                            let _ = tx.send(Event::Info(format!(
+                                "session send failed for {}: {}",
+                                display, e
+                            )));
                             exit(&tx, &reg_tx, &display);
                             return;
                         }
@@ -267,10 +280,20 @@ pub fn spawn_session_driver_with_reg(
                 Ok(Some(frame)) => {
                     match frame.body {
                         FrameBody::Hello { name, hostname } => {
-                            let display_name = if hostname.is_empty() { name } else { format!("{} ({})", name, hostname) };
+                            let display_name = if hostname.is_empty() {
+                                name
+                            } else {
+                                format!("{} ({})", name, hostname)
+                            };
                             display = display_name.clone();
-                            let _ = tx.send(Event::Info(format!("authenticated peer identity: {}", display_name)));
-                            let _ = tx.send(Event::PeerNamed { peer_id, name: display_name });
+                            let _ = tx.send(Event::Info(format!(
+                                "authenticated peer identity: {}",
+                                display_name
+                            )));
+                            let _ = tx.send(Event::PeerNamed {
+                                peer_id,
+                                name: display_name,
+                            });
                             if let Some(registry) = &reg_tx {
                                 let _ = registry.send(RegistryMsg::Rename {
                                     peer_id,
@@ -293,23 +316,33 @@ pub fn spawn_session_driver_with_reg(
                         // channel so the action thread owns the per-peer
                         // transfer state. The driver only decodes and
                         // forwards — no state lives here.
-                        FrameBody::FileOffer { id, name, size, mime, width, height, preview } => {
+                        FrameBody::FileOffer {
+                            id,
+                            name,
+                            size,
+                            mime,
+                            width,
+                            height,
+                            preview,
+                        } => {
                             let _ = tx_inbound.send(InboundFileEvent::Offer {
                                 peer: peer_id,
-                                offer: FileOffer { id, name, size, mime, width, height, preview },
+                                offer: FileOffer {
+                                    id,
+                                    name,
+                                    size,
+                                    mime,
+                                    width,
+                                    height,
+                                    preview,
+                                },
                             });
                         }
                         FrameBody::FileAccept { id } => {
-                            let _ = tx_inbound.send(InboundFileEvent::Accept {
-                                peer: peer_id,
-                                id,
-                            });
+                            let _ = tx_inbound.send(InboundFileEvent::Accept { peer: peer_id, id });
                         }
                         FrameBody::FileReject { id } => {
-                            let _ = tx_inbound.send(InboundFileEvent::Reject {
-                                peer: peer_id,
-                                id,
-                            });
+                            let _ = tx_inbound.send(InboundFileEvent::Reject { peer: peer_id, id });
                         }
                         FrameBody::FileChunk { id, offset, data } => {
                             let _ = tx_inbound.send(InboundFileEvent::Chunk {
@@ -320,16 +353,16 @@ pub fn spawn_session_driver_with_reg(
                             });
                         }
                         FrameBody::FileDone { id } => {
-                            let _ = tx_inbound.send(InboundFileEvent::Done {
-                                peer: peer_id,
-                                id,
-                            });
+                            let _ = tx_inbound.send(InboundFileEvent::Done { peer: peer_id, id });
                         }
                     }
                 }
                 Ok(None) => continue,
                 Err(e) => {
-                    let _ = tx.send(Event::Info(format!("session receive failed for {}: {}", display, e)));
+                    let _ = tx.send(Event::Info(format!(
+                        "session receive failed for {}: {}",
+                        display, e
+                    )));
                     exit(&tx, &reg_tx, &display);
                     return;
                 }

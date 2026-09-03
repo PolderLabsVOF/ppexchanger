@@ -38,13 +38,16 @@ pub const SUPPORTED: bool = cfg!(target_os = "windows");
 pub fn ensure_rules(tcp_port: u16, control_port: u16) -> io::Result<Option<String>> {
     #[cfg(target_os = "linux")]
     {
-        return ensure_ufw_rules(tcp_port, control_port);
+        ensure_ufw_rules(tcp_port, control_port)
     }
     #[cfg(target_os = "windows")]
     {
         if !rule_present(tcp_port) {
             add_rule(tcp_port)?;
-            return Ok(Some(format!("firewall rules added for TCP {} and UDP {}", tcp_port, control_port)));
+            return Ok(Some(format!(
+                "firewall rules added for TCP {} and UDP {}",
+                tcp_port, control_port
+            )));
         }
         return Ok(None);
     }
@@ -73,10 +76,7 @@ fn ensure_ufw_rules(tcp_port: u16, control_port: u16) -> io::Result<Option<Strin
     // Probe the executable without elevation. We deliberately do not run
     // `ufw status` here: on many distributions that would trigger a sudo
     // prompt before the actual rule write and could prompt twice.
-    match std::process::Command::new("ufw")
-        .arg("--version")
-        .output()
-    {
+    match std::process::Command::new("ufw").arg("--version").output() {
         Ok(output) if output.status.success() => {}
         Ok(output) => {
             return Err(io::Error::other(format!(

@@ -151,7 +151,13 @@ fn encrypt_with_ad(ck: &[u8; 32], h: &Sha256, plaintext: &[u8]) -> Vec<u8> {
     let nonce = Nonce::from_slice(&[0u8; 12]);
     let aad = h.clone().finalize().to_vec();
     cipher
-        .encrypt(nonce, Payload { msg: plaintext, aad: &aad })
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
         .expect("handshake AEAD encrypt cannot fail with empty AAD/short plaintext")
 }
 
@@ -160,7 +166,13 @@ fn decrypt_with_ad(ck: &[u8; 32], h: &Sha256, ciphertext: &[u8]) -> std::io::Res
     let nonce = Nonce::from_slice(&[0u8; 12]);
     let aad = h.clone().finalize().to_vec();
     cipher
-        .decrypt(nonce, Payload { msg: ciphertext, aad: &aad })
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext,
+                aad: &aad,
+            },
+        )
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "handshake MAC failed"))
 }
 
@@ -202,11 +214,7 @@ pub fn run_initiator<S: Read + Write>(
     let re = X25519Public::from(re_bytes);
     mix_hash(&mut h, &re_bytes);
     // MixKey(ee)
-    mix_key(
-        &mut ck,
-        &mut h,
-        e.secret.diffie_hellman(&re).to_bytes(),
-    );
+    mix_key(&mut ck, &mut h, e.secret.diffie_hellman(&re).to_bytes());
     // Decrypt ENC(s)
     let enc_s = &payload[32..32 + STATIC_LEN + AEAD_TAG];
     let rs_bytes_vec = decrypt_with_ad(&ck, &h, enc_s)?;
@@ -222,11 +230,7 @@ pub fn run_initiator<S: Read + Write>(
     // MixKey(es) — both sides compute the same shared secret s_resp * e_init.
     // Initiator knows e_init (own ephemeral) and rs (just decrypted);
     // so use e_init * rs.
-    mix_key(
-        &mut ck,
-        &mut h,
-        e.secret.diffie_hellman(&rs).to_bytes(),
-    );
+    mix_key(&mut ck, &mut h, e.secret.diffie_hellman(&rs).to_bytes());
     // Verify MAC over the new h
     let mac = &payload[32 + STATIC_LEN + AEAD_TAG..];
     decrypt_with_ad(&ck, &h, mac)?;
@@ -280,11 +284,7 @@ pub fn run_responder<S: Read + Write>(
     let e = Keypair::generate();
     mix_hash(&mut h, &e.public_bytes());
     // MixKey(ee = DH(re, ie))
-    mix_key(
-        &mut ck,
-        &mut h,
-        e.secret.diffie_hellman(&ie).to_bytes(),
-    );
+    mix_key(&mut ck, &mut h, e.secret.diffie_hellman(&ie).to_bytes());
     // Encrypt responder's static
     let enc_s_resp = encrypt_with_ad(&ck, &h, &static_kp.public_bytes());
     mix_hash(&mut h, &enc_s_resp);
@@ -326,7 +326,9 @@ pub fn run_responder<S: Read + Write>(
     mix_key(
         &mut ck,
         &mut h,
-        e.secret.diffie_hellman(&X25519Public::from(is_bytes)).to_bytes(),
+        e.secret
+            .diffie_hellman(&X25519Public::from(is_bytes))
+            .to_bytes(),
     );
     // Verify MAC
     decrypt_with_ad(&ck, &h, mac)?;

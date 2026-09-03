@@ -81,17 +81,16 @@ fn multicast_bind_and_announce_succeed() {
 #[test]
 fn reverse_connect_request_roundtrips_and_is_acknowledged() {
     let listener = Discovery::bind(0).expect("control bind");
-    let control_addr = std::net::SocketAddr::V4(
-        std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, listener.local_port().unwrap()),
-    );
+    let control_addr = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+        std::net::Ipv4Addr::LOCALHOST,
+        listener.local_port().unwrap(),
+    ));
     let target = [0x5au8; 16];
     let requester_port = 43123;
-    let handle = std::thread::spawn(move || {
-        loop {
-            if let Some(addr) = listener.recv_reverse_connect(target).unwrap() {
-                assert_eq!(addr.port(), requester_port);
-                break;
-            }
+    let handle = std::thread::spawn(move || loop {
+        if let Some(addr) = listener.recv_reverse_connect(target).unwrap() {
+            assert_eq!(addr.port(), requester_port);
+            break;
         }
     });
     assert!(Discovery::request_reverse_connect(control_addr, target, requester_port).unwrap());
@@ -101,16 +100,15 @@ fn reverse_connect_request_roundtrips_and_is_acknowledged() {
 #[test]
 fn reverse_connect_wildcard_target_roundtrips() {
     let listener = Discovery::bind(0).expect("control bind");
-    let control_addr = std::net::SocketAddr::V4(
-        std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, listener.local_port().unwrap()),
-    );
+    let control_addr = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+        std::net::Ipv4Addr::LOCALHOST,
+        listener.local_port().unwrap(),
+    ));
     let requester_port = 43124;
-    let handle = std::thread::spawn(move || {
-        loop {
-            if let Some(addr) = listener.recv_reverse_connect([0x7bu8; 16]).unwrap() {
-                assert_eq!(addr.port(), requester_port);
-                break;
-            }
+    let handle = std::thread::spawn(move || loop {
+        if let Some(addr) = listener.recv_reverse_connect([0x7bu8; 16]).unwrap() {
+            assert_eq!(addr.port(), requester_port);
+            break;
         }
     });
     assert!(Discovery::request_reverse_connect(control_addr, [0u8; 16], requester_port).unwrap());

@@ -190,9 +190,16 @@ mod tests {
             .chain(LOGO_SETTINGS)
             .copied()
             .collect();
-        assert!(has_any(&all, '·') || has_any(&all, '-'), "no light glyphs anywhere");
         assert!(
-            has_any(&all, '▒') || has_any(&all, '▒') || has_any(&all, '░') || has_any(&all, '│') || has_any(&all, '─'),
+            has_any(&all, '·') || has_any(&all, '-'),
+            "no light glyphs anywhere"
+        );
+        assert!(
+            has_any(&all, '▒')
+                || has_any(&all, '▒')
+                || has_any(&all, '░')
+                || has_any(&all, '│')
+                || has_any(&all, '─'),
             "no medium glyphs anywhere"
         );
         assert!(

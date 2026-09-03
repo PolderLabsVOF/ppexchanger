@@ -61,7 +61,13 @@ impl<S: Read + Write> Session<S> {
         let nonce_arr = derive_nonce(self.send_key.as_slice().try_into().unwrap(), seq);
         let nonce = Nonce::from_slice(&nonce_arr);
         let ct = cipher
-            .encrypt(nonce, Payload { msg: &plaintext, aad: &[] })
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: &plaintext,
+                    aad: &[],
+                },
+            )
             .map_err(|_| std::io::Error::other("AEAD encrypt failed"))?;
         let len = ct.len() as u32;
         self.stream.write_all(&len.to_be_bytes())?;
@@ -134,7 +140,8 @@ impl Session<std::net::TcpStream> {
     /// inbound data; a zero-byte peek means the peer closed its side.
     pub fn peer_alive(&mut self) -> std::io::Result<bool> {
         use std::time::Duration;
-        self.stream.set_read_timeout(Some(Duration::from_millis(5)))?;
+        self.stream
+            .set_read_timeout(Some(Duration::from_millis(5)))?;
         let mut byte = [0u8; 1];
         let result = match self.stream.peek(&mut byte) {
             Ok(0) => false,
@@ -145,7 +152,10 @@ impl Session<std::net::TcpStream> {
                     std::io::ErrorKind::WouldBlock
                         | std::io::ErrorKind::TimedOut
                         | std::io::ErrorKind::Interrupted
-                ) || matches!(error.raw_os_error(), Some(11 | 35)) => true,
+                ) || matches!(error.raw_os_error(), Some(11 | 35)) =>
+            {
+                true
+            }
             Err(_) => false,
         };
         self.stream.set_read_timeout(None)?;
@@ -163,7 +173,8 @@ impl Session<std::net::TcpStream> {
                 // paths instead of mapping it to ErrorKind::WouldBlock.
                 || matches!(e.raw_os_error(), Some(11 | 35))
         }
-        self.stream.set_read_timeout(Some(Duration::from_millis(50)))?;
+        self.stream
+            .set_read_timeout(Some(Duration::from_millis(50)))?;
         // Never call `recv` until a complete frame is available. A timed
         // `read_exact` can consume a length prefix or part of a ciphertext
         // before returning `TimedOut`; retrying then starts in the middle of
@@ -187,7 +198,11 @@ impl Session<std::net::TcpStream> {
             Err(e) if transient(&e) => false,
             Err(e) => return Err(e),
         };
-        let result = if ready { self.recv().map(Some) } else { Ok(None) };
+        let result = if ready {
+            self.recv().map(Some)
+        } else {
+            Ok(None)
+        };
         // Reset to blocking so a long-lived idle connection doesn't hang.
         self.stream.set_read_timeout(None)?;
         match result {

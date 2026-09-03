@@ -159,7 +159,9 @@ pub fn decode_beacon(bytes: &[u8]) -> Option<Beacon> {
     if p + name_len > total_len - 4 {
         return None;
     }
-    let name = std::str::from_utf8(&bytes[p..p + name_len]).ok()?.to_string();
+    let name = std::str::from_utf8(&bytes[p..p + name_len])
+        .ok()?
+        .to_string();
     if name.is_empty() {
         return None;
     }
@@ -232,7 +234,10 @@ pub const FRAME_HEADER_LEN: usize = 12;
 ///   7 = Hello      `[name_len:2][name][hostname_len:2][hostname]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameBody {
-    Hello { name: String, hostname: String },
+    Hello {
+        name: String,
+        hostname: String,
+    },
     Text(String),
     Bye,
     FileOffer {
@@ -313,7 +318,15 @@ pub fn encode_plain_frame(seq: u64, body: &FrameBody) -> Vec<u8> {
             v
         }
         FrameBody::Bye => vec![0u8],
-        FrameBody::FileOffer { id, name, size, mime, width, height, preview } => {
+        FrameBody::FileOffer {
+            id,
+            name,
+            size,
+            mime,
+            width,
+            height,
+            preview,
+        } => {
             let name_bytes = name.as_bytes();
             // mime is optional; emit 0-length when None.
             let mime_bytes = mime.as_ref().map(|m| m.as_bytes()).unwrap_or(&[]);
@@ -323,9 +336,16 @@ pub fn encode_plain_frame(seq: u64, body: &FrameBody) -> Vec<u8> {
                 _ => 1,
             };
             let preview_bytes = preview.as_ref().map(|value| value.as_bytes());
-            let preview_len = preview_bytes.map(|bytes| bytes.len().min(u16::MAX as usize)).unwrap_or(0);
-            let preview_tail = preview.is_some().then_some(2 + preview_len).unwrap_or(0);
-            let cap = 1 + 16 + 2 + name_bytes.len() + 8 + 2 + mime_bytes.len() + dims_tail + preview_tail;
+            let preview_len = preview_bytes
+                .map(|bytes| bytes.len().min(u16::MAX as usize))
+                .unwrap_or(0);
+            let preview_tail = if preview.is_some() {
+                2 + preview_len
+            } else {
+                0
+            };
+            let cap =
+                1 + 16 + 2 + name_bytes.len() + 8 + 2 + mime_bytes.len() + dims_tail + preview_tail;
             let mut v = Vec::with_capacity(cap);
             v.push(TAG_FILE_OFFER);
             v.extend_from_slice(&id.0);
@@ -404,8 +424,7 @@ pub fn decode_plain_frame(buf: &[u8]) -> Result<PlainFrame, DecodeError> {
         TAG_HELLO => decode_hello(&payload[1..])?,
         0 => FrameBody::Bye,
         1 => {
-            let s = std::str::from_utf8(&payload[1..])
-                .map_err(|_| DecodeError::Malformed)?;
+            let s = std::str::from_utf8(&payload[1..]).map_err(|_| DecodeError::Malformed)?;
             FrameBody::Text(s.to_string())
         }
         TAG_FILE_OFFER => decode_file_offer(&payload[1..])?,
@@ -535,7 +554,15 @@ fn decode_file_offer(payload: &[u8]) -> Result<FrameBody, DecodeError> {
                 .to_string(),
         )
     };
-    Ok(FrameBody::FileOffer { id, name, size, mime, width, height, preview })
+    Ok(FrameBody::FileOffer {
+        id,
+        name,
+        size,
+        mime,
+        width,
+        height,
+        preview,
+    })
 }
 
 fn decode_file_chunk(payload: &[u8]) -> Result<FrameBody, DecodeError> {
@@ -563,7 +590,11 @@ fn crc32(buf: &[u8]) -> u32 {
     for n in 0..256u32 {
         let mut c = n;
         for _ in 0..8 {
-            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            c = if c & 1 != 0 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
         }
         table[n as usize] = c;
     }
@@ -646,7 +677,13 @@ mod tests {
     fn frame_roundtrip_bye() {
         let buf = encode_plain_frame(0, &FrameBody::Bye);
         let dec = decode_plain_frame(&buf).unwrap();
-        assert_eq!(dec, PlainFrame { seq: 0, body: FrameBody::Bye });
+        assert_eq!(
+            dec,
+            PlainFrame {
+                seq: 0,
+                body: FrameBody::Bye
+            }
+        );
     }
 
     #[test]

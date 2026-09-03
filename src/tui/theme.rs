@@ -135,7 +135,7 @@ pub struct Theme {
     pub gauge_filled: Color,
     pub gauge_unfilled: Color,
     /// Peer status indicator colors
-    pub status_online: Color,  // Green - peer is connected
+    pub status_online: Color, // Green - peer is connected
     pub status_seen: Color,    // Yellow - peer seen via beacon
     pub status_offline: Color, // Gray - peer unreachable
 }
@@ -284,7 +284,11 @@ impl Theme {
 
     pub fn border_style(&self, active: bool) -> Style {
         Style::default()
-            .fg(if active { self.border_active } else { self.border_inactive })
+            .fg(if active {
+                self.border_active
+            } else {
+                self.border_inactive
+            })
             .bg(self.bg)
     }
 
@@ -343,15 +347,23 @@ impl Theme {
                 Color::Rgb(153, 204, 102),
             ],
         };
-        Style::default().fg(colors[peer_id[0] as usize % colors.len()]).bg(self.bg)
+        Style::default()
+            .fg(colors[peer_id[0] as usize % colors.len()])
+            .bg(self.bg)
     }
 
     pub fn info_style(&self) -> Style {
-        Style::default().fg(self.info).bg(self.bg).add_modifier(Modifier::ITALIC)
+        Style::default()
+            .fg(self.info)
+            .bg(self.bg)
+            .add_modifier(Modifier::ITALIC)
     }
 
     pub fn error_style(&self) -> Style {
-        Style::default().fg(self.error).bg(self.bg).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.error)
+            .bg(self.bg)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn status_style(&self) -> Style {
@@ -359,7 +371,10 @@ impl Theme {
     }
 
     pub fn highlight_style(&self) -> Style {
-        Style::default().fg(self.highlight).bg(self.bg).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.highlight)
+            .bg(self.bg)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn trusted_style(&self) -> Style {
@@ -373,7 +388,9 @@ impl Theme {
     /// Gauge foreground (filled portion) — exposed as a Style so widgets
     /// can apply both `fg` and `bg` from one call.
     pub fn gauge_filled_style(&self) -> Style {
-        Style::default().fg(self.gauge_filled).bg(self.gauge_unfilled)
+        Style::default()
+            .fg(self.gauge_filled)
+            .bg(self.gauge_unfilled)
     }
 
     /// Gauge background (unfilled portion). Pair with `gauge_filled_style`
@@ -384,7 +401,10 @@ impl Theme {
 
     /// Style for secondary/placeholder text (e.g., empty state messages).
     pub fn dim_style(&self) -> Style {
-        Style::default().fg(self.fg).bg(self.bg).add_modifier(Modifier::DIM)
+        Style::default()
+            .fg(self.fg)
+            .bg(self.bg)
+            .add_modifier(Modifier::DIM)
     }
 
     /// Resolve a semantic role to a concrete `Style` for this theme.
@@ -407,19 +427,13 @@ impl Theme {
                 .fg(self.fg)
                 .bg(self.bg)
                 .add_modifier(Modifier::DIM),
-            StyleRole::TextMuted => Style::default()
-                .fg(self.border_inactive)
-                .bg(self.bg),
+            StyleRole::TextMuted => Style::default().fg(self.border_inactive).bg(self.bg),
             StyleRole::TextAccent => Style::default()
                 .fg(self.accent)
                 .bg(self.bg)
                 .add_modifier(Modifier::BOLD),
-            StyleRole::TextSuccess => Style::default()
-                .fg(self.status_online)
-                .bg(self.bg),
-            StyleRole::TextWarning => Style::default()
-                .fg(self.status_seen)
-                .bg(self.bg),
+            StyleRole::TextSuccess => Style::default().fg(self.status_online).bg(self.bg),
+            StyleRole::TextWarning => Style::default().fg(self.status_seen).bg(self.bg),
             StyleRole::TextDanger => Style::default()
                 .fg(self.error)
                 .bg(self.bg)

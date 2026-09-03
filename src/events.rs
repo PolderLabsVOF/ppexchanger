@@ -9,8 +9,8 @@
 //! per-peer transfer state. This keeps the UI thread out of the file
 //! data path.
 
-pub use crate::protocol::{FileId, FrameBody};
 use crate::net::session::Session;
+pub use crate::protocol::{FileId, FrameBody};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -47,14 +47,9 @@ pub enum Event {
         fingerprint: String,
     },
     /// Our connection request was accepted.
-    ConnectionAccepted {
-        peer_id: PeerId,
-        name: String,
-    },
+    ConnectionAccepted { peer_id: PeerId, name: String },
     /// Our connection request was denied.
-    ConnectionDenied {
-        addr: SocketAddr,
-    },
+    ConnectionDenied { addr: SocketAddr },
     /// We have a fresh encrypted session with a peer (either inbound or outbound).
     PeerConnected {
         peer_id: PeerId,
@@ -158,7 +153,10 @@ pub struct DiscoveredPeer {
 
 #[derive(Debug)]
 pub enum Action {
-    SendText { to: PeerId, body: String },
+    SendText {
+        to: PeerId,
+        body: String,
+    },
     /// Send a file at `path` to a peer. The action thread opens the
     /// file, generates a `FileId`, sends `FileOffer`, and waits for
     /// `FileAccept` / `FileReject` before streaming chunks.
@@ -181,10 +179,16 @@ pub enum Action {
     /// Accept an inbound file offer. The action thread creates the
     /// destination file under `<config_dir>/received/` and replies
     /// with a `FileAccept` frame.
-    AcceptFile { from_peer: PeerId, id: FileId },
+    AcceptFile {
+        from_peer: PeerId,
+        id: FileId,
+    },
     /// Reject an inbound file offer. Sends `FileReject` and drops the
     /// pending transfer state.
-    RejectFile { from_peer: PeerId, id: FileId },
+    RejectFile {
+        from_peer: PeerId,
+        id: FileId,
+    },
     Connect {
         addr: SocketAddr,
         name_hint: String,
@@ -192,12 +196,22 @@ pub enum Action {
         reverse: Option<(SocketAddr, PeerId)>,
     },
     /// Accept an inbound connection request after user confirms.
-    AcceptConnection { addr: SocketAddr },
+    AcceptConnection {
+        addr: SocketAddr,
+    },
     /// Deny an inbound connection request after user declines.
-    DenyConnection { addr: SocketAddr },
-    Disconnect { peer_id: PeerId },
-    Trust { peer_id: PeerId },
-    Revoke { peer_id: PeerId },
+    DenyConnection {
+        addr: SocketAddr,
+    },
+    Disconnect {
+        peer_id: PeerId,
+    },
+    Trust {
+        peer_id: PeerId,
+    },
+    Revoke {
+        peer_id: PeerId,
+    },
     /// Periodic nudge from the reconnect supervisor. The action
     /// consumer reads the contact database and dials any saved peer
     /// we know about but are not currently connected to. This lets
@@ -214,11 +228,28 @@ pub enum Action {
 /// to disk as they arrive.
 #[derive(Debug)]
 pub enum InboundFileEvent {
-    Offer { peer: PeerId, offer: FileOffer },
-    Accept { peer: PeerId, id: FileId },
-    Reject { peer: PeerId, id: FileId },
-    Chunk { peer: PeerId, id: FileId, offset: u64, data: Vec<u8> },
-    Done { peer: PeerId, id: FileId },
+    Offer {
+        peer: PeerId,
+        offer: FileOffer,
+    },
+    Accept {
+        peer: PeerId,
+        id: FileId,
+    },
+    Reject {
+        peer: PeerId,
+        id: FileId,
+    },
+    Chunk {
+        peer: PeerId,
+        id: FileId,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    Done {
+        peer: PeerId,
+        id: FileId,
+    },
 }
 
 /// Per-peer outbound-sender registration. The per-connection session
@@ -233,9 +264,18 @@ pub enum RegistryMsg {
     },
     /// Replace the provisional address/fingerprint label once the encrypted
     /// Hello frame has authenticated the peer's configured display name.
-    Rename { peer_id: PeerId, name: String },
-    TextDelivered { peer_id: PeerId, body: String },
-    TextSendFailed { peer_id: PeerId, body: String },
+    Rename {
+        peer_id: PeerId,
+        name: String,
+    },
+    TextDelivered {
+        peer_id: PeerId,
+        body: String,
+    },
+    TextSendFailed {
+        peer_id: PeerId,
+        body: String,
+    },
     Unregister {
         peer_id: PeerId,
     },
