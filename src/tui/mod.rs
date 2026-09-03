@@ -2383,13 +2383,13 @@ fn render_image_preview(
     // terminal escape sequences; doing it inside `render` means the
     // TUI is fully wired before the query goes out.
     if state.image_picker.is_none() {
-        if let Ok(mut p) = ratatui_image::picker::Picker::from_query_stdio() {
-            // Halfblock fallback so the picker always returns a
-            // renderable Protocol even when the terminal doesn't
-            // speak Kitty Graphics / iTerm2 / Sixel.
-            p.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
-            state.image_picker = Some(p);
-        }
+        // Avoid terminal capability queries here: they write private escape
+        // probes to stdout and can interfere with native selection or leave
+        // responses queued on exit. A conservative cell size works across
+        // terminals and guarantees a halfblock preview.
+        let mut p = ratatui_image::picker::Picker::from_fontsize((8, 16));
+        p.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+        state.image_picker = Some(p);
     }
     let Some(mut picker) = state.image_picker else {
         return;

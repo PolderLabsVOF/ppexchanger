@@ -2290,7 +2290,13 @@ fn looks_like_existing_file(body: &str) -> Option<PathBuf> {
 /// bracketed paste. Decode that URI without pulling in a URL dependency and
 /// only accept an existing regular file.
 fn dropped_file_path(body: &str) -> Option<PathBuf> {
-    let token = body.trim().trim_matches('<').trim_matches('>');
+    // File managers may drop one URI followed by CR/LF, or several URIs.
+    // Use the first valid regular file and ignore the transport whitespace.
+    let token = body
+        .lines()
+        .map(str::trim)
+        .map(|line| line.trim_matches('<').trim_matches('>'))
+        .find(|line| line.starts_with("file://"))?;
     let encoded = token.strip_prefix("file://")?;
     // `file://localhost/tmp/x` is the URI form for a local POSIX path;
     // preserve the leading slash after removing the optional host.
@@ -2329,10 +2335,14 @@ fn percent_decode(value: &str) -> Option<String> {
 }
 
 fn image_file_metadata(path: &PathBuf) -> Option<(String, u32, u32)> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    let mime = match extension.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
+    // Detect from the file header instead of trusting the filename. Dragged
+    // files from browsers and photo apps often have no extension or a generic
+    // one, while `image_dimensions` can reliably parse PNG/JPEG bytes.
+    let reader = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?;
+    let format = reader.format()?;
+    let mime = match format {
+        image::ImageFormat::Png => "image/png",
+        image::ImageFormat::Jpeg => "image/jpeg",
         _ => return None,
     };
     let (width, height) = image::image_dimensions(path).ok()?;
