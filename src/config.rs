@@ -135,18 +135,22 @@ pub fn config_dir_at(base: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// Run a closure with `HOME`/`APPDATA` redirected to a per-test temp
     /// dir. Windows tests can't override APPDATA the same way, so we use
     /// the `*_at` helpers directly there.
     fn with_temp_base<F: FnOnce(&Path)>(f: F) {
         let tmp = std::env::temp_dir().join(format!(
-            "ppexchanger-migrate-test-{}-{}",
+            "ppexchanger-migrate-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
-                .unwrap_or(0)
+                .unwrap_or(0),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&tmp).unwrap();
         f(&tmp);
