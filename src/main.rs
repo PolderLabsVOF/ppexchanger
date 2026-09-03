@@ -1230,14 +1230,24 @@ fn start_tui(
     let reconnect_stop = Arc::clone(&stop);
     let reconnect_tx = bus.tx_actions.clone();
     let reconnect_thread = thread::spawn(move || {
+        let mut next_tick = Instant::now() + RECONNECT_INTERVAL;
         while !reconnect_stop.load(Ordering::Relaxed) {
-            std::thread::sleep(RECONNECT_INTERVAL);
+            // Do not sleep for the whole interval: shutdown joins this
+            // worker, so a plain 10-second sleep made Ctrl-C appear hung
+            // until the remaining interval elapsed. Check cancellation in
+            // short slices while preserving the ten-second tick cadence.
+            let remaining = next_tick.saturating_duration_since(Instant::now());
+            std::thread::sleep(remaining.min(Duration::from_millis(50)));
             if reconnect_stop.load(Ordering::Relaxed) {
                 break;
+            }
+            if Instant::now() < next_tick {
+                continue;
             }
             if reconnect_tx.send(Action::ReconnectTick).is_err() {
                 break;
             }
+            next_tick = Instant::now() + RECONNECT_INTERVAL;
         }
     });
 
