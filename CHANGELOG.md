@@ -2,6 +2,16 @@
 
 All notable ppexchanger updates are listed here in plain language.
 
+## 0.7.1 — 2026-09-03
+
+### Safer updates and releases
+
+- Added clear development, beta, and stable release channels.
+- Nightly builds now follow the latest development work without changing the
+  stable release channel.
+- Improved release validation so beta builds cannot be published as stable
+  releases, and stable releases cannot be cut from the wrong branch.
+
 ## 0.7.0 — 2026-09-03
 
 ### A smoother chat experience

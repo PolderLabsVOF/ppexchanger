@@ -1,6 +1,6 @@
 {
   "name": "ppx",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "A private, encrypted LAN messenger for your terminal",
   "license": "MIT",
   "repository": "github:PolderLabsVOF/ppexchanger",
