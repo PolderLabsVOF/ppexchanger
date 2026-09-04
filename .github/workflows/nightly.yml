@@ -27,8 +27,35 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  validate:
+    name: validate dev before nightly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.branch || 'dev' }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check compilation
+        run: cargo check --locked
+      - name: Run tests
+        run: cargo test --locked
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit locked dependencies
+        run: cargo audit
+
   build:
     name: nightly ${{ matrix.target }}
+    needs: validate
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -51,7 +78,7 @@ jobs:
             binary_name: ppx.exe
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           # Scheduled workflows run from the repository default branch. Keep

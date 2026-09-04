@@ -44,8 +44,9 @@ changes before they become stable.
 
 ### Branches and release channels
 
-- **`dev`** — active development. Every commit is validated by CI and is the
-  source for nightly builds.
+- **`dev`** — active development. The latest commit is validated and built
+  once each night for the nightly channel; pull requests are still checked
+  before merging.
 - **`beta`** — integration and user testing. Tags such as `v0.8.0-beta.1` or
   `v0.8.0-rc.1` publish a pre-release from this branch.
 - **`main`** — stable, production-ready code. Tags such as `v0.8.0` publish
