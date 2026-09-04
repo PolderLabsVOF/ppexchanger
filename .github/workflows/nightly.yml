@@ -31,7 +31,7 @@ jobs:
     name: validate dev before nightly
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.branch || 'dev' }}
       - uses: dtolnay/rust-toolchain@stable
@@ -78,7 +78,7 @@ jobs:
             binary_name: ppx.exe
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           # Scheduled workflows run from the repository default branch. Keep

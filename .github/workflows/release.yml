@@ -39,7 +39,7 @@ jobs:
       prerelease: ${{ steps.validate.outputs.prerelease }}
       npm_tag: ${{ steps.validate.outputs.npm_tag }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Validate tag and source branch
@@ -109,7 +109,7 @@ jobs:
             # Visual Studio linker instead of Git Bash's unrelated `link`
             # utility, so this target is now a supported release artifact.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate.outputs.tag }}
 
@@ -221,7 +221,7 @@ jobs:
     needs: [validate, build, publish-npm]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate.outputs.tag }}
 
@@ -275,7 +275,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate.outputs.tag }}
       # npm trusted publishing requires npm 11.5.1+ and Node 22.14+.
