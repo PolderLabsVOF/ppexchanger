@@ -2,6 +2,16 @@
 
 All notable ppexchanger updates are listed here in plain language.
 
+## 0.7.9 — 2026-09-05 — self-hosted relay
+
+PPX can now connect one trusted pair over the Internet through a small relay you run yourself. LAN discovery and direct LAN connections continue to work unchanged.
+
+- New `ppx-relay` binary pairs two PPX clients in the same room over a public server you operate; the relay never decrypts traffic, never stores messages, and never dials arbitrary destinations.
+- Each client pins the other device's public key in `relay.conf` so a relay — or anyone who learns a room identifier — cannot impersonate your peer.
+- New CLI flags: `--relay-config <path>` to pick a specific file, `--no-relay` to ignore a saved file for one run, and `--relay-token` to mint a fresh 32-byte room token.
+- Linux release tarballs ship `ppx-relay` alongside `ppx` plus a hardened systemd unit (`ppx-relay.service`).
+- See `docs/relay.md` for setup, configuration format, and troubleshooting.
+
 ## 0.7.8 — 2026-09-05
 
 - Settings now have clear Profile, Appearance, Chat, Privacy, and About sections, with explanations for each option.

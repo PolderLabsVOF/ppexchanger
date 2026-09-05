@@ -135,6 +135,11 @@ impl<S: Read + Write> Session<S> {
 /// Concrete specialization: TcpStream supports `set_read_timeout`, so the
 /// generic `try_recv` (blocking) can be overridden to poll briefly.
 impl Session<std::net::TcpStream> {
+    /// Shutdown handle for a supervised connection; never used for concurrent I/O.
+    pub fn shutdown_handle(&self) -> std::io::Result<std::net::TcpStream> {
+        self.stream.try_clone()
+    }
+
     /// Fast, non-consuming liveness check used immediately before sending a
     /// queued chat message. `WouldBlock` means the socket is alive but has no
     /// inbound data; a zero-byte peek means the peer closed its side.

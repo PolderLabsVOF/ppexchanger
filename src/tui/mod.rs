@@ -444,14 +444,14 @@ impl UiState {
                     p.name = display_name;
                     p.fingerprint = fingerprint.clone();
                     p.public_key = *public_key;
-                    p.last_addr = Some(*addr);
+                    p.last_addr = (addr.port() != 0 && !addr.ip().is_unspecified()).then_some(*addr);
                 } else {
                     self.peers.push(UiPeer {
                         peer_id: *peer_id,
                         name: display_name,
                         fingerprint: fingerprint.clone(),
                         public_key: *public_key,
-                        last_addr: Some(*addr),
+                        last_addr: (addr.port() != 0 && !addr.ip().is_unspecified()).then_some(*addr),
                         trusted: false,
                         state: PeerState::Seen,
                     });
@@ -504,7 +504,7 @@ impl UiState {
                 if let Some(p) = self.peers.iter_mut().find(|p| &p.peer_id == peer_id) {
                     p.name = display_name.clone();
                     p.fingerprint = fingerprint.clone();
-                    p.last_addr = Some(*addr);
+                    p.last_addr = (addr.port() != 0 && !addr.ip().is_unspecified()).then_some(*addr);
                     p.trusted = *trusted;
                     p.state = PeerState::Connected;
                 } else {
@@ -513,7 +513,7 @@ impl UiState {
                         name: display_name.clone(),
                         fingerprint: fingerprint.clone(),
                         public_key: [0u8; 32],
-                        last_addr: Some(*addr),
+                        last_addr: (addr.port() != 0 && !addr.ip().is_unspecified()).then_some(*addr),
                         trusted: *trusted,
                         state: PeerState::Connected,
                     });

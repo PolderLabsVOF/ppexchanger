@@ -54,6 +54,8 @@ fn main() {
     let mut theme_override: Option<ppexchanger::tui::ThemeName> = None;
     let mut config_override: Option<PathBuf> = None;
     let mut mouse_override: Option<bool> = None;
+    let mut relay_path = None;
+    let mut relay_disabled = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -101,6 +103,22 @@ fn main() {
                     }
                 }
             }
+            "--relay-token" => {
+                use rand_core::RngCore;
+                let mut token = [0u8; 32];
+                rand_core::OsRng.fill_bytes(&mut token);
+                println!("{}", hex(&token));
+                return;
+            }
+            "--no-relay" => relay_disabled = true,
+            "--relay-config" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("--relay-config requires a path");
+                    std::process::exit(2);
+                }
+                relay_path = Some(PathBuf::from(&args[i]));
+            }
             "--config" => {
                 i += 1;
                 if i >= args.len() {
@@ -120,6 +138,22 @@ fn main() {
         }
         i += 1;
     }
+    let relay = if matches!(mode, Mode::Tui) && !relay_disabled {
+        let explicit = relay_path.is_some();
+        let path = relay_path.or_else(|| config_dir().ok().map(|dir| dir.join("relay.conf")));
+        path.and_then(
+            |path| match ppexchanger::relay_config::RelayConfig::load(&path) {
+                Ok(config) => Some(config),
+                Err(error) if !explicit && error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    eprintln!("relay configuration {}: {}", path.display(), error);
+                    std::process::exit(2);
+                }
+            },
+        )
+    } else {
+        None
+    };
     run(
         mode,
         name,
@@ -127,6 +161,7 @@ fn main() {
         theme_override,
         config_override,
         mouse_override,
+        relay,
     );
 }
 
@@ -143,7 +178,7 @@ fn print_help() {
          USAGE:\n  ppx [--name <name>] [--port <port>] [--theme <name>] [--config <path>] [--no-mouse]\n  ppx --gen-identity\n  ppx --help | --version\n\
          \n\
          OPTIONS:\n  --name <name>     display name (overrides stored)\n  --port <port>     TCP listen port (default: {default_port}; 0 = ephemeral)\n  --theme <name>    default|solarized|monochrome|neon|amber\n  --config <path>   path to config.toml (default: $XDG_CONFIG_HOME/ppexchanger/config.toml on
-                    Linux/macOS, %APPDATA%\\ppexchanger\\config.toml on Windows)\n  --no-mouse        disable mouse capture (mouse is ON by default)\n  --gen-identity    generate a new identity and exit\n  --help, -h        print this help\n  --version, -V     print version",
+                    Linux/macOS, %APPDATA%\\ppexchanger\\config.toml on Windows)\n  --relay-config <path>  connect using a relay configuration file\n  --no-relay        ignore saved relay configuration for this run\n  --relay-token     generate a random room token and exit\n  --no-mouse        disable mouse capture (mouse is ON by default)\n  --gen-identity    generate a new identity and exit\n  --help, -h        print this help\n  --version, -V     print version",
         version = VERSION,
         default_port = ppexchanger::net::discovery::MULTICAST_PORT
     );
@@ -247,6 +282,7 @@ fn run(
     theme_override: Option<ppexchanger::tui::ThemeName>,
     config_override: Option<PathBuf>,
     mouse_override: Option<bool>,
+    relay: Option<ppexchanger::relay_config::RelayConfig>,
 ) {
     if matches!(mode, Mode::Update) {
         if !update_install() {
@@ -283,7 +319,21 @@ fn run(
         Mode::Tui => {}
         Mode::Update => unreachable!("update handled before identity loading"),
     }
-    start_tui(id, port, theme_override, config_override, mouse_override);
+    if relay
+        .as_ref()
+        .is_some_and(|config| config.peer_key == id.keypair.public_bytes())
+    {
+        eprintln!("relay peer_key must be the OTHER device's public key");
+        std::process::exit(2);
+    }
+    start_tui(
+        id,
+        port,
+        theme_override,
+        config_override,
+        mouse_override,
+        relay,
+    );
 }
 
 fn hex(b: &[u8]) -> String {
@@ -407,12 +457,106 @@ fn default_config_path() -> PathBuf {
         .unwrap_or_default()
 }
 
+/// A configured peer has one transport owner, keeping queued messages and
+/// file transfers on the same registry path as LAN sessions.
+#[allow(clippy::too_many_arguments)]
+fn spawn_relay_supervisor(
+    config: ppexchanger::relay_config::RelayConfig,
+    key: Arc<ppexchanger::crypto::Keypair>,
+    state: Arc<Mutex<UiState>>,
+    stop: Arc<AtomicBool>,
+    events: mpsc::Sender<Event>,
+    inbound: mpsc::Sender<ppexchanger::events::InboundFileEvent>,
+    registry: mpsc::Sender<RegistryMsg>,
+    hostname: String,
+) {
+    thread::spawn(move || {
+        use std::net::{Shutdown, ToSocketAddrs};
+        let peer_id = ppexchanger::net::listener::peer_id_from_pubkey(&config.peer_key);
+        let fingerprint = pubkey_fingerprint(&config.peer_key);
+        {
+            let mut ui = state.lock().unwrap();
+            if let Some(peer) = ui.peers.iter_mut().find(|peer| peer.peer_id == peer_id) {
+                peer.last_addr = None;
+                peer.public_key = config.peer_key;
+            } else {
+                ui.peers.push(tui::UiPeer {
+                    peer_id, name: "Relay peer".into(), public_key: config.peer_key,
+                    fingerprint: fingerprint.clone(), last_addr: None,
+                    trusted: true, state: tui::PeerState::Gone,
+                });
+            }
+        }
+        let mut last_notice = String::new();
+        while !stop.load(Ordering::Relaxed) {
+            let result = config.server.to_socket_addrs().and_then(|addresses| {
+                let mut last = std::io::Error::other("relay host has no addresses");
+                for addr in addresses.take(4) {
+                    if stop.load(Ordering::Relaxed) { break; }
+                    match ppexchanger::net::relay::connect(addr, &config.room, &config.peer_key, &key) {
+                        Ok(session) => return Ok(session),
+                        Err(error) => { last = error; }
+                    }
+                }
+                Err(last)
+            });
+            if stop.load(Ordering::Relaxed) { return; }
+            match result {
+                Ok(session) => {
+                    let shutdown = match session.shutdown_handle() {
+                        Ok(handle) => handle,
+                        Err(_) => return,
+                    };
+                    let (local_name, remote_name) = {
+                        let ui = state.lock().unwrap();
+                        (ui.self_name.clone(), ui.peers.iter().find(|p| p.peer_id == peer_id)
+                            .map(|p| p.name.clone()).unwrap_or_else(|| "Relay peer".into()))
+                    };
+                    let (sender, receiver) = mpsc::channel();
+                    if registry.send(RegistryMsg::Register { peer_id, name: remote_name.clone(), sender }).is_err() { return; }
+                    let _ = events.send(Event::PeerConnected {
+                        peer_id, name: remote_name, fingerprint: fingerprint.clone(), trusted: true,
+                        // Never persist the relay server as a direct peer address.
+                        addr: "0.0.0.0:0".parse().unwrap(),
+                    });
+                    let _ = events.send(Event::Info(format!("Connected through relay {}", config.server)));
+                    last_notice.clear();
+                    let driver = peer::spawn_session_driver_with_reg(session, peer_id, fingerprint.clone(), receiver,
+                        events.clone(), inbound.clone(), Some(registry.clone()), local_name, hostname.clone());
+                    while !stop.load(Ordering::Relaxed) && !driver.is_finished() {
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                    let _ = shutdown.shutdown(Shutdown::Both);
+                    if stop.load(Ordering::Relaxed) { return; }
+                    let _ = driver.join();
+                }
+                Err(error) => {
+                    let notice = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                        "Relay peer identity mismatch: verify both peer keys and room configuration".to_string()
+                    } else {
+                        "Relay waiting for peer or server; reconnecting automatically".to_string()
+                    };
+                    if notice != last_notice {
+                        let _ = events.send(Event::Info(notice.clone()));
+                        last_notice = notice;
+                    }
+                }
+            }
+            for _ in 0..100 {
+                if stop.load(Ordering::Relaxed) { return; }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    });
+}
+
 fn start_tui(
     id: ppexchanger::identity::Identity,
     port: u16,
     theme_override: Option<ppexchanger::tui::ThemeName>,
     config_override: Option<PathBuf>,
     mouse_override: Option<bool>,
+    relay: Option<ppexchanger::relay_config::RelayConfig>,
 ) {
     // Load config: explicit flag > default path > builtin defaults.
     let cfg_path = config_override.unwrap_or_else(default_config_path);
@@ -430,6 +574,9 @@ fn start_tui(
         ui_cfg.mouse = true;
     }
 
+    let relay_peer_key = relay.as_ref().map(|config| config.peer_key);
+    let relay_peer_id =
+        relay_peer_key.map(|key| ppexchanger::net::listener::peer_id_from_pubkey(&key));
     let theme = ppexchanger::tui::Theme::by_name(ui_cfg.theme);
     let glyphs = ppexchanger::tui::detect_glyphs();
 
@@ -534,6 +681,19 @@ fn start_tui(
     let local_name = id.name.clone();
     let local_hostname = id.hostname.clone();
 
+    if let Some(config) = relay {
+        spawn_relay_supervisor(
+            config,
+            Arc::clone(&static_kp),
+            Arc::clone(&state),
+            Arc::clone(&stop),
+            bus.tx_events.clone(),
+            bus.tx_inbound_files.clone(),
+            reg_tx.clone(),
+            local_hostname.clone(),
+        );
+    }
+
     // Announcer thread: continuously broadcasts our presence so peers running
     // `/discover` can find us even if we haven't initiated discovery ourselves.
     // This allows one-sided discovery: only the initiator needs to run `/discover`.
@@ -628,6 +788,9 @@ fn start_tui(
                             };
                             match ppexchanger::net::handshake::run_responder(&mut wrapped, &kp2) {
                                 Ok(res) => {
+                                    if relay_peer_key == Some(res.remote_static) {
+                                        return;
+                                    }
                                     let session = Session::new(
                                         wrapped.inner,
                                         res.send_key,
@@ -733,6 +896,10 @@ fn start_tui(
                         public_key,
                         reverse,
                     }) => {
+                        if relay_peer_key == Some(public_key) {
+                            let _ = act_bus_tx.send(Event::Info("Relay reconnects automatically; both devices must use the same room".into()));
+                            continue;
+                        }
                         // peer::connect dials, handshakes, spawns the
                         // driver, and registers its outbound sender with
                         // the action consumer's registry before returning.
@@ -996,7 +1163,9 @@ fn start_tui(
                             db_guard
                                 .iter()
                                 .filter_map(|contact| {
-                                    if connected.contains(&contact.peer_id) {
+                                    if connected.contains(&contact.peer_id)
+                                        || relay_peer_id == Some(contact.peer_id)
+                                    {
                                         return None;
                                     }
                                     let addr = contact.last_addr?;
@@ -1346,6 +1515,9 @@ fn start_tui(
         db_guard
             .iter()
             .filter_map(|contact| {
+                if relay_peer_id == Some(contact.peer_id) {
+                    return None;
+                }
                 let addr = contact.last_addr?;
                 (addr.port() != 0 && !addr.ip().is_unspecified())
                     .then(|| (addr, contact.name.clone(), contact.public_key))

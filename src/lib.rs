@@ -9,4 +9,5 @@ pub mod identity;
 pub mod net;
 pub mod peerdb;
 pub mod protocol;
+pub mod relay_config;
 pub mod tui;

@@ -1,7 +1,8 @@
 [package]
 name = "ppexchanger"
-version = "0.7.8"
+version = "0.7.9"
 edition = "2021"
+default-run = "ppx"
 description = "Fully-local, fully-encrypted LAN P2P terminal messenger (Rust)"
 license = "MIT"
 
@@ -9,6 +10,10 @@ license = "MIT"
 [[bin]]
 name = "ppx"
 path = "src/main.rs"
+
+[[bin]]
+name = "ppx-relay"
+path = "src/bin/ppx-relay.rs"
 
 # External crates used by this project (kept minimal on purpose):
 #   ratatui          — TUI rendering (explicitly permitted)

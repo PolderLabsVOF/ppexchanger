@@ -167,7 +167,7 @@ pub fn spawn_session_driver(
         None,
         local_name,
         local_hostname,
-    )
+    );
 }
 
 /// Variant of `spawn_session_driver` that also accepts a registry channel.
@@ -184,7 +184,7 @@ pub fn spawn_session_driver_with_reg(
     reg_tx: Option<mpsc::Sender<RegistryMsg>>,
     local_name: String,
     local_hostname: String,
-) {
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut hello_sent = false;
         let mut display = fingerprint.clone();
@@ -368,5 +368,5 @@ pub fn spawn_session_driver_with_reg(
                 }
             }
         }
-    });
+    })
 }

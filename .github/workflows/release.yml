@@ -87,9 +87,11 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             binary_name: ppx
+            relay_binary_name: ppx-relay
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             binary_name: ppx
+            relay_binary_name: ppx-relay
           - target: x86_64-apple-darwin
             os: macos-latest
             binary_name: ppx
@@ -172,11 +174,18 @@ jobs:
         run: |
           cargo build --release --locked --target "${{ matrix.target }}"
           mkdir -p staging/bin
-          cp "target-${{ matrix.target }}/${{ matrix.target }}/release/${{ matrix.binary_name }}" staging/bin/${{ matrix.binary_name }}
+          cp "target-${{ matrix.target }}/${{ matrix.target }}/release/${{ matrix.binary_name }}" staging/bin/${{ matrix.binary_name }}"
           # POSIX `strip` doesn't recognize Windows PE binaries; the
           # `|| true` swallows that silently. PE binaries ship unstripped.
           strip "staging/bin/${{ matrix.binary_name }}" || true
-          ls -la staging/bin/${{ matrix.binary_name }}
+          # ppx-relay is shipped alongside ppx on Linux targets only.
+          # macOS / Windows users wanting to host a relay build from
+          # source with `cargo build --release --bin ppx-relay`.
+          if [ -n "${{ matrix.relay_binary_name }}" ]; then
+            cp "target-${{ matrix.target }}/${{ matrix.target }}/release/${{ matrix.relay_binary_name }}" "staging/bin/${{ matrix.relay_binary_name }}"
+            strip "staging/bin/${{ matrix.relay_binary_name }}" || true
+          fi
+          ls -la staging/bin/
         shell: bash
 
       - name: Compose tarball + checksums
@@ -184,11 +193,20 @@ jobs:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           TARGET: ${{ matrix.target }}
           BINARY_NAME: ${{ matrix.binary_name }}
+          RELAY_BINARY_NAME: ${{ matrix.relay_binary_name }}
         run: |
           TAG_BARE="${RELEASE_TAG#v}"
           ASSET="ppexchanger-${TAG_BARE}-${TARGET}.tar.gz"
+          # Linux builds also ship the relay binary + systemd unit inside
+          # the same tarball so a self-hosted relay is one download +
+          # `sudo install` away.
+          TARBALL_ARGS=("bin/${BINARY_NAME}")
+          if [ -n "${RELAY_BINARY_NAME}" ]; then
+            cp "deploy/ppx-relay.service" staging/ppx-relay.service
+            TARBALL_ARGS+=("bin/${RELAY_BINARY_NAME}" "ppx-relay.service")
+          fi
           # POSIX tar works on Windows under Git Bash.
-          tar -C staging -czf "${ASSET}" "bin/${BINARY_NAME}"
+          tar -C staging -czf "${ASSET}" "${TARBALL_ARGS[@]}"
           # SHA256SUMS covers the tarball + the install script so the
           # installer's checksum check matches what's published.
           sha256sum "${ASSET}" install.sh > SHA256SUMS

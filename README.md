@@ -649,6 +649,12 @@ above the `[ui]` header in a non-overwritten file.
   explicit `ppx update` command only contacts GitHub to fetch a release or
   source tree. Run `ppx --gen-identity` to dump your fingerprint for
   out-of-band verification with a peer before you `/trust` them.
+- **Optional self-hosted relay** — to reach one specific peer across the
+  Internet without port forwarding, run the bundled `ppx-relay` server on a
+  host you control and point both clients at it with a `relay.conf`. The
+  relay only forwards opaque bytes between two clients in the same room
+  and never decrypts traffic. See [`docs/relay.md`](docs/relay.md) for setup,
+  the configuration file format, and the systemd unit.
 
 ## Layout
 
