@@ -27,6 +27,16 @@
 set -euo pipefail
 IFS=$' \t\n'
 
+# When the installer runs from `curl ... | sudo bash -s --`, stdout is a
+# pipe — fully buffered by default — and short progress lines can be dropped
+# when the process exits. Force line-buffered output so the operator sees
+# every step in real time even when piped. `stdbuf` is part of GNU coreutils
+# (present on every Linux distro and macOS via brew coreutils); if absent
+# the fallback is no worse than the historical behaviour.
+if [ ! -t 1 ] && command -v stdbuf >/dev/null 2>&1; then
+    exec > >(stdbuf -oL -eL cat) 2>&1
+fi
+
 # Bound downloads so a stuck TLS handshake can't trap the installer forever.
 CURL_COMMON=(--retry 3 --retry-delay 1 --max-time 120)
 
@@ -609,11 +619,27 @@ ts_authenticated() {
         | grep -q '"BackendState": "Running"'
 }
 
+# Poll for auth completion. If a backgrounded `tailscale up` PID was passed,
+# also watch for it: if the process dies before BackendState reaches Running,
+# the captured stderr log almost certainly explains why (no network, control
+# plane unreachable, account locked, ...) — surface it instead of waiting 10
+# minutes of silence.
 ts_wait_for_auth() {
+    local up_pid="${1:-}"
+    local ts_log="${2:-/run/ppx-relay-auth-url.log}"
     local deadline=$((SECONDS + 600))   # 10 minutes to click the email link
     while [ "$SECONDS" -lt "$deadline" ]; do
         if ts_authenticated; then
             return 0
+        fi
+        if [ -n "$up_pid" ] && ! kill -0 "$up_pid" 2>/dev/null; then
+            warn "tailscale up exited before authentication completed."
+            warn "captured log ($ts_log):"
+            warn "------------------------------------------------------------"
+            [ -r "$ts_log" ] && sed 's/^/[tail] /' "$ts_log" >&2 \
+                || warn "(log not readable)"
+            warn "------------------------------------------------------------"
+            return 2
         fi
         sleep 2
     done
@@ -732,7 +758,7 @@ ts_authenticate() {
         warn "Run \`tailscale up --timeout=10m\` manually in another shell to log in."
     fi
 
-    if ts_wait_for_auth; then
+    if ts_wait_for_auth "$up_pid" "$ts_log"; then
         kill "$up_pid" 2>/dev/null || true
         wait "$up_pid" 2>/dev/null || true
         ok "authenticated via browser login"
