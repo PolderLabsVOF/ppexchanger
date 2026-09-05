@@ -67,8 +67,6 @@ const FOOTER_HEIGHT: u16 = 5;
 const BODY_MIN_HEIGHT: u16 = 3;
 /// The application header has an identity row and a compact navigation row.
 const MENU_HEIGHT: u16 = 4;
-const MENU_BUTTON_WIDTH: u16 = 12;
-const MENU_BUTTON_GAP: u16 = 1;
 
 /// Menu buttons, left-to-right order. Used as the click target for
 /// the menu bar; `Hit::Menu(MenuAction)` returns the variant under the
@@ -101,6 +99,7 @@ pub struct LayoutAreas {
 /// dispatch; `Menu(action)` is a click on one of the top menu buttons.
 #[derive(Debug)]
 pub enum Hit {
+    None,
     Sidebar(usize),
     Chat,
     Footer,
@@ -1293,7 +1292,12 @@ impl UiState {
             let total_rows = message_count + groups;
             total_rows.saturating_sub(self.visible_chat_rows)
         };
-        self.scroll = (self.scroll + lines).min(max_scroll);
+        // The renderer consumes message offsets, not row offsets. Never
+        // let a row estimate move the anchor past the oldest message.
+        self.scroll = self
+            .scroll
+            .saturating_add(lines)
+            .min(max_scroll.min(message_count.saturating_sub(1)));
     }
 
     pub fn scroll_forward(&mut self, lines: usize) {
@@ -1493,6 +1497,53 @@ pub fn compute_layout(area: Rect, sidebar_visible: bool) -> LayoutAreas {
     }
 }
 
+pub fn layout_for_state(area: Rect, state: &UiState) -> LayoutAreas {
+    compute_layout(
+        area,
+        !state.sidebar_hidden
+            && area.width >= state.narrow_sidebar_below
+            && area.width >= state.min_conversation_width.saturating_add(SIDEBAR_PERCENT),
+    )
+}
+
+pub fn sidebar_peer_list_area(area: Rect, pending: bool) -> Rect {
+    if pending {
+        Layout::vertical([Constraint::Length(5), Constraint::Min(3)]).split(area)[1]
+    } else {
+        area
+    }
+}
+
+pub fn sidebar_peer_offset(area: Rect, selected: usize) -> usize {
+    let capacity = (area.height.saturating_sub(2) as usize / 2).max(1);
+    selected.saturating_add(1).saturating_sub(capacity)
+}
+
+fn menu_action_rects(area: Rect) -> Vec<(MenuAction, Rect)> {
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    let mut x = inner.x;
+    [
+        (MenuAction::Peers, "[1] PEERS"),
+        (MenuAction::Discover, "[/] DISCOVER"),
+        (MenuAction::Settings, "[3] SETTINGS"),
+        (MenuAction::Help, "[?] HELP"),
+        (MenuAction::Quit, "[x] QUIT"),
+    ]
+    .into_iter()
+    .map(|(action, label)| {
+        let width = (label.len() as u16).min(inner.right().saturating_sub(x));
+        let rect = Rect::new(
+            x,
+            inner.y.saturating_add(1),
+            width,
+            u16::from(inner.height >= 2),
+        );
+        x = x.saturating_add(label.len() as u16 + 5);
+        (action, rect)
+    })
+    .collect()
+}
+
 /// Centred popup rectangle, mirroring `discovery_popup::centered` so
 /// the click region matches what the modal draws over. Help uses the
 /// same dimensions; the file-offer modal will too.
@@ -1529,6 +1580,7 @@ pub fn hit_test(
     col: u16,
     row: u16,
     areas: &LayoutAreas,
+    peer_area: Rect,
     modal_open: bool,
     peers_len: usize,
 ) -> Hit {
@@ -1538,50 +1590,28 @@ pub fn hit_test(
     if modal_open {
         return Hit::Modal;
     }
-    // Menu row: checked first so menu clicks don't fall through to the
-    // sidebar or chat pane underneath. Mirrors draw_menu: 5 buttons of
-    // width BUTTON_W = 12 with a 1-cell gap. Clicks past the last
-    // button fall through to the regular pane hit-test.
-    // Buttons occupy the second inner header row only. The identity and
-    // connection gauge above remain informational rather than accidental
-    // click targets.
-    if row == areas.menu.y.saturating_add(2) && point_in_rect(areas.menu, col, row) {
-        const STRIDE: u16 = MENU_BUTTON_WIDTH + MENU_BUTTON_GAP;
-        let local_col = col.saturating_sub(areas.menu.x);
-        let idx = (local_col / STRIDE) as usize;
-        if let Some(action) = match idx {
-            0 => Some(MenuAction::Peers),
-            1 => Some(MenuAction::Discover),
-            2 => Some(MenuAction::Settings),
-            3 => Some(MenuAction::Help),
-            4 => Some(MenuAction::Quit),
-            _ => None,
-        } {
+    for (action, rect) in menu_action_rects(areas.menu) {
+        if point_in_rect(rect, col, row) {
             return Hit::Menu(action);
         }
-        // Past the last button — fall through to sidebar/chat.
     }
-    if point_in_rect(areas.sidebar, col, row) {
-        // Sidebar: header (Peers (n)) takes 1 line, border takes the
-        // top, so the first peer sits at sidebar.y + 2. Each peer is
-        // one ListItem row. Indices are clamped so a click in the
-        // empty area below the last peer is a no-op rather than
-        // a panic.
-        if peers_len == 0 {
-            return Hit::Sidebar(0);
-        }
-        let first_peer_y = areas.sidebar.y.saturating_add(2);
-        if row < first_peer_y {
-            return Hit::Sidebar(0);
-        }
-        let idx = (row - first_peer_y) as usize;
-        let idx = idx.min(peers_len.saturating_sub(1));
-        return Hit::Sidebar(idx);
+    let inner = Block::default().borders(Borders::ALL).inner(peer_area);
+    if point_in_rect(inner, col, row) {
+        let idx = ((row - inner.y) / 2) as usize;
+        return if idx < peers_len {
+            Hit::Sidebar(idx)
+        } else {
+            Hit::None
+        };
     }
     if point_in_rect(areas.chat, col, row) {
         return Hit::Chat;
     }
-    Hit::Footer
+    if point_in_rect(areas.footer, col, row) {
+        Hit::Footer
+    } else {
+        Hit::None
+    }
 }
 
 /// Initialize the terminal: raw mode + alt-screen + bracketed paste +
@@ -1706,8 +1736,8 @@ pub struct SettingsView<'a> {
 }
 
 /// Render one frame using the supplied theme + glyph palette.
-pub fn render(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+pub fn render<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
     state: &mut UiState,
     theme: &Theme,
     glyphs: &Glyphs,
@@ -1724,11 +1754,7 @@ pub fn render(
         // Responsive breakpoint: when the terminal is too narrow for the
         // configured sidebar allocation, hide the sidebar automatically.
         // The user can still toggle it back via Ctrl-B if they need to.
-        let sidebar_visible = !state.sidebar_hidden
-            && area.width >= state.narrow_sidebar_below
-            && area.width >= state.min_conversation_width + SIDEBAR_PERCENT;
-        // Single source of truth for the layout — hit_test reuses it.
-        let areas = compute_layout(area, sidebar_visible);
+        let areas = layout_for_state(area, state);
 
         draw_menu(f, areas.menu, state, theme, glyphs);
         draw_sidebar(f, areas.sidebar, state, theme, glyphs);
@@ -1945,7 +1971,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
         .block(pending)
         .wrap(Wrap { trim: true });
         f.render_widget(prompt, rows[0]);
-        rows[1]
+        sidebar_peer_list_area(area, true)
     } else {
         area
     };
@@ -2054,7 +2080,8 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyph
             .collect()
     };
 
-    let mut list_state = ListState::default();
+    let mut list_state =
+        ListState::default().with_offset(sidebar_peer_offset(peer_area, state.selected_peer));
     if !state.peers.is_empty() {
         list_state.select(Some(state.selected_peer));
     }
@@ -2171,13 +2198,12 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
     // Each message belongs to exactly one peer. Keep the global encrypted
     // history, but render only the conversation currently selected in the
     // sidebar so switching peers never leaks another chat into this pane.
-    let conversation: Vec<UiMessage> = selected_peer_id
+    let conversation: Vec<&UiMessage> = selected_peer_id
         .map(|peer_id| {
             state
                 .messages
                 .iter()
                 .filter(|message| message.from_peer == peer_id)
-                .cloned()
                 .collect()
         })
         .unwrap_or_default();
@@ -2264,15 +2290,14 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
         // Respect the user's scroll anchor: when scrolled back, only
         // consider messages at or before the scroll window so we don't
         // re-surface content that should be off-screen.
+        state.scroll = state.scroll.min(total.saturating_sub(1));
         let visible_end_index = total.saturating_sub(state.scroll);
         // Snapshot the visible slice into a contiguous Vec so we can
         // borrow it as `&[UiMessage]` for the forward walk below.
-        let slice: Vec<UiMessage> = conversation
-            .iter()
-            .take(visible_end_index)
-            .cloned()
-            .collect();
-        let slice: &[UiMessage] = &slice;
+        // Each chunk occupies at least one row. Only the last viewport's
+        // worth can survive the trimming below, plus one context message.
+        let start = visible_end_index.saturating_sub(budget.saturating_add(1));
+        let slice = &conversation[start..visible_end_index];
 
         // Build per-message chunks oldest → newest. Each chunk carries
         // an optional group header (when the sender switches from the
@@ -2337,7 +2362,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
             // past the slice so a scroll anchor that lands on a new day
             // is labelled.
             let prev_for_day: Option<&UiMessage> = if i == 0 {
-                conversation.get(visible_end_index)
+                conversation.get(visible_end_index).copied()
             } else {
                 prev
             };
@@ -2691,6 +2716,10 @@ fn render_image_preview(
     }
     let key = (preview.meta.path.clone(), rect.width, rect.height);
     if !state.image_rasters.contains_key(&key) {
+        // Resizing must not retain an unbounded collection of raster sizes.
+        if state.image_rasters.len() >= 32 {
+            state.image_rasters.clear();
+        }
         let image = match image::open(&preview.meta.path) {
             Ok(image) => image,
             Err(_) => {
@@ -2790,8 +2819,8 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs
     let input_area = Rect::new(inner.x, inner.y, inner.width, 1);
     let chip = format!(" TO {} ", target_label);
     let prefix = format!("{} ", glyphs.arrow);
-    let chip_width = chip.chars().count() as u16;
-    let prefix_width = prefix.chars().count() as u16;
+    let chip_width = Span::raw(&chip).width() as u16;
+    let prefix_width = Span::raw(&prefix).width() as u16;
     let available = input_area
         .width
         .saturating_sub(chip_width)
@@ -2835,7 +2864,7 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs
             .x
             .saturating_add(chip_width)
             .saturating_add(prefix_width)
-            .saturating_add(draft.chars().count() as u16)
+            .saturating_add(Span::raw(&draft).width() as u16)
             .min(input_area.right().saturating_sub(1));
         f.set_cursor_position((cursor_x, input_area.y));
     }
@@ -2881,7 +2910,7 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs
         hint("Enter", "send"),
         hint("Esc", "clear"),
         hint("Tab", "focus"),
-        hint("drag", "select · Ctrl-C copy"),
+        hint("Shift+drag", "terminal select"),
         hint("?", "help"),
     ] {
         right_spans.extend(h);
@@ -3048,15 +3077,25 @@ fn truncate_tail(value: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
-    let count = value.chars().count();
+    let count = Span::raw(value).width();
     if count <= width {
         return value.to_string();
     }
     if width <= 3 {
         return ".".repeat(width);
     }
-    let tail: String = value.chars().skip(count - (width - 3)).collect();
-    format!("...{}", tail)
+    let mut used = 0;
+    let mut start = value.len();
+    for (index, ch) in value.char_indices().rev() {
+        let mut bytes = [0; 4];
+        let cells = Span::raw(&*ch.encode_utf8(&mut bytes)).width();
+        if used + cells > width - 3 {
+            break;
+        }
+        used += cells;
+        start = index;
+    }
+    format!("...{}", &value[start..])
 }
 
 fn status_style(status: &str, theme: &Theme) -> Style {
@@ -3142,6 +3181,139 @@ type Frame<'a> = ratatui::Frame<'a>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_state() -> UiState {
+        UiState::from_identity(&Identity {
+            peer_id: [0; 16],
+            keypair: crate::crypto::Keypair::generate(),
+            name: "alice".into(),
+            hostname: "test".into(),
+        })
+    }
+
+    fn frame_text(terminal: &Terminal<ratatui::backend::TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn renders_tiny_and_responsive_terminals_without_panicking() {
+        let theme = Theme::by_name(theme::ThemeName::Default);
+        let glyphs = theme::detect_glyphs();
+        let mut state = test_state();
+        state.composer = "界".repeat(100);
+        for (width, height) in [(1, 1), (8, 4), (40, 12), (80, 24), (160, 48)] {
+            let mut terminal =
+                Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            render(
+                &mut terminal,
+                &mut state,
+                &theme,
+                &glyphs,
+                SettingsView::default(),
+            )
+            .unwrap();
+            let areas = layout_for_state(Rect::new(0, 0, width, height), &state);
+            if width < state.narrow_sidebar_below {
+                assert_eq!(areas.sidebar.width, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn rendered_chat_filters_peers_and_survives_extreme_scroll() {
+        let mut state = test_state();
+        for (peer, name) in [(1, "bob"), (2, "carol")] {
+            state.apply(&Event::PeerSeen {
+                peer_id: [peer; 16],
+                name: name.into(),
+                hostname: "test".into(),
+                public_key: [peer; 32],
+                fingerprint: "abcd".into(),
+                addr: format!("127.0.0.1:{}", 8000 + peer as u16).parse().unwrap(),
+            });
+            state.apply(&Event::TextMessage {
+                from_peer: [peer; 16],
+                from_name: name.into(),
+                body: format!("private-message-{name}"),
+            });
+        }
+        let theme = Theme::by_name(theme::ThemeName::Default);
+        let glyphs = theme::detect_glyphs();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        for name in ["bob", "carol"] {
+            let index = state
+                .peers
+                .iter()
+                .position(|p| p.name.starts_with(name))
+                .unwrap();
+            state.select_peer(index);
+            state.scroll = usize::MAX;
+            render(
+                &mut terminal,
+                &mut state,
+                &theme,
+                &glyphs,
+                SettingsView::default(),
+            )
+            .unwrap();
+            let frame = frame_text(&terminal);
+            assert!(frame.contains(&format!("private-message-{name}")));
+            let other = if name == "bob" { "carol" } else { "bob" };
+            assert!(!frame.contains(&format!("private-message-{other}")));
+        }
+    }
+
+    #[test]
+    fn scrolled_sidebar_click_matches_rendered_peer() {
+        let mut state = test_state();
+        for peer in 1..=20 {
+            state.apply(&Event::PeerSeen {
+                peer_id: [peer; 16],
+                name: format!("peer-{peer:02}"),
+                hostname: "test".into(),
+                public_key: [peer; 32],
+                fingerprint: "abcd".into(),
+                addr: format!("127.0.0.1:{}", 8000 + peer as u16).parse().unwrap(),
+            });
+        }
+        state.selected_peer = 15;
+        let screen = Rect::new(0, 0, 120, 24);
+        let areas = layout_for_state(screen, &state);
+        let offset = sidebar_peer_offset(areas.sidebar, state.selected_peer);
+        let theme = Theme::by_name(theme::ThemeName::Default);
+        let glyphs = theme::detect_glyphs();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        render(
+            &mut terminal,
+            &mut state,
+            &theme,
+            &glyphs,
+            SettingsView::default(),
+        )
+        .unwrap();
+        let row: String = (areas.sidebar.x..areas.sidebar.right())
+            .map(|x| terminal.backend().buffer()[(x, areas.sidebar.y + 1)].symbol())
+            .collect();
+        assert!(row.contains(&state.peers[offset].name), "{row:?}");
+        assert!(matches!(
+            hit_test(
+                screen,
+                areas.sidebar.x + 1,
+                areas.sidebar.y + 1,
+                &areas,
+                areas.sidebar,
+                false,
+                state.peers.len() - offset
+            ),
+            Hit::Sidebar(0)
+        ));
+    }
 
     #[test]
     fn apply_event_adds_peer() {
@@ -3294,7 +3466,7 @@ mod tests {
         // Twenty bubbles alternating between Alice (outgoing) and Bob
         // (incoming) make twenty sender groups. Total rendered rows =
         // 20 bubbles + 20 headers = 40. With an 8-row viewport the cap
-        // is 32.
+        // is bounded by the 19 messages that can be skipped.
         let id = Identity {
             peer_id: [0u8; 16],
             keypair: crate::crypto::Keypair::generate(),
@@ -3315,7 +3487,7 @@ mod tests {
         }
         s.visible_chat_rows = 8;
         s.scroll_back(99);
-        assert_eq!(s.scroll, 32);
+        assert_eq!(s.scroll, 19);
     }
 
     #[test]
@@ -3761,6 +3933,35 @@ mod tests {
     }
 
     #[test]
+    fn truncate_tail_respects_terminal_cell_width() {
+        let text = truncate_tail("界界界界", 7);
+        assert_eq!(text, "...界界");
+        assert!(Line::from(text).width() <= 7);
+    }
+
+    #[test]
+    fn scrolling_cannot_hide_all_messages_or_overflow() {
+        let id = Identity {
+            peer_id: [0; 16],
+            keypair: crate::crypto::Keypair::generate(),
+            name: "alice".into(),
+            hostname: "test".into(),
+        };
+        let mut state = UiState::from_identity(&id);
+        state.push_outgoing_message([1; 16], "first".into());
+        state.apply(&Event::TextMessage {
+            from_peer: [1; 16],
+            from_name: "bob".into(),
+            body: "second".into(),
+        });
+        state.visible_chat_rows = 2;
+        state.scroll_back(usize::MAX);
+        assert!(state.scroll < state.messages.len());
+        state.scroll_back(usize::MAX);
+        assert!(state.scroll < state.messages.len());
+    }
+
+    #[test]
     fn command_palette_click_resolves_the_visible_command() {
         let chat = Rect::new(0, 0, 80, 24);
         let (popup, _) = command_palette_layout(chat, "/disc").unwrap();
@@ -3773,62 +3974,128 @@ mod tests {
     #[test]
     fn hit_test_menu_clicks_resolve_to_action() {
         let (screen, areas) = synthetic_layout();
-        // Five buttons of width 12 with a 1-cell gap. Click in the
-        // middle of each button.
-        let stride = 12 + 1;
-        for (col_target, expected) in [
-            (5usize, MenuAction::Peers),
-            (18, MenuAction::Discover),
-            (31, MenuAction::Settings),
-            (44, MenuAction::Help),
-            (57, MenuAction::Quit),
-        ] {
-            let hit = hit_test(screen, col_target as u16, 2, &areas, false, 0);
+        for (action, rect) in menu_action_rects(areas.menu) {
+            let hit = hit_test(
+                screen,
+                rect.x.saturating_add(rect.width / 2),
+                rect.y,
+                &areas,
+                areas.sidebar,
+                false,
+                0,
+            );
             assert!(
-                matches!(hit, Hit::Menu(a) if a == expected),
-                "col {} expected {:?}, got {:?}",
-                col_target,
-                expected,
+                matches!(hit, Hit::Menu(found) if found == action),
+                "rect {:?} expected {:?}, got {:?}",
+                rect,
+                action,
                 hit
             );
         }
-        // Click past the last button falls through to one of the
-        // body / footer / sidebar panes. On an 80×24 screen the only
-        // options at y=0 are Sidebar (if x < 24) or Footer (default).
-        let past = stride * 5 + 2;
-        if (past as u16) < screen.width {
-            let hit = hit_test(screen, past as u16, 2, &areas, false, 0);
-            assert!(
-                !matches!(hit, Hit::Menu(_)),
-                "past-end should not be a Menu hit, got {:?}",
-                hit
-            );
-        }
+        // Separator clicks must not trigger either neighbouring action.
+        let separator_x = menu_action_rects(areas.menu)[0].1.right();
+        assert!(matches!(
+            hit_test(
+                screen,
+                separator_x,
+                areas.menu.y + 2,
+                &areas,
+                areas.sidebar,
+                false,
+                0
+            ),
+            Hit::None
+        ));
     }
 
     #[test]
     fn hit_test_sidebar_row_picks_peer_index() {
         let (screen, areas) = synthetic_layout();
-        // First peer sits at sidebar.y + 2 (1 border + 1 header line).
-        let first_y = areas.sidebar.y + 2;
+        let peer_list = areas.sidebar;
+        // A block title lives in the border, so the first two-line ListItem
+        // starts at the first inner row.
+        let first_y = peer_list.y + 1;
         assert!(matches!(
-            hit_test(screen, areas.sidebar.x + 1, first_y, &areas, false, 3),
+            hit_test(
+                screen,
+                peer_list.x + 1,
+                first_y,
+                &areas,
+                peer_list,
+                false,
+                3
+            ),
             Hit::Sidebar(0)
         ));
         assert!(matches!(
-            hit_test(screen, areas.sidebar.x + 1, first_y + 1, &areas, false, 3),
+            hit_test(
+                screen,
+                peer_list.x + 1,
+                first_y + 1,
+                &areas,
+                peer_list,
+                false,
+                3
+            ),
+            Hit::Sidebar(0)
+        ));
+        assert!(matches!(
+            hit_test(
+                screen,
+                peer_list.x + 1,
+                first_y + 2,
+                &areas,
+                peer_list,
+                false,
+                3
+            ),
             Hit::Sidebar(1)
         ));
-        // Click below last peer but still inside the sidebar — should
-        // clamp to the last index rather than fall through to Footer.
-        let below_last = areas
-            .sidebar
-            .y
-            .saturating_add(areas.sidebar.height)
-            .saturating_sub(2);
+        // Empty sidebar space is inert: it must never silently select the
+        // last peer.
+        let below_last = peer_list.bottom().saturating_sub(2);
         assert!(matches!(
-            hit_test(screen, areas.sidebar.x + 1, below_last, &areas, false, 3),
-            Hit::Sidebar(2)
+            hit_test(
+                screen,
+                peer_list.x + 1,
+                below_last,
+                &areas,
+                peer_list,
+                false,
+                3
+            ),
+            Hit::None
+        ));
+    }
+
+    #[test]
+    fn hit_test_uses_the_rendered_peer_list_after_pending_card() {
+        let (screen, areas) = synthetic_layout();
+        let peer_list = sidebar_peer_list_area(areas.sidebar, true);
+        let first_peer_row = peer_list.y + 1;
+        assert!(matches!(
+            hit_test(
+                screen,
+                peer_list.x + 1,
+                first_peer_row,
+                &areas,
+                peer_list,
+                false,
+                3,
+            ),
+            Hit::Sidebar(0)
+        ));
+        assert!(matches!(
+            hit_test(
+                screen,
+                peer_list.x + 1,
+                first_peer_row + 2,
+                &areas,
+                peer_list,
+                false,
+                3,
+            ),
+            Hit::Sidebar(1)
         ));
     }
 
@@ -3838,7 +4105,7 @@ mod tests {
         let col = areas.chat.x + 1;
         let row = areas.chat.y + 1;
         assert!(matches!(
-            hit_test(screen, col, row, &areas, false, 0),
+            hit_test(screen, col, row, &areas, areas.sidebar, false, 0),
             Hit::Chat
         ));
     }
@@ -3852,12 +4119,12 @@ mod tests {
         // Without a modal open, a click inside the modal rect falls
         // through to the chat pane (since the modal sits over it).
         assert!(matches!(
-            hit_test(screen, col, row, &areas, false, 0),
+            hit_test(screen, col, row, &areas, areas.sidebar, false, 0),
             Hit::Chat
         ));
         // With a modal open, that same click is consumed as Modal.
         assert!(matches!(
-            hit_test(screen, col, row, &areas, true, 0),
+            hit_test(screen, col, row, &areas, areas.sidebar, true, 0),
             Hit::Modal
         ));
     }

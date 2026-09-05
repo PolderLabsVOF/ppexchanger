@@ -158,19 +158,23 @@ fn print_help() {
 
 /// Update the installed binary from the latest GitHub release. The release
 /// installer performs target detection, checksum verification, and atomic
-/// replacement. If a prebuilt asset is unavailable (or curl/bash is missing),
+/// replacement. If a prebuilt asset is unavailable,
 /// fall back to a locked source build so `ppx update` remains useful on new
 /// architectures and development platforms.
-fn update_install() {
+fn update_install() -> bool {
     const INSTALLER_URL: &str =
         "https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install.sh";
     let stamp = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let script =
-        std::env::temp_dir().join(format!("ppx-update-{}-{}.sh", std::process::id(), stamp));
-    let install_dir = preferred_install_dir();
+    let workspace =
+        std::env::temp_dir().join(format!("ppx-update-{}-{}", std::process::id(), stamp));
+    if let Err(error) = std::fs::create_dir(&workspace) {
+        eprintln!("ppx update failed: could not create temporary directory: {error}");
+        return false;
+    }
+    let script = workspace.join("install.sh");
     let downloaded = std::process::Command::new("curl")
         .args([
             "--fail",
@@ -187,66 +191,42 @@ fn update_install() {
         .arg(&script)
         .status()
         .is_ok_and(|status| status.success());
+    let mut installed = false;
     if downloaded {
-        let mut command = std::process::Command::new("bash");
-        command.arg(&script).args(["--yes", "--method", "binary"]);
-        if let Some(dir) = install_dir.as_ref() {
-            command.env("PPX_INSTALL_DIR", dir);
+        // Both methods resolve a release tag and stage the replacement in the
+        // destination directory. Do not cargo-install directly beside an npm
+        // vendor directory or clone the unversioned development branch.
+        for method in ["binary", "source"] {
+            let mut command = std::process::Command::new("bash");
+            command
+                .arg(&script)
+                .args(["--yes", "--no-firewall", "--method", method]);
+            if let Some(dir) = preferred_install_dir() {
+                command.env("PPX_INSTALL_DIR", dir);
+            }
+            if command.status().is_ok_and(|status| status.success()) {
+                println!("ppx updated successfully ({method})");
+                installed = true;
+                break;
+            }
+            if method == "binary" {
+                eprintln!("prebuilt update unavailable; trying a source build…");
+            }
         }
-        if command.status().is_ok_and(|status| status.success()) {
-            let _ = std::fs::remove_file(&script);
-            println!("ppx updated successfully");
-            return;
-        }
-        eprintln!("prebuilt update unavailable; trying a source build…");
     } else {
-        eprintln!("could not download the release installer; trying a source build…");
+        eprintln!("ppx update failed: could not download the release installer");
     }
-    let _ = std::fs::remove_file(&script);
-
-    let source =
-        std::env::temp_dir().join(format!("ppx-update-src-{}-{}", std::process::id(), stamp));
-    let cloned = std::process::Command::new("git")
-        .args([
-            "clone",
-            "--depth",
-            "1",
-            "https://github.com/PolderLabsVOF/ppexchanger.git",
-        ])
-        .arg(&source)
-        .status()
-        .is_ok_and(|status| status.success());
-    if !cloned {
-        let _ = std::fs::remove_dir_all(&source);
-        eprintln!("ppx update failed: git is unavailable or the repository could not be cloned");
-        return;
+    let _ = std::fs::remove_dir_all(workspace);
+    if downloaded && !installed {
+        eprintln!("ppx update failed: binary installation and source build did not complete");
     }
-    let target_bin = install_dir.unwrap_or_else(|| {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".local")
-            .join("bin")
-    });
-    let root = target_bin
-        .parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let built = std::process::Command::new("cargo")
-        .current_dir(&source)
-        .args(["install", "--path", ".", "--locked", "--root"])
-        .arg(&root)
-        .status()
-        .is_ok_and(|status| status.success());
-    let _ = std::fs::remove_dir_all(&source);
-    if built {
-        println!("ppx updated successfully from source");
-    } else {
-        eprintln!("ppx update failed: cargo source build did not complete");
-    }
+    installed
 }
 
 fn preferred_install_dir() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PPX_INSTALL_DIR") {
+        return Some(PathBuf::from(path));
+    }
     let path = std::env::current_exe().ok()?;
     let parent = path.parent()?.to_path_buf();
     let is_cargo_target = parent
@@ -268,7 +248,9 @@ fn run(
     mouse_override: Option<bool>,
 ) {
     if matches!(mode, Mode::Update) {
-        update_install();
+        if !update_install() {
+            std::process::exit(1);
+        }
         return;
     }
     // First-run migration from the v0.4.x `lanchat/` config dir. Best-effort:
@@ -1628,8 +1610,7 @@ fn start_tui(
                                 }
                                 let pending_click = {
                                     let s = state.lock().unwrap();
-                                    let sidebar =
-                                        tui::compute_layout(rect, !s.sidebar_hidden).sidebar;
+                                    let sidebar = tui::layout_for_state(rect, &s).sidebar;
                                     s.pending_connection.as_ref().and_then(|request| {
                                         (m.column >= sidebar.x
                                             && m.column < sidebar.right()
@@ -1707,7 +1688,7 @@ fn start_tui(
                                 }
                                 let command = {
                                     let s = state.lock().unwrap();
-                                    let chat = tui::compute_layout(rect, !s.sidebar_hidden).chat;
+                                    let chat = tui::layout_for_state(rect, &s).chat;
                                     tui::command_palette_hit(chat, &s.composer, m.column, m.row)
                                 };
                                 if let Some(command) = command {
@@ -2404,14 +2385,24 @@ fn handle_mouse(
 ) -> Option<ppexchanger::tui::EditorEvent> {
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut s = state.lock().unwrap();
-    let areas = tui::compute_layout(size, !s.sidebar_hidden);
+    let areas = tui::layout_for_state(size, &s);
     let modal_open =
         s.text_preview.is_some() || s.show_help || s.discovery.is_some() || s.settings.is_some();
-    let hit = tui::hit_test(size, m.column, m.row, &areas, modal_open, s.peers.len());
+    let peer_area = tui::sidebar_peer_list_area(areas.sidebar, s.pending_connection.is_some());
+    let peer_offset = tui::sidebar_peer_offset(peer_area, s.selected_peer);
+    let hit = tui::hit_test(
+        size,
+        m.column,
+        m.row,
+        &areas,
+        peer_area,
+        modal_open,
+        s.peers.len().saturating_sub(peer_offset),
+    );
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => match hit {
             tui::Hit::Sidebar(idx) => {
-                s.select_peer(idx);
+                s.select_peer(idx.saturating_add(peer_offset));
                 s.focus = tui::Focus::Sidebar;
             }
             tui::Hit::Chat => {
@@ -2449,7 +2440,7 @@ fn handle_mouse(
                 // re-clicking.
                 s.focus = tui::Focus::Chat;
             }
-            tui::Hit::Modal => {
+            tui::Hit::None | tui::Hit::Modal => {
                 // Modal handles its own dispatch (Enter/Esc) — clicks
                 // are absorbed for v1.
             }

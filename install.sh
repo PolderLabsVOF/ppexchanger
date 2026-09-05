@@ -501,19 +501,28 @@ install_binary_file() {
         UPDATE=0
     fi
 
-    # mv is atomic on the same filesystem; if TMPDIR lives on a
-    # different FS (e.g. tmpfs), mv silently falls back to copy+delete.
-    # Capture the actual error so we don't lose it to `2>/dev/null`.
-    if ! mv_out="$(mv -f "$src" "$BIN_PATH" 2>&1)"; then
-        warn "mv failed ($mv_out) — falling back to cp"
-        if ! cp_out="$(cp -f "$src" "$BIN_PATH" 2>&1)"; then
-            die "failed to install binary: $cp_out"
-        fi
+    # Stage beside the destination so replacement stays atomic even when
+    # downloads/builds live on a different filesystem.
+    local staged
+    staged="$(mktemp "$INSTALL_DIR/.ppx-install.XXXXXX")" \
+        || die "could not stage the update in $INSTALL_DIR"
+    if ! cp "$src" "$staged"; then
+        rm -f "$staged"
+        die "could not copy the new binary; the existing installation is unchanged"
     fi
     case "$TARGET_TRIPLE" in
         *-pc-windows-*) ;;
-        *) chmod +x "$BIN_PATH" ;;
+        *)
+            if ! chmod +x "$staged"; then
+                rm -f "$staged"
+                die "could not make the new binary executable"
+            fi
+            ;;
     esac
+    if ! mv -f "$staged" "$BIN_PATH"; then
+        rm -f "$staged"
+        die "could not replace $BIN_PATH; close other ppx instances and retry"
+    fi
 
     ok "installed ppx $TAG_BARE → $BIN_PATH"
 

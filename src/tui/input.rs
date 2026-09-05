@@ -171,15 +171,25 @@ impl LineEditor {
         else {
             return EditorEvent::None;
         };
-        // Ignore key-release events so a held key doesn't double-fire.
-        if !matches!(kind, crossterm::event::KeyEventKind::Press) {
+        let word_delete = modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(
+                code,
+                KeyCode::Backspace | KeyCode::Char('h') | KeyCode::Char('w')
+            );
+        let printable = matches!(code, KeyCode::Char(_))
+            && !modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        let edits_buffer = word_delete || printable || *code == KeyCode::Backspace;
+        // Repeat editing keys, but do not repeat actions such as sending or quitting.
+        if *kind == crossterm::event::KeyEventKind::Release
+            || (*kind == crossterm::event::KeyEventKind::Repeat && !edits_buffer)
+        {
             return EditorEvent::None;
         }
 
-        // Any edit other than Enter turns the pending attachment back into a
-        // normal composer buffer. This makes the preview label a safe,
-        // cancellable affordance instead of an opaque mode switch.
-        if !matches!(code, KeyCode::Enter) && self.pending_text_file.is_some() {
+        // Editing replaces the attachment; navigation and shortcuts must
+        // leave its payload intact until the user submits or clears it.
+        if edits_buffer && self.pending_text_file.is_some() {
             self.pending_text_file = None;
             self.buffer.clear();
         }
@@ -189,12 +199,7 @@ impl LineEditor {
         // backspace), so handle both representations before the printable
         // character branch below. Ctrl-W is accepted as the familiar shell
         // word-delete alternative as well.
-        if modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(
-                code,
-                KeyCode::Backspace | KeyCode::Char('h') | KeyCode::Char('w')
-            )
-        {
+        if word_delete {
             self.delete_word_backwards();
             return EditorEvent::Edited;
         }
@@ -234,6 +239,10 @@ impl LineEditor {
                 }
                 _ => {}
             }
+        }
+
+        if *code == KeyCode::BackTab && *modifiers == KeyModifiers::SHIFT {
+            return EditorEvent::FocusNext;
         }
 
         match code {
@@ -287,7 +296,7 @@ impl LineEditor {
                     EditorEvent::PeerNext
                 }
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if printable && self.buffer.len() + c.len_utf8() <= PASTE_MAX => {
                 self.buffer.push(*c);
                 EditorEvent::Edited
             }
@@ -361,6 +370,83 @@ impl LineEditor {
 mod tests {
     use super::*;
     use crossterm::event::KeyEventKind;
+
+    #[test]
+    fn navigation_preserves_pending_attachment() {
+        for (code, modifiers) in [
+            (KeyCode::Tab, KeyModifiers::NONE),
+            (KeyCode::PageUp, KeyModifiers::NONE),
+            (KeyCode::Char(','), KeyModifiers::CONTROL),
+            (KeyCode::Left, KeyModifiers::NONE),
+        ] {
+            let mut editor = LineEditor::new();
+            let text = "content\n".repeat(TEXT_FILE_LINE_THRESHOLD);
+            editor.on_paste(&text);
+            editor.on_key(&press(code, modifiers));
+            assert_eq!(
+                editor.on_key(&press(KeyCode::Enter, KeyModifiers::NONE)),
+                EditorEvent::SubmitTextFile(text)
+            );
+        }
+    }
+
+    #[test]
+    fn unbound_control_shortcuts_do_not_insert_text() {
+        let mut editor = LineEditor::new();
+        editor.buffer = "draft".into();
+        assert_eq!(
+            editor.on_key(&press(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            EditorEvent::None
+        );
+        assert_eq!(editor.buffer, "draft");
+    }
+
+    #[test]
+    fn shift_tab_changes_focus_without_discarding_draft() {
+        let mut editor = LineEditor::new();
+        editor.buffer = "draft".into();
+        assert_eq!(
+            editor.on_key(&press(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            EditorEvent::FocusNext
+        );
+        assert_eq!(editor.buffer, "draft");
+    }
+
+    #[test]
+    fn typing_respects_byte_limit_and_preserves_utf8() {
+        let mut editor = LineEditor::new();
+        editor.buffer = "a".repeat(PASTE_MAX - 1);
+        assert_eq!(
+            editor.on_key(&press(KeyCode::Char('界'), KeyModifiers::NONE)),
+            EditorEvent::None
+        );
+        assert_eq!(editor.buffer.len(), PASTE_MAX - 1);
+        assert_eq!(
+            editor.on_key(&press(KeyCode::Char('b'), KeyModifiers::NONE)),
+            EditorEvent::Edited
+        );
+        assert_eq!(editor.buffer.len(), PASTE_MAX);
+    }
+
+    #[test]
+    fn repeated_backspace_edits_but_repeated_enter_does_not_submit() {
+        let mut editor = LineEditor::new();
+        editor.buffer = "hello".into();
+        let repeat = |code| {
+            Event::Key(KeyEvent::new_with_kind(
+                code,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            ))
+        };
+        assert_eq!(
+            editor.on_key(&repeat(KeyCode::Backspace)),
+            EditorEvent::Edited
+        );
+        assert_eq!(editor.buffer, "hell");
+        assert_eq!(editor.on_key(&repeat(KeyCode::Enter)), EditorEvent::None);
+        assert_eq!(editor.buffer, "hell");
+    }
 
     #[allow(dead_code)] // helper used by future paste-handling tests
     fn paste_event(text: &str) -> Event {

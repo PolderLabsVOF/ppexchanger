@@ -2,6 +2,22 @@
 
 All notable ppexchanger updates are listed here in plain language.
 
+## 0.7.6 — 2026-09-05
+
+### Smoother conversations
+
+- Pasted text stays attached when you switch focus or navigate.
+- Holding Backspace works as expected, and unused keyboard shortcuts no longer type stray letters.
+- Peer selection and menu clicks match what you see, including smaller windows and longer peer lists.
+- Wide characters fit the message box more accurately.
+- Long chat histories use less memory while drawing, and scrolling no longer leaves the chat empty.
+
+### More reliable updates
+
+- Run `ppx update` to install the latest release.
+- If a ready-made download is unavailable, ppx tries building the release from source into the same installation folder.
+- Failed updates now report failure correctly, without changing firewall settings.
+
 ## 0.7.5 — 2026-09-03
 
 ### Reliable releases
