@@ -2,6 +2,13 @@
 
 All notable ppexchanger updates are listed here in plain language.
 
+## 0.7.10 — 2026-09-05 — relay installer
+
+- New `install-relay.sh` does a guided, one-line install of the self-hosted relay: download, checksum, install, write a hardened systemd unit, open the firewall, start the service.
+  `curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install-relay.sh | sudo bash`
+- The installer works in three modes: system-wide (default when run as root), per-user (no root needed, `--user`), or binary-only (`--no-systemd`). It is fully scriptable via flags and idempotent on re-run.
+- ufw / firewalld / iptables are detected in order; the rule is only added when the bind address is not loopback.
+
 ## 0.7.9 — 2026-09-05 — self-hosted relay
 
 PPX can now connect one trusted pair over the Internet through a small relay you run yourself. LAN discovery and direct LAN connections continue to work unchanged.

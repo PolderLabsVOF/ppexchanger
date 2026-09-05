@@ -6,22 +6,34 @@ The relay is not a general proxy: it only joins the two clients in the same room
 
 ## Run a relay
 
-Build the relay on a Linux host with a public address:
+### One-line install (recommended)
+
+A guided installer downloads the binary, asks four questions, writes a hardened systemd unit, opens the firewall, and starts the service:
+
+```sh
+curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install-relay.sh | sudo bash
+```
+
+Without flags, the installer asks for bind address, port, maximum concurrent clients, and maximum clients per source IP, then applies the answers. Pass `--yes` to accept defaults non-interactively, or pre-answer with flags such as `--bind 0.0.0.0 --max-clients 256`. Run `install-relay.sh --help` for the full list.
+
+For a public relay, explicitly choose its public bind address and limits:
+
+```sh
+sudo bash install-relay.sh --bind 0.0.0.0:47393 --max-clients 256 --max-per-ip 8
+```
+
+The installer opens inbound TCP port 47393 via ufw, firewalld, or iptables when available. Open the same port on any provider or cloud panel that fronts the relay host. PPX clients only need normal outbound TCP access.
+
+### Manual install
+
+Build and install the binary by hand:
 
 ```sh
 cargo build --release --locked --bin ppx-relay
 sudo install -m 0755 target/release/ppx-relay /usr/local/bin/ppx-relay
 ```
 
-For a public relay, explicitly choose its public bind address and limits:
-
-```sh
-ppx-relay --bind 0.0.0.0:47393 --max-clients 256 --max-per-ip 8
-```
-
-Open **only inbound TCP port 47393** on the relay host (and its provider firewall, if applicable). PPX clients only need normal outbound TCP access. Do not add firewall rules on client devices merely for relay use.
-
-For systemd, copy `deploy/ppx-relay.service` to `/etc/systemd/system/ppx-relay.service`. Its default listens only on loopback; change `--bind 127.0.0.1:47393` to `--bind 0.0.0.0:47393` only when the host firewall is configured as above. Then run:
+Then copy `deploy/ppx-relay.service` from this repository to `/etc/systemd/system/ppx-relay.service`. Its default listens only on loopback; change `--bind 127.0.0.1:47393` to `--bind 0.0.0.0:47393` only when the host firewall is configured as above. Then run:
 
 ```sh
 sudo systemctl daemon-reload

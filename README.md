@@ -653,8 +653,10 @@ above the `[ui]` header in a non-overwritten file.
   Internet without port forwarding, run the bundled `ppx-relay` server on a
   host you control and point both clients at it with a `relay.conf`. The
   relay only forwards opaque bytes between two clients in the same room
-  and never decrypts traffic. See [`docs/relay.md`](docs/relay.md) for setup,
-  the configuration file format, and the systemd unit.
+  and never decrypts traffic. One-line installer:
+  `curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install-relay.sh | sudo bash`.
+  See [`docs/relay.md`](docs/relay.md) for setup, the configuration file
+  format, and the systemd unit.
 
 ## Layout
 
