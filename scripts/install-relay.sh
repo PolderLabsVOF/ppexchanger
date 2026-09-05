@@ -4,17 +4,25 @@
 # Usage:
 #   curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install-relay.sh | sudo bash
 #   curl -fsSL .../install-relay.sh | sudo bash -s -- --bind 0.0.0.0 --port 47393
+#   curl -fsSL .../install-relay.sh | sudo bash -s -- --funnel
 #   bash install-relay.sh --uninstall
 #   bash install-relay.sh --user   # rootless user service
 #
-# Guided interactive install — without flags, the script asks four questions
-# (bind address, port, max-clients, max-per-ip), confirms the answers, then
-# handles every step automatically: download, checksum, install the binary,
-# write the systemd unit, enable and start the service, open the firewall.
+# Guided interactive install — without flags, the script asks which exposure
+# mode you want (Tailscale Funnel is recommended), then asks port/limits if
+# needed, confirms, and handles every step automatically: download, checksum,
+# install the binary, set up Tailscale (Funnel mode) or open the firewall
+# (direct mode), write the systemd unit, enable and start the service.
 # Re-run the script to update in place.
 #
 # Supported: Linux x86_64 / aarch64 (glibc), systemd. macOS or Windows run
 # the binary directly with `./ppx-relay --bind ...` — no installer needed.
+#
+# Funnel mode requires a Tailscale account (free, https://tailscale.com).
+# The installer prints a login URL on first run; open it in any browser to
+# authenticate this machine, then the script resumes automatically. For
+# unattended installs pass --tailscale-authkey tskey-... — generate one in
+# the Tailscale admin panel under Settings → Keys.
 
 set -euo pipefail
 IFS=$' \t\n'
@@ -26,12 +34,21 @@ REPO="${PPX_REPO:-PolderLabsVOF/ppexchanger}"
 VERSION="${PPX_VERSION:-latest}"
 BIND_DEFAULT="127.0.0.1"
 PORT_DEFAULT="47393"
+FUNNEL_PORT_DEFAULT="10000"   # Tailscale Funnel only accepts 443/8443/10000.
 MAX_CLIENTS_DEFAULT="128"
 MAX_PER_IP_DEFAULT="16"
 
 # Detect install mode up front: --user skips root, --system requires sudo.
 SYSTEM_LEVEL=auto
 AUTO_YES=0
+
+# Exposure mode:
+#   auto    — picked interactively (Tailscale Funnel if a TTY, else direct)
+#   direct  — bind a local address; firewall opens inbound TCP
+#   funnel  — install/configure Tailscale, expose via Funnel (port 10000)
+# `auto` is the default so the guided prompt can recommend Funnel.
+EXPOSURE_MODE=auto
+TS_AUTHKEY="${PPX_TS_AUTHKEY:-}"
 
 # Pre-set configuration (overridden by CLI flags or interactive prompts).
 BIND="$BIND_DEFAULT"
@@ -41,6 +58,8 @@ MAX_PER_IP="$MAX_PER_IP_DEFAULT"
 DO_START=1
 DO_FIREWALL=auto
 PRINT_ONLY=0
+BIND_EXPLICIT=0   # 1 when --bind (or the auto prompt) chose a value
+PORT_EXPLICIT=0   # 1 when --port (or the auto prompt) chose a value
 
 # ANSI colour helpers — used only when stdout is a terminal.
 if [ -t 1 ]; then
@@ -62,41 +81,72 @@ USAGE:
         | sudo bash
     sudo bash install-relay.sh --bind 0.0.0.0 --port 47393 \\
         --max-clients 256 --max-per-ip 8
+    sudo bash install-relay.sh --funnel
+    sudo bash install-relay.sh --funnel --tailscale-authkey tskey-...
 
 OPTIONS:
-    --bind <addr>        Bind address for incoming TCP.
+    --funnel              Expose the relay publicly via Tailscale Funnel on
+                          port ${FUNNEL_PORT_DEFAULT}. The installer downloads
+                          and configures Tailscale, opens the browser-login
+                          URL, and runs \`tailscale funnel --tcp=<port>\`.
+                          The relay binds 127.0.0.1 only; no firewall rule.
+    --direct              Bind a local address and open the firewall
+                          (the classic mode; see --bind).
+    --tailscale-authkey   tskey-auth-... value to authenticate the node
+                          non-interactively. Only meaningful with --funnel.
+                          Without it, the installer prints a login URL.
+    --bind <addr>         Bind address for incoming TCP (direct mode).
                           Default: ${BIND_DEFAULT} (loopback only; local testing).
                           Use 0.0.0.0 to accept connections on every interface
                           (typical for a public self-hosted relay). IPv6
                           listening is supported by the binary but loopback /
                           dual-stack are the common cases.
-    --port <port>        TCP port. Default: ${PORT_DEFAULT}.
-    --max-clients N      Maximum concurrent waiting + paired sockets.
+    --port <port>         TCP port. Default: ${PORT_DEFAULT}.
+                          In --funnel mode the port is forced to
+                          ${FUNNEL_PORT_DEFAULT} (Tailscale Funnel only allows
+                          443, 8443, 10000).
+    --max-clients N       Maximum concurrent waiting + paired sockets.
                           Default: ${MAX_CLIENTS_DEFAULT}.
-    --max-per-ip N       Maximum admitted sockets per source IP.
+    --max-per-ip N        Maximum admitted sockets per source IP.
                           Default: ${MAX_PER_IP_DEFAULT}.
-    --user               Install as a user systemd service (\$XDG_CONFIG_HOME/systemd).
+    --user                Install as a user systemd service (\$XDG_CONFIG_HOME/systemd).
                           Skips sudo when systemd is available for the current user.
-    --system             Install as a system systemd service (requires sudo/root).
+    --system              Install as a system systemd service (requires sudo/root).
                           Default mode when running as root.
-    --no-firewall        Do not add a firewall rule. Default: opens the port
-                          via ufw / firewalld / iptables when available.
-    --no-start           Write the unit file but do not enable or start it.
-    --yes                Accept all prompts with defaults (no interactive Q&A).
-    --print-tag          Resolve the latest (or pinned) tag and print it.
-    --uninstall          Remove the binary and the systemd unit.
-    --help               Show this help.
+    --no-firewall         Do not add a firewall rule (direct mode only).
+                          Default: opens the port via ufw / firewalld / iptables.
+    --no-start            Write the unit file but do not enable or start it.
+    --yes                 Accept all prompts with defaults (no interactive Q&A).
+                          With --yes and no --funnel flag, defaults to direct.
+    --print-tag           Resolve the latest (or pinned) tag and print it.
+    --tag <tag>           Install a specific tag (for example v0.7.11-beta.1).
+                          Default: latest stable release.
+    --uninstall           Remove the binary, the systemd unit, and (if it
+                          was set up by this script) the Tailscale Funnel.
+    --help                Show this help.
 
 ENV:
-    PPX_REPO        GitHub owner/name (default: ${REPO})
-    PPX_VERSION     Specific tag (default: latest)
-    PPX_YES         1 behaves like --yes
-    PPX_NO_FIREWALL 1 behaves like --no-firewall
+    PPX_REPO             GitHub owner/name (default: ${REPO})
+    PPX_VERSION          Specific tag (default: latest)
+    PPX_YES              1 behaves like --yes
+    PPX_NO_FIREWALL      1 behaves like --no-firewall
+    PPX_TS_AUTHKEY       tskey-auth-... (alternative to --tailscale-authkey)
 
 EXAMPLES:
-    # Public self-hosted relay on a VPS:
+    # Guided install on a fresh VPS (interactive):
+    curl -fsSL https://github.com/${REPO}/releases/latest/download/install-relay.sh \\
+        | sudo bash
+
+    # Public self-hosted relay on a VPS (no Tailscale):
     curl -fsSL https://github.com/${REPO}/releases/latest/download/install-relay.sh \\
         | sudo bash -s -- --bind 0.0.0.0
+
+    # Public relay exposed via Tailscale Funnel (free, hides the VPS IP):
+    curl -fsSL https://github.com/${REPO}/releases/latest/download/install-relay.sh \\
+        | sudo bash -s -- --funnel
+
+    # Same as above but unattended (CI / fleet provisioning):
+    sudo bash install-relay.sh --funnel --tailscale-authkey tskey-auth-...
 
     # Local testing (loopback only, no firewall rule):
     curl -fsSL https://github.com/${REPO}/releases/latest/download/install-relay.sh \\
@@ -105,8 +155,9 @@ EXAMPLES:
     # Personal VPS as a non-root user:
     bash install-relay.sh --user --bind 0.0.0.0
 
-    # Pin a specific release (e.g. rollback):
+    # Pin a specific release (e.g. rollback or install a beta):
     sudo bash install-relay.sh --tag v0.7.10
+    sudo bash install-relay.sh --funnel --tag v0.7.11-beta.1
 EOF
 }
 
@@ -116,25 +167,36 @@ EOF
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
-            --bind)        BIND="${2:?--bind needs an address}"; shift 2 ;;
-            --bind=*)      BIND="${1#--bind=}"; shift ;;
-            --port)        PORT="${2:?--port needs a number}"; shift 2 ;;
-            --port=*)      PORT="${1#--port=}"; shift ;;
-            --max-clients) MAX_CLIENTS="${2:?--max-clients needs a number}"; shift 2 ;;
-            --max-clients=*) MAX_CLIENTS="${1#--max-clients=}"; shift ;;
-            --max-per-ip)  MAX_PER_IP="${2:?--max-per-ip needs a number}"; shift 2 ;;
-            --max-per-ip=*) MAX_PER_IP="${1#--max-per-ip=}"; shift ;;
-            --user)        SYSTEM_LEVEL=user; shift ;;
-            --system)      SYSTEM_LEVEL=system; shift ;;
-            --no-firewall) DO_FIREWALL=off; shift ;;
-            --no-start)    DO_START=0; shift ;;
-            --yes)         AUTO_YES=1; shift ;;
-            --print-tag)   PRINT_ONLY=1; shift ;;
-            --uninstall)   DO_UNINSTALL=1; shift ;;
-            --help|-h)     usage; exit 0 ;;
-            *)             die "unknown option: $1 (try --help)" ;;
+            --funnel)               EXPOSURE_MODE=funnel; shift ;;
+            --direct)               EXPOSURE_MODE=direct; shift ;;
+            --tailscale-authkey)    TS_AUTHKEY="${2:?--tailscale-authkey needs a key}"; shift 2 ;;
+            --tailscale-authkey=*)  TS_AUTHKEY="${1#--tailscale-authkey=}"; shift ;;
+            --bind)                 BIND="${2:?--bind needs an address}"; BIND_EXPLICIT=1; shift 2 ;;
+            --bind=*)               BIND="${1#--bind=}"; BIND_EXPLICIT=1; shift ;;
+            --port)                 PORT="${2:?--port needs a number}"; PORT_EXPLICIT=1; shift 2 ;;
+            --port=*)               PORT="${1#--port=}"; PORT_EXPLICIT=1; shift ;;
+            --max-clients)          MAX_CLIENTS="${2:?--max-clients needs a number}"; shift 2 ;;
+            --max-clients=*)        MAX_CLIENTS="${1#--max-clients=}"; shift ;;
+            --max-per-ip)           MAX_PER_IP="${2:?--max-per-ip needs a number}"; shift 2 ;;
+            --max-per-ip=*)         MAX_PER_IP="${1#--max-per-ip=}"; shift ;;
+            --user)                 SYSTEM_LEVEL=user; shift ;;
+            --system)               SYSTEM_LEVEL=system; shift ;;
+            --no-firewall)          DO_FIREWALL=off; shift ;;
+            --no-start)             DO_START=0; shift ;;
+            --yes)                  AUTO_YES=1; shift ;;
+            --print-tag)            PRINT_ONLY=1; shift ;;
+            --tag)                  VERSION="${2:?--tag needs a tag like v0.7.11-beta.1}"; shift 2 ;;
+            --tag=*)                VERSION="${1#--tag=}"; shift ;;
+            --uninstall)            DO_UNINSTALL=1; shift ;;
+            --help|-h)              usage; exit 0 ;;
+            *)                      die "unknown option: $1 (try --help)" ;;
         esac
     done
+
+    # Funnel and --bind are mutually exclusive: Funnel needs loopback.
+    if [ "$EXPOSURE_MODE" = "funnel" ] && [ "$BIND_EXPLICIT" -eq 1 ]; then
+        die "--funnel ignores --bind (Tailscale Funnel requires 127.0.0.1)"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -216,24 +278,53 @@ prompt_if_needed() {
     echo
 
     local answer
-    printf '%sWhere should the relay listen?\n%s' "$BOLD" "$RESET"
-    printf '  1) 127.0.0.1:%s  — loopback only. Pick this for local testing on this machine.\n' "$PORT"
-    printf '  2) 0.0.0.0:%s    — every interface. Required when remote PPX clients connect.\n' "$PORT"
-    printf '     Open inbound TCP %s on this host'\''s firewall AND on the cloud-provider panel.\n' "$PORT"
-    printf '  3) Custom IPv4 / IPv6 bind address (for example [::]:%s for IPv6).\n' "$PORT"
-    printf 'Choice [1]: '
-    read -r answer
-    case "${answer:-1}" in
-        1|"") BIND="$BIND_DEFAULT" ;;
-        2)    BIND="0.0.0.0" ;;
-        3)    printf 'Bind address: '; read -r BIND
-              [ -n "$BIND" ] || die "bind address cannot be empty" ;;
-        *)    die "unknown choice: $answer" ;;
-    esac
+    if [ "$EXPOSURE_MODE" = "auto" ]; then
+        printf '%sHow should the relay be exposed to a peer?\n%s' "$BOLD" "$RESET"
+        printf '  1) Tailscale Funnel (recommended) — relay listens on 127.0.0.1; Tailscale\n'
+        printf '     forwards public TCP traffic from <node>.<tailnet>.ts.net:%s to it.\n' "$FUNNEL_PORT_DEFAULT"
+        printf '     No port forwarding, no firewall rule, no public IP exposed.\n'
+        printf '     Requires a free Tailscale account; first run prints a login URL.\n'
+        printf '  2) Direct bind — listen on a local address and open the firewall.\n'
+        printf '     0.0.0.0 is typical when remote PPX clients connect over the Internet.\n'
+        printf '  3) Loopback only — local testing on this machine.\n'
+        printf '  4) Custom bind address — IPv4 or IPv6 literal.\n'
+        printf 'Choice [1]: '
+        read -r answer
+        case "${answer:-1}" in
+            1|"") EXPOSURE_MODE=funnel ;;
+            2)    EXPOSURE_MODE=direct; BIND="0.0.0.0"; BIND_EXPLICIT=1 ;;
+            3)    EXPOSURE_MODE=direct; BIND="$BIND_DEFAULT"; BIND_EXPLICIT=1 ;;
+            4)    EXPOSURE_MODE=direct
+                  printf 'Bind address: '; read -r BIND
+                  [ -n "$BIND" ] || die "bind address cannot be empty"
+                  BIND_EXPLICIT=1 ;;
+            *)    die "unknown choice: $answer" ;;
+        esac
+    fi
 
-    printf '%sPort [default %s]:%s ' "$BOLD" "$PORT_DEFAULT" "$RESET"
-    read -r answer
-    PORT="${answer:-$PORT_DEFAULT}"
+    if [ "$EXPOSURE_MODE" = "funnel" ]; then
+        # Funnel forces loopback + port 10000. parse_args already rejected
+        # an explicit --bind; do the same for --port here so interactive
+        # users get the same fast-fail.
+        if [ "$PORT_EXPLICIT" -eq 1 ] && [ "$PORT" != "$FUNNEL_PORT_DEFAULT" ]; then
+            die "--port $PORT is not allowed with --funnel (Tailscale Funnel only accepts 443/8443/$FUNNEL_PORT_DEFAULT)"
+        fi
+        PORT="$FUNNEL_PORT_DEFAULT"
+        PORT_EXPLICIT=1
+        BIND="$BIND_DEFAULT"
+        BIND_EXPLICIT=1
+    else
+        if [ "$BIND_EXPLICIT" -eq 0 ]; then
+            printf '%sBind address [default %s]:%s ' "$BOLD" "$BIND_DEFAULT" "$RESET"
+            read -r answer
+            BIND="${answer:-$BIND_DEFAULT}"
+        fi
+        if [ "$PORT_EXPLICIT" -eq 0 ]; then
+            printf '%sPort [default %s]:%s ' "$BOLD" "$PORT_DEFAULT" "$RESET"
+            read -r answer
+            PORT="${answer:-$PORT_DEFAULT}"
+        fi
+    fi
 
     printf '%sMax concurrent clients (waiting + paired) [default %s]:%s ' \
         "$BOLD" "$MAX_CLIENTS_DEFAULT" "$RESET"
@@ -247,13 +338,14 @@ prompt_if_needed() {
 
     echo
     log "About to install with these settings:"
-    printf '  bind       = %s:%s\n' "$BIND" "$PORT"
+    printf '  mode        = %s\n' "$EXPOSURE_MODE"
+    printf '  bind        = %s:%s\n' "$BIND" "$PORT"
     printf '  max_clients = %s\n' "$MAX_CLIENTS"
     printf '  max_per_ip  = %s\n' "$MAX_PER_IP"
     if [ "$SYSTEM_LEVEL" = "user" ]; then
-        printf '  mode        = user systemd service (no root)\n'
+        printf '  service     = user systemd service (no root)\n'
     else
-        printf '  mode        = system systemd service (root)\n'
+        printf '  service     = system systemd service (root)\n'
     fi
     printf 'Proceed? [Y/n]: '
     read -r answer
@@ -491,6 +583,151 @@ open_firewall_port() {
 }
 
 # ---------------------------------------------------------------------------
+# Tailscale Funnel setup. Installs Tailscale if missing, authenticates the
+# node (browser login by default, auth key with --tailscale-authkey), and
+# enables raw TCP Funnel forwarding from <node>.<tailnet>.ts.net:$PORT to
+# 127.0.0.1:$PORT. Sets $PUBLIC_HOSTNAME for the final report.
+# ---------------------------------------------------------------------------
+ts_authenticated() {
+    # "BackendState": "Running" means tailscaled finished auth + key expiry.
+    tailscale status --json 2>/dev/null \
+        | grep -q '"BackendState": "Running"'
+}
+
+ts_wait_for_auth() {
+    local deadline=$((SECONDS + 600))   # 10 minutes to click the email link
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if ts_authenticated; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+ts_install() {
+    if command -v tailscale >/dev/null 2>&1; then
+        ok "tailscale present: $(tailscale version 2>/dev/null | head -n1)"
+        return 0
+    fi
+    log "installing Tailscale (official script)..."
+    if [ "$SYSTEM_LEVEL" = "system" ]; then
+        curl "${CURL_COMMON[@]}" -fsSL https://tailscale.com/install.sh \
+            | sh >/dev/null \
+            || die "Tailscale install script failed. Install manually: https://tailscale.com/download/linux"
+    else
+        warn "user-mode install: Tailscale must already be installed and reachable."
+        command -v tailscale >/dev/null 2>&1 \
+            || die "tailscale binary not found in PATH; install it first or rerun with sudo."
+    fi
+    ok "tailscale installed: $(tailscale version 2>/dev/null | head -n1)"
+}
+
+ts_ensure_running() {
+    # systemctl is-active tailscaled returns "active" or "inactive" or an error.
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl is-active --quiet tailscaled \
+            || systemctl enable --now tailscaled >/dev/null 2>&1 \
+            || true
+    fi
+    # Bring up the daemon if it is not yet running. `tailscale up` will error
+    # with a clear message if tailscaled is unreachable.
+    if ! ts_authenticated; then
+        log "starting tailscaled..."
+        tailscaled --state=/var/lib/tailscale/tailscaled.state >/dev/null 2>&1 &
+        sleep 2
+    fi
+}
+
+ts_authenticate() {
+    if ts_authenticated; then
+        ok "Tailscale already authenticated"
+        return 0
+    fi
+    if [ -n "$TS_AUTHKEY" ]; then
+        log "authenticating with provided auth key..."
+        tailscale up --authkey="$TS_AUTHKEY" --timeout=2m \
+            || die "tailscale up --authkey failed; check the key and tailnet ACL."
+        ok "authenticated via auth key"
+        return 0
+    fi
+
+    # Browser-login flow. tailscale up prints the URL to stderr and blocks
+    # waiting for the user to click it in any browser. Run it in the
+    # background so the URL appears on the operator's terminal and we can
+    # poll for completion.
+    log "opening Tailscale browser login..."
+    log "watch this terminal — a tailscale.com login URL will appear in a moment."
+    log "open it in any browser, sign in, and approve this device."
+    tailscale up --timeout=10m >/dev/null 2>&1 &
+    local up_pid=$!
+
+    if ts_wait_for_auth; then
+        kill "$up_pid" 2>/dev/null || true
+        wait "$up_pid" 2>/dev/null || true
+        ok "authenticated via browser login"
+        return 0
+    fi
+
+    kill "$up_pid" 2>/dev/null || true
+    wait "$up_pid" 2>/dev/null || true
+    die "Tailscale login did not complete in 10 minutes. Re-run the installer or use --tailscale-authkey for unattended installs."
+}
+
+ts_enable_funnel() {
+    log "enabling Tailscale Funnel for TCP ${PORT} -> ${BIND}:${PORT}..."
+    # Funnel requires MagicDNS and a Tailscale account that has Funnel
+    # enabled (admin must allow it in the Tailscale admin panel for
+    # personal/free tailnets; paid plans enable it by default).
+    if ! tailscale funnel --bg --tcp="$PORT" "${BIND}:${PORT}" 2>&1; then
+        die "tailscale funnel failed. If your tailnet has Funnel disabled, enable it at https://login.tailscale.com/admin/acls/file (or under Settings → Funnel)."
+    fi
+    ok "Funnel forwarding TCP ${PORT} -> ${BIND}:${PORT}"
+}
+
+ts_public_hostname() {
+    # tailscale status --json has Self.MagicDNSSuffix (e.g. "tail.ts.net.")
+    # and Self.NodeName (FQDN with trailing dot). The Funnel hostname is
+    # <short-name>.<MagicDNSSuffix-without-trailing-dot>.
+    local status_json short suffix
+    status_json="$(tailscale status --json 2>/dev/null)" || return 1
+    # Prefer NodeName and MagicDNSSuffix which are always present post-auth.
+    short="$(printf '%s' "$status_json" \
+        | python3 -c 'import json,sys; d=json.load(sys.stdin); n=d["Self"]["NodeName"].rstrip("."); s=d["Self"]["MagicDNSSuffix"].rstrip("."); print(f"{n}.{s}" if s and n else "")' 2>/dev/null)"
+    if [ -n "$short" ]; then
+        printf '%s' "$short"
+        return 0
+    fi
+    # Last-resort fallback: scrape the funnel status output.
+    tailscale funnel status 2>/dev/null \
+        | grep -oE '[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+\.ts\.net' \
+        | head -n1
+}
+
+setup_tailscale_funnel() {
+    ts_install
+    ts_ensure_running
+    ts_authenticate
+    ts_enable_funnel
+
+    PUBLIC_HOSTNAME="$(ts_public_hostname || true)"
+    if [ -z "$PUBLIC_HOSTNAME" ]; then
+        warn "could not auto-discover Funnel hostname. Run: tailscale status"
+        PUBLIC_HOSTNAME="<node>.<tailnet>.ts.net"
+    fi
+    ok "public Funnel address: ${PUBLIC_HOSTNAME}:${PORT}"
+}
+
+teardown_tailscale_funnel() {
+    if command -v tailscale >/dev/null 2>&1; then
+        tailscale funnel --tcp="$PORT" off 2>/dev/null \
+            || tailscale funnel off 2>/dev/null \
+            || warn "could not disable Funnel — run: tailscale funnel off"
+        ok "Tailscale Funnel disabled"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Final report — tells the operator what is installed, how to verify, and
 # what to share with a peer.
 # ---------------------------------------------------------------------------
@@ -503,6 +740,8 @@ final_report() {
     printf '%sInstalled binary:%s   %s\n' "$BOLD" "$RESET" "$INSTALLED"
     printf '%sService:%s           %s\n' "$BOLD" "$RESET" \
         "$( [ "$SYSTEM_LEVEL" = "user" ] && echo 'user' || echo 'system' ) ppx-relay.service"
+    printf '%sExposure:%s          %s\n' "$BOLD" "$RESET" \
+        "$( [ "$EXPOSURE_MODE" = "funnel" ] && echo "Tailscale Funnel" || echo "direct bind" )"
     printf '%sListening on:%s      %s:%s\n' "$BOLD" "$RESET" "$BIND" "$PORT"
     printf '%sLimits:%s             %s clients, %s per IP\n' \
         "$BOLD" "$RESET" "$MAX_CLIENTS" "$MAX_PER_IP"
@@ -510,6 +749,9 @@ final_report() {
     printf '%sVerify it is running:%s\n' "$BOLD" "$RESET"
     printf '    systemctl %s status ppx-relay\n' "$scope"
     printf '    journalctl -u ppx-relay -n 50 --no-pager\n'
+    if [ "$EXPOSURE_MODE" = "funnel" ]; then
+        printf '    tailscale funnel status\n'
+    fi
     echo
     printf '%sShare with a peer:%s\n' "$BOLD" "$RESET"
     printf '    1. On this relay host, run:  ppx --relay-token\n'
@@ -520,8 +762,13 @@ final_report() {
     printf '           room   = "<token from ppx --relay-token>"\n'
     printf '           peer_key = "<other side'\''s 64-hex public key from ppx --gen-identity>"\n'
     echo
-    printf '%sUpdate later:%s       rerun this script (idempotent).\n' "$BOLD" "$RESET"
-    printf '%sUninstall:%s          bash install-relay.sh --uninstall\n' "$BOLD" "$RESET"
+    if [ "$EXPOSURE_MODE" = "funnel" ]; then
+        printf '%sUpdate later:%s       rerun this script (idempotent).\n' "$BOLD" "$RESET"
+        printf '%sUninstall:%s          bash install-relay.sh --uninstall (also disables Funnel)\n' "$BOLD" "$RESET"
+    else
+        printf '%sUpdate later:%s       rerun this script (idempotent).\n' "$BOLD" "$RESET"
+        printf '%sUninstall:%s          bash install-relay.sh --uninstall\n' "$BOLD" "$RESET"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -558,6 +805,20 @@ do_install() {
     prompt_if_needed
     validate_inputs
 
+    # Resolve any remaining "auto" — non-interactive runs (--yes, piped from
+    # curl) default to direct-bind loopback. To use Funnel non-interactively,
+    # the operator must pass --funnel (and ideally --tailscale-authkey).
+    if [ "$EXPOSURE_MODE" = "auto" ]; then
+        EXPOSURE_MODE=direct
+        BIND="$BIND_DEFAULT"
+    fi
+
+    # Funnel mode forces loopback + port 10000 and a fresh state.
+    if [ "$EXPOSURE_MODE" = "funnel" ]; then
+        BIND="$BIND_DEFAULT"
+        PORT="$FUNNEL_PORT_DEFAULT"
+    fi
+
     TARGET="$(detect_target_triple)"
     download_release "$TARGET"
     install_binary
@@ -566,16 +827,21 @@ do_install() {
         write_unit
         enable_and_start
         verify_listening "$PORT" || true
-        open_firewall_port
     else
         warn "systemd missing — wrote no unit. Start ${INSTALLED} manually."
     fi
 
-    # Best-effort: figure out the public hostname so the operator knows what
-    # to share. Never fatal — a LAN-only relay has nothing public.
-    PUBLIC_HOSTNAME="$BIND"
-    if [ "$BIND" = "0.0.0.0" ] || [ "$BIND" = "::" ]; then
-        PUBLIC_HOSTNAME="${PUBLIC_HOSTNAME_OVERRIDE:-$(hostname -f 2>/dev/null || hostname || echo this-host)}"
+    if [ "$EXPOSURE_MODE" = "funnel" ]; then
+        setup_tailscale_funnel
+        # Funnel replaces the firewall; the relay stays on loopback.
+    else
+        open_firewall_port
+        # Best-effort: figure out the public hostname so the operator knows
+        # what to share. Never fatal — a LAN-only relay has nothing public.
+        PUBLIC_HOSTNAME="$BIND"
+        if [ "$BIND" = "0.0.0.0" ] || [ "$BIND" = "::" ]; then
+            PUBLIC_HOSTNAME="${PUBLIC_HOSTNAME_OVERRIDE:-$(hostname -f 2>/dev/null || hostname || echo this-host)}"
+        fi
     fi
 
     final_report
@@ -602,6 +868,21 @@ do_uninstall() {
             ok "removed $cand"
         fi
     done
+    # Best-effort: tear down Funnel if it looks like this script set it up.
+    # The Funnel rule is keyed by the port we used; try both 10000 and the
+    # legacy default 47393 just in case.
+    if command -v tailscale >/dev/null 2>&1; then
+        for p in "$FUNNEL_PORT_DEFAULT" "$PORT_DEFAULT"; do
+            tailscale funnel --tcp="$p" off 2>/dev/null || true
+        done
+        # `funnel off` clears everything (HTTP+HTTPS+TCP). Use it only if no
+        # other Funnel services are running on this tailnet — keep it last.
+        if tailscale funnel status 2>/dev/null | grep -q .; then
+            : # leave any other Funnel services intact
+        else
+            tailscale funnel off 2>/dev/null || true
+        fi
+    fi
     log "uninstall complete"
 }
 

@@ -2,6 +2,12 @@
 
 All notable ppexchanger updates are listed here in plain language.
 
+## 0.7.11-beta.1 — 2026-09-05 — Tailscale Funnel install mode
+
+- `install-relay.sh --funnel` exposes the relay publicly via Tailscale Funnel on TCP port 10000 — no port forwarding, no firewall rule, no public IP revealed. The installer downloads Tailscale, prints a browser-login URL on the operator's terminal, waits for auth, and runs `tailscale funnel --bg --tcp=10000 127.0.0.1:10000`.
+- Pass `--tailscale-authkey tskey-...` for unattended installs (CI / fleet provisioning).
+- The interactive prompt now asks the exposure mode first; Funnel is the recommended default. Existing `--bind`/`--direct`/`--yes` invocations behave as before.
+
 ## 0.7.10 — 2026-09-05 — relay installer
 
 - New `install-relay.sh` does a guided, one-line install of the self-hosted relay: download, checksum, install, write a hardened systemd unit, open the firewall, start the service.

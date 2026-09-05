@@ -8,18 +8,38 @@ The relay is not a general proxy: it only joins the two clients in the same room
 
 ### One-line install (recommended)
 
-A guided installer downloads the binary, asks four questions, writes a hardened systemd unit, opens the firewall, and starts the service:
+A guided installer downloads the binary, asks which exposure mode you want (Tailscale Funnel is recommended), writes a hardened systemd unit, sets up Tailscale (Funnel mode) or opens the firewall (direct mode), and starts the service:
 
 ```sh
 curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download/install-relay.sh | sudo bash
 ```
 
-Without flags, the installer asks for bind address, port, maximum concurrent clients, and maximum clients per source IP, then applies the answers. Pass `--yes` to accept defaults non-interactively, or pre-answer with flags such as `--bind 0.0.0.0 --max-clients 256`. Run `install-relay.sh --help` for the full list.
+Without flags, the installer prompts you to pick a mode. Pass `--yes` to skip the prompts and use the defaults, or pre-answer with flags such as `--bind 0.0.0.0 --max-clients 256`. Run `install-relay.sh --help` for the full list.
 
-For a public relay, explicitly choose its public bind address and limits:
+### Tailscale Funnel (recommended for most setups)
+
+Funnel exposes the relay on the public Internet through Tailscale's edge. No port forwarding, no firewall rule, no public IP revealed. Requires a free Tailscale account.
 
 ```sh
-sudo bash install-relay.sh --bind 0.0.0.0:47393 --max-clients 256 --max-per-ip 8
+sudo bash install-relay.sh --funnel
+```
+
+The installer downloads Tailscale, starts `tailscaled`, prints a login URL on the operator's terminal, and resumes automatically once the browser-login completes. The relay binds `127.0.0.1:10000` and Tailscale forwards `tcp://<node>.<tailnet>.ts.net:10000` to it. The final report shows the public `<node>.<tailnet>.ts.net:10000` address to share with the peer.
+
+For unattended installs (CI, fleet provisioning), pass a Tailscale auth key:
+
+```sh
+sudo bash install-relay.sh --funnel --tailscale-authkey tskey-auth-...
+```
+
+The admin who generates the key may need to enable Funnel for the tailnet in the Tailscale admin panel (Settings → Funnel) — Funnel is free for personal and most paid plans.
+
+### Direct bind
+
+Bind a local address and open the firewall. Use this when you want to expose the relay on a specific VPS without Tailscale.
+
+```sh
+sudo bash install-relay.sh --bind 0.0.0.0 --port 47393 --max-clients 256 --max-per-ip 8
 ```
 
 The installer opens inbound TCP port 47393 via ufw, firewalld, or iptables when available. Open the same port on any provider or cloud panel that fronts the relay host. PPX clients only need normal outbound TCP access.

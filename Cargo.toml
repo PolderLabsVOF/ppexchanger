@@ -1,6 +1,6 @@
 [package]
 name = "ppexchanger"
-version = "0.7.10"
+version = "0.7.11-beta.1"
 edition = "2021"
 default-run = "ppx"
 description = "Fully-local, fully-encrypted LAN P2P terminal messenger (Rust)"
