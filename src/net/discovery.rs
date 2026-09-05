@@ -1,7 +1,7 @@
 //! UDP multicast peer discovery.
 //!
 //! Every `ppexchanger` instance joins the multicast group `239.255.42.99` on
-//! port `7777` and announces itself by periodically broadcasting a
+//! port `47391` and announces itself by periodically broadcasting a
 //! `protocol::Beacon`. Received beacons (from other peers) are yielded to
 //! callers via `recv_beacons`.
 //!
@@ -20,10 +20,10 @@ use std::time::{Duration, Instant};
 
 /// Multicast group used by every `ppexchanger` instance.
 pub const MULTICAST_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 42, 99);
-pub const MULTICAST_PORT: u16 = 7777;
+pub const MULTICAST_PORT: u16 = 47391;
 /// Stable unicast control port for reverse-connect requests. Keeping this
 /// separate from multicast and TCP makes host-firewall rules predictable.
-pub const CONTROL_PORT: u16 = 7778;
+pub const CONTROL_PORT: u16 = 47392;
 const REVERSE_MAGIC: &[u8; 4] = b"PPXR";
 const REVERSE_ACK_MAGIC: &[u8; 4] = b"PPXA";
 

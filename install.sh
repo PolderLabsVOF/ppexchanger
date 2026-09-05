@@ -71,7 +71,7 @@ OPTIONS:
     --print-tag         Resolve the latest (or pinned) tag and print it, then exit.
                         Useful in CI:  TAG=\$(curl -fsSL .../install.sh | bash -s -- --print-tag)
     --firewall          On Windows: add a Windows Firewall inbound-allow rule for
-                        ppx's TCP port (default 7777) so peers on the LAN can dial
+                        ppx's TCP port (default 47391) so peers on the LAN can dial
                         in. Requires admin (a UAC prompt will appear). Idempotent.
                         No-op on Linux/macOS.
                         Default behavior (no flag): on Windows when stdin is a TTY,
@@ -398,7 +398,7 @@ install_from_source() {
 # Add a Windows Firewall inbound-allow rule for ppx's TCP port so peers
 # on the LAN can dial in. Default Windows policy drops unsolicited
 # inbound, so without this rule /discover shows zero peers even though
-# the host is up and ppx is bound to 7777.
+# the host is up and ppx is bound to 47391.
 #
 # Requires admin (a UAC prompt appears via PowerShell Start-Process
 # -Verb RunAs). Idempotent — re-running with an existing rule just
@@ -410,9 +410,9 @@ install_from_source() {
 add_firewall_rule() {
     # Resolve the port: prefer --port from the installer's known port
     # by sniffing the installed binary's --version output (which prints
-    # the version, not the port). Fall back to 7777 — the default that
+    # the version, not the port). Fall back to 47391 — the default that
     # every unflagged `ppx` invocation uses.
-    local port=7777
+    local port=47391
     # `INSTALLED_VER` is set by `install_binary_file` when the smoke
     # test passes. The port isn't in the version string, so we use the
     # default and let users who bound a custom port opt in with the
@@ -565,7 +565,7 @@ install_binary_file() {
                 # to refuse. This is the moment a non-technical user
                 # first sees the firewall requirement and decides.
                 local answer
-                printf '%sWindows Firewall is blocking inbound TCP 7777 — peers on the LAN cannot dial in until an inbound-allow rule exists.%s\nAdd a Windows Firewall rule for ppx now? (requires admin, UAC will prompt) [Y/n] ' "$YELLOW" "$RESET"
+                printf '%sWindows Firewall is blocking inbound TCP 47391 — peers on the LAN cannot dial in until an inbound-allow rule exists.%s\nAdd a Windows Firewall rule for ppx now? (requires admin, UAC will prompt) [Y/n] ' "$YELLOW" "$RESET"
                 if read -r answer; then
                     case "${answer:-y}" in
                         n|N|no|No|NO) : ;; # declined
@@ -582,7 +582,7 @@ install_binary_file() {
                 # they can finish it themselves.
                 warn "Windows Firewall rule not added (non-interactive install)."
                 warn "to let LAN peers dial in, run once in an elevated PowerShell:"
-                warn "  netsh advfirewall firewall add rule name=\"ppexchanger (TCP/7777)\" dir=in action=allow protocol=TCP localport=7777 profile=private,domain"
+                warn "  netsh advfirewall firewall add rule name=\"ppexchanger (TCP/47391)\" dir=in action=allow protocol=TCP localport=47391 profile=private,domain"
             fi
             ;;
         *) : ;; # auto + non-Windows — silent skip

@@ -2,6 +2,11 @@
 
 All notable ppexchanger updates are listed here in plain language.
 
+## 0.7.7 — 2026-09-05
+
+- Changed the default connection and discovery port to 47391, with reverse connections on 47392.
+- Update both devices when moving from the old ports so they can discover each other.
+
 ## 0.7.6 — 2026-09-05
 
 ### Smoother conversations

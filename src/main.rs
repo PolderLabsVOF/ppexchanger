@@ -45,7 +45,7 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut name: Option<String> = None;
-    // Default port is 7777 (the documented multicast port) so two
+    // Default port is 47391 (the documented multicast port) so two
     // machines running the TUI with no flags can find each other via
     // the TCP subnet scan fallback. `0` is still accepted for ephemeral
     // binding (mostly useful for tests).
@@ -142,9 +142,10 @@ fn print_help() {
          \n\
          USAGE:\n  ppx [--name <name>] [--port <port>] [--theme <name>] [--config <path>] [--no-mouse]\n  ppx --gen-identity\n  ppx --help | --version\n\
          \n\
-         OPTIONS:\n  --name <name>     display name (overrides stored)\n  --port <port>     TCP listen port (0 = ephemeral)\n  --theme <name>    default|solarized|monochrome|neon|amber\n  --config <path>   path to config.toml (default: $XDG_CONFIG_HOME/ppexchanger/config.toml on
+         OPTIONS:\n  --name <name>     display name (overrides stored)\n  --port <port>     TCP listen port (default: {default_port}; 0 = ephemeral)\n  --theme <name>    default|solarized|monochrome|neon|amber\n  --config <path>   path to config.toml (default: $XDG_CONFIG_HOME/ppexchanger/config.toml on
                     Linux/macOS, %APPDATA%\\ppexchanger\\config.toml on Windows)\n  --no-mouse        disable mouse capture (mouse is ON by default)\n  --gen-identity    generate a new identity and exit\n  --help, -h        print this help\n  --version, -V     print version",
-        version = VERSION
+        version = VERSION,
+        default_port = ppexchanger::net::discovery::MULTICAST_PORT
     );
     println!(
         "{}",
@@ -2250,7 +2251,7 @@ fn do_discover(
 
     // Method 2: TCP subnet scan. Walks local /24 for hosts accepting TCP.
     // Probe BOTH the local beacon's announced port AND the canonical
-    // multicast port (7777). Two peers on different ports can still find
+    // multicast port (47391). Two peers on different ports can still find
     // each other: the scan covers both the custom port announced in our
     // own beacon and the well-known default a peer might be using.
     let tx_tcp = tx.clone();
@@ -2323,7 +2324,7 @@ fn multicast_scan(
     // Beacons are addressed to the well-known multicast UDP port. Binding an
     // ephemeral local port here lets us send an announcement, but guarantees
     // we never receive another machine's reply: UDP delivery is keyed by the
-    // destination port. TCP may use 7777 at the same time; it is a separate
+    // destination port. TCP may use 47391 at the same time; it is a separate
     // transport namespace.
     let mut d = Discovery::bind(ppexchanger::net::discovery::MULTICAST_PORT)?;
     let _ = d.announce_both(beacon);

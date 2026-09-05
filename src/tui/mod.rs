@@ -202,7 +202,7 @@ pub struct UiState {
     pub scanline_tick: bool,
     /// TCP port we bound for inbound peer connections. Used by the
     /// discovery-empty hint so the firewall one-liner matches the actual
-    /// listen port (default 7777, custom if the user passed `--port`).
+    /// listen port (default 47391, custom if the user passed `--port`).
     pub bound_port: u16,
     /// How many lines back from the latest message we're scrolled. `0` =
     /// pinned to bottom (latest).
@@ -811,7 +811,7 @@ impl UiState {
 
 /// Build the user-facing hint for an empty discovery. Windows users
 /// hit this when the firewall is silently dropping inbound — peers on
-/// the LAN can see *us* (we bind 7777) but we can't reach them via
+/// the LAN can see *us* (we bind 47391) but we can't reach them via
 /// the scan because nothing on the remote side is accepting the
 /// connect. Probe the rule state to avoid nagging users who already
 /// fixed it.
@@ -3649,7 +3649,7 @@ mod tests {
             peers: vec![crate::events::DiscoveredPeer {
                 name: Some("bob".into()),
                 hostname: Some("macbook".into()),
-                addr: "10.0.0.2:7777".parse().unwrap(),
+                addr: "10.0.0.2:47391".parse().unwrap(),
                 fingerprint: Some("abcd".into()),
                 reverse: None,
             }],
@@ -3683,10 +3683,10 @@ mod tests {
         });
         s.apply(&Event::PeerConnected {
             peer_id,
-            name: "peer@10.0.0.95:7777".into(),
+            name: "peer@10.0.0.95:47391".into(),
             fingerprint: "abcd".into(),
             trusted: false,
-            addr: "10.0.0.95:7777".parse().unwrap(),
+            addr: "10.0.0.95:47391".parse().unwrap(),
         });
         assert_eq!(s.peers[0].name, "macbook (berks)");
     }
@@ -3706,7 +3706,7 @@ mod tests {
             peers: vec![crate::events::DiscoveredPeer {
                 name: None,
                 hostname: None,
-                addr: "10.0.0.3:7777".parse().unwrap(),
+                addr: "10.0.0.3:47391".parse().unwrap(),
                 fingerprint: None,
                 reverse: None,
             }],
@@ -3717,14 +3717,14 @@ mod tests {
                 crate::events::DiscoveredPeer {
                     name: None,
                     hostname: None,
-                    addr: "10.0.0.3:7777".parse().unwrap(),
+                    addr: "10.0.0.3:47391".parse().unwrap(),
                     fingerprint: None,
                     reverse: None,
                 },
                 crate::events::DiscoveredPeer {
                     name: None,
                     hostname: None,
-                    addr: "10.0.0.4:7777".parse().unwrap(),
+                    addr: "10.0.0.4:47391".parse().unwrap(),
                     fingerprint: None,
                     reverse: None,
                 },

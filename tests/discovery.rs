@@ -114,3 +114,23 @@ fn reverse_connect_wildcard_target_roundtrips() {
     assert!(Discovery::request_reverse_connect(control_addr, [0u8; 16], requester_port).unwrap());
     handle.join().unwrap();
 }
+
+#[test]
+fn default_ports_and_installer_stay_in_sync() {
+    use ppexchanger::net::{discovery, firewall};
+    assert_eq!(discovery::MULTICAST_PORT, 47391);
+    assert_eq!(discovery::CONTROL_PORT, 47392);
+    assert_eq!(firewall::DEFAULT_PORT, discovery::MULTICAST_PORT);
+    assert_eq!(
+        firewall::RULE_NAME,
+        format!("ppexchanger (TCP/{})", firewall::DEFAULT_PORT)
+    );
+    assert_eq!(
+        firewall::CONTROL_RULE_NAME,
+        format!("ppexchanger (UDP/{})", discovery::CONTROL_PORT)
+    );
+    let installer = include_str!("../install.sh");
+    assert!(installer.contains(&format!("local port={}", firewall::DEFAULT_PORT)));
+    assert!(!installer.contains("7777"));
+    assert!(!installer.contains("7778"));
+}

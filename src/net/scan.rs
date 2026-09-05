@@ -123,7 +123,7 @@ pub fn scan_local_subnet(target_port: u16, _hosts_per_side: u8) -> io::Result<Ve
 }
 
 /// Scan the local subnet on every port in `ports`. Used by `/discover`
-/// so the scan catches both peers that bound the default port (7777)
+/// so the scan catches both peers that bound the default port (47391)
 /// and peers that bound a custom port announced via the local beacon.
 /// De-dupes results by `(ip, port)` so the same hit isn't reported
 /// twice when both ports land on the same address.
@@ -160,7 +160,7 @@ mod tests {
         // Stash the real scanner and replace its enumeration with a
         // loopback-prefixed seed — the public API short-circuits before
         // any network calls, so it's safe to run in CI.
-        let result = scan_loopback_offline(7777, 32).unwrap();
+        let result = scan_loopback_offline(47391, 32).unwrap();
         assert!(result.is_empty());
     }
 
@@ -216,18 +216,18 @@ mod tests {
         // exercises the dedup path with empty per-port results — confirming
         // the loop walks both ports and the seen-set doesn't blow up.
         let result = dedup_by_addr_port([
-            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 7777),
-            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 7777), // dup
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 47391),
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 47391), // dup
             SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 9000),
-            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 11), 7777),
+            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 11), 47391),
         ]);
         assert_eq!(result.len(), 3);
         assert_eq!(
             result,
             vec![
-                SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 7777),
+                SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 47391),
                 SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 9000),
-                SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 11), 7777),
+                SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 11), 47391),
             ]
         );
     }

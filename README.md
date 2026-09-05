@@ -317,7 +317,7 @@ first run. On Git Bash, that path is `/c/Users/<you>/AppData/Roaming/ppexchanger
 #### Windows Firewall
 
 Windows Firewall blocks inbound connections by default, so a freshly
-installed `ppx` will bind `0.0.0.0:7777` but no peer on the LAN can
+installed `ppx` will bind `0.0.0.0:47391` but no peer on the LAN can
 dial in until you allow inbound TCP on that port.
 
 The installer adds the rule for you on Windows. The behavior depends
@@ -335,11 +335,11 @@ on how you invoke it:
 The rule written:
 
 ```
-Name:        ppexchanger (TCP/7777)
+Name:        ppexchanger (TCP/47391)
 Direction:   in
 Action:      allow
 Protocol:    TCP
-Local port:  7777
+Local port:  47391
 Profiles:    private, domain
 ```
 
@@ -351,7 +351,7 @@ variants above): open an elevated PowerShell ("Run as administrator")
 and run:
 
 ```powershell
-netsh advfirewall firewall add rule name="ppexchanger (TCP/7777)" dir=in action=allow protocol=TCP localport=7777 profile=private,domain
+netsh advfirewall firewall add rule name="ppexchanger (TCP/47391)" dir=in action=allow protocol=TCP localport=47391 profile=private,domain
 ```
 
 The same one-liner is also shown in the `/discover` popup if a scan
@@ -361,7 +361,7 @@ already in place so you won't be nagged once the install is healthy.
 UDP multicast discovery (used by `/discover`) is often blocked even
 when the TCP rule is allowed; in that case the popup falls back to
 the TCP subnet scan, which reaches any peer whose firewall accepts
-inbound TCP/7777.
+inbound TCP/47391.
 
 ### From source
 
@@ -412,7 +412,7 @@ cargo build --release
 ```sh
 ppx                      # start the TUI
 ppx --name alice         # override display name
-ppx --port 7777          # bind a specific TCP port
+ppx --port 47391         # bind a specific TCP port
 ppx --theme amber        # default | solarized | monochrome | neon | amber
 ppx --config /tmp/c.toml # alternate config path
 ppx --no-mouse           # disable ppx mouse capture for pure native selection
@@ -558,7 +558,7 @@ directory).
 Discovery is **manual**. Press `/discover` (or use the command in any
 context) to fan out two scans:
 
-1. **UDP multicast** — sends one beacon to `239.255.42.99:7777` and
+1. **UDP multicast** — sends one beacon to `239.255.42.99:47391` and
    listens for ~3 seconds. Works on most flat LANs.
 2. **TCP subnet scan** — walks the local IPv4 /24 around the host's
    outbound IP, probing each host for an open TCP listener on the
@@ -661,3 +661,14 @@ src/
 ## License
 
 MIT.
+
+### Default network ports
+
+ppx uses **47391/TCP** for connections, **47391/UDP** for discovery, and
+**47392/UDP** for reverse-connect requests. Use `ppx --port <port>` to
+override the TCP listener; discovery and control use their fixed ports.
+
+When upgrading from a version that used ports 7777/7778, update both devices
+so automatic discovery and reverse connections use the same ports. Existing
+custom TCP ports remain supported. Firewalls must allow the new ports; an
+existing rule for the old port does not cover the new one.

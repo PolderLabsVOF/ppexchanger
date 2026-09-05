@@ -1,7 +1,7 @@
 //! Windows Firewall integration.
 //!
 //! On Windows the default inbound policy is to drop unsolicited connections,
-//! so a freshly installed `ppx` will bind 7777 but no peer on the LAN can
+//! so a freshly installed `ppx` will bind 47391 but no peer on the LAN can
 //! dial in until the user adds an inbound-allow rule. The installer can do
 //! this automatically (`install.sh --firewall`); the TUI also surfaces a
 //! one-line hint when `/discover` finds zero peers so a user who runs ppx
@@ -20,8 +20,8 @@ use std::io;
 
 /// Stable name for the inbound rule — same string the installer uses, so a
 /// user can `netsh advfirewall firewall show rule name=ppx` to inspect.
-pub const RULE_NAME: &str = "ppexchanger (TCP/7777)";
-pub const CONTROL_RULE_NAME: &str = "ppexchanger (UDP/7778)";
+pub const RULE_NAME: &str = "ppexchanger (TCP/47391)";
+pub const CONTROL_RULE_NAME: &str = "ppexchanger (UDP/47392)";
 const SETUP_MARKER: &str = ".firewall-rules";
 
 /// Default TCP port the rule covers. Pass `0` to substitute the bind port.
@@ -272,7 +272,7 @@ mod tests {
     fn rule_name_is_stable() {
         // The installer greps on this exact string. Renaming it silently
         // breaks every prior install's discovery hint.
-        assert_eq!(RULE_NAME, "ppexchanger (TCP/7777)");
+        assert_eq!(RULE_NAME, "ppexchanger (TCP/47391)");
     }
 
     #[test]
@@ -280,7 +280,7 @@ mod tests {
         // Different binds need different hints; verify the port is in the
         // rendered string both for the default and a custom value.
         let h = manual_hint(0);
-        assert!(h.contains("7777"));
+        assert!(h.contains("47391"));
         assert!(h.contains(RULE_NAME));
         let h = manual_hint(9001);
         assert!(h.contains("9001"));
@@ -296,6 +296,6 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     fn add_rule_is_noop_off_windows() {
         // Cross-platform callers can rely on Ok(()).
-        assert!(add_rule(7777).is_ok());
+        assert!(add_rule(47391).is_ok());
     }
 }
