@@ -27,6 +27,18 @@
 set -euo pipefail
 IFS=$' \t\n'
 
+# Debug trace: when piped under curl | sudo bash, stdout/stderr are a pipe
+# and short progress lines can be silently swallowed when the process exits
+# abruptly. Persist a timestamped trace of every interesting step to a file
+# the operator can `cat` afterwards — gives us ground truth even when the
+# visible output is incomplete.
+PPX_TRACE="${PPX_TRACE:-/run/ppx-relay-install.trace}"
+: > "$PPX_TRACE" 2>/dev/null || PPX_TRACE="$(mktemp -t ppx-install-trace.XXXXXX)"
+_ts_trace() { printf '%s pid=%s line=%s arg=%s\n' "$(date +%H:%M:%S)" "$$" "$1" "${2:-}" >> "$PPX_TRACE" 2>/dev/null || true; }
+_ts_trace 0 "start"
+
+trap '_ts_trace 9999 "exit_trap"' EXIT
+
 # When the installer runs from `curl ... | sudo bash -s --`, stdout is a
 # pipe — fully buffered by default — and short progress lines can be dropped
 # when the process exits. Force line-buffered output so the operator sees
@@ -619,27 +631,17 @@ ts_authenticated() {
         | grep -q '"BackendState": "Running"'
 }
 
-# Poll for auth completion. If a backgrounded `tailscale up` PID was passed,
-# also watch for it: if the process dies before BackendState reaches Running,
-# the captured stderr log almost certainly explains why (no network, control
-# plane unreachable, account locked, ...) — surface it instead of waiting 10
-# minutes of silence.
 ts_wait_for_auth() {
-    local up_pid="${1:-}"
-    local ts_log="${2:-/run/ppx-relay-auth-url.log}"
     local deadline=$((SECONDS + 600))   # 10 minutes to click the email link
+    local heartbeat=$((SECONDS + 30))   # first heartbeat 30s after start
     while [ "$SECONDS" -lt "$deadline" ]; do
         if ts_authenticated; then
             return 0
         fi
-        if [ -n "$up_pid" ] && ! kill -0 "$up_pid" 2>/dev/null; then
-            warn "tailscale up exited before authentication completed."
-            warn "captured log ($ts_log):"
-            warn "------------------------------------------------------------"
-            [ -r "$ts_log" ] && sed 's/^/[tail] /' "$ts_log" >&2 \
-                || warn "(log not readable)"
-            warn "------------------------------------------------------------"
-            return 2
+        # Heartbeat so a long-running wait doesn't look like a hang.
+        if [ "$SECONDS" -ge "$heartbeat" ]; then
+            log "still waiting for Tailscale login... (open the URL above in any browser)"
+            heartbeat=$((SECONDS + 30))
         fi
         sleep 2
     done
@@ -681,8 +683,10 @@ ts_ensure_running() {
 }
 
 ts_authenticate() {
+    _ts_trace 6830 "ts_authenticate begin"
     if ts_authenticated; then
-        ok "Tailscale already authenticated"
+        _ts_trace 6840 "already authed"
+        ok "Tailscale already authenticated (BackendState=Running)"
         return 0
     fi
     if [ -n "$TS_AUTHKEY" ]; then
@@ -696,15 +700,13 @@ ts_authenticate() {
     # Browser-login flow. tailscale up prints the login URL to stderr and
     # blocks waiting for the user to click it in any browser.
     #
-    # Three terminal-routing pitfalls to avoid:
+    # Two terminal-routing pitfalls to avoid:
     #   1. Running `curl ... | sudo bash` makes the script's stderr land
     #      back at the curl pipe's source — not always the operator's
     #      terminal — so redirecting tailscale up's stderr to /dev/null
     #      silently swallows the URL (which is what an earlier version
     #      did, and what operators on headless boxes were hitting).
-    #   2. Even if stderr is visible, the URL can scroll past quickly
-    #      under buffered output and be missed.
-    #   3. A Tailscale GUI client on the same machine can react to the
+    #   2. A Tailscale GUI client on the same machine can react to the
     #      IPN BrowseToURL notification by silently launching the desktop
     #      default browser. The installer's contract is "display the URL"
     #      — never "silently open it" — even if the host has a desktop
@@ -715,32 +717,49 @@ ts_authenticate() {
     # poll the log for the URL, then re-print it loudly through the
     # installer's own [relay] stream and also write it to
     # /run/ppx-relay-auth-url as a backup record.
+    #
+    # IMPORTANT: run tailscale up SYNCHRONOUSLY (no `&`) and gate the wait
+    # on BackendState, NOT on a backgrounded PID. Operators running the
+    # installer a second time on an already-authed host will see tailscale
+    # up exit instantly without printing a URL — in that case BackendState
+    # is already Running and we should just continue. Backgrounding the
+    # process caused a race where the parent script could exit before the
+    # wait loop completed (or output was silently swallowed by stdout
+    # buffering under `curl | sudo bash`).
     log "opening Tailscale browser login..."
+    _ts_trace 7200 "log opened, pre-bg"
     local ts_log="/run/ppx-relay-auth-url.log"
     : > "$ts_log" 2>/dev/null || ts_log="$(mktemp -t ppx-ts-auth.XXXXXX)"
     chmod 0644 "$ts_log" 2>/dev/null || true
+    _ts_trace 7210 "ts_log=$ts_log"
 
     # Never auto-open the URL in a browser. The Tailscale CLI honours
     # $BROWSER (xdg-open, sensible-browser) and a Tailscale GUI client on
     # the same machine can react to the IPN BrowseToURL notification by
-    # launching the desktop default browser. A headless server has no
-    # browser, but the installer's contract is "display the URL" — never
-    # "silently open it" — even if the host happens to have a desktop
-    # session the operator is not looking at. BROWSER=none disables the
+    # launching the desktop default browser. BROWSER=none disables the
     # xdg-open path; clearing DISPLAY and WAYLAND_DISPLAY discourages GUI
-    # helpers from launching. PATH/HOME are preserved so the tailscale
-    # binary and its state dir resolve normally.
+    # helpers from launching.
+    #
+    # Run `tailscale up` with `&` AND `disown` so its lifetime is fully
+    # decoupled from the installer's bash process: when the installer
+    # exits, tailscale up is reparented to init and continues to wait
+    # for the user to click the link. Without disown, bash's job-control
+    # SIGHUP-on-exit would kill it before the URL is clicked.
     BROWSER=none DISPLAY= WAYLAND_DISPLAY= \
-        tailscale up --timeout=10m >"$ts_log" 2>&1 &
+        nohup tailscale up --timeout=10m >"$ts_log" 2>&1 &
     local up_pid=$!
+    disown "$up_pid" 2>/dev/null || true
+    _ts_trace 7340 "up_pid=$up_pid"
 
     # Wait up to ~15s for tailscale up to print the URL. Login URLs start
     # with "https://login.tailscale.com/a/" or "https://<control-plane>/a/".
     local login_url="" deadline=$((SECONDS + 15))
+    _ts_trace 7400 "starting url poll"
     while [ "$SECONDS" -lt "$deadline" ] && [ -z "$login_url" ]; do
-        login_url="$(grep -oE 'https://[a-zA-Z0-9./_-]+/a/[a-f0-9]+' "$ts_log" 2>/dev/null | head -n1)"
+        login_url="$(grep -oE 'https://[a-zA-Z0-9./_-]+/a/[a-f0-9]+' "$ts_log" 2>/dev/null | head -n1 || true)"
         [ -z "$login_url" ] && sleep 1
     done
+    _ts_trace 7440 "url poll done login_url=${login_url:-<empty>}"
 
     if [ -n "$login_url" ]; then
         # Make the URL unmistakable: bold yellow header, repeated thrice in
@@ -755,10 +774,21 @@ ts_authenticate() {
         cp "$ts_log" /run/ppx-relay-auth-url 2>/dev/null || true
     else
         warn "Tailscale did not print a login URL within 15s."
-        warn "Run \`tailscale up --timeout=10m\` manually in another shell to log in."
+        warn "Last lines of the captured log ($ts_log):"
+        warn "------------------------------------------------------------"
+        if [ -r "$ts_log" ]; then
+            tail -n 20 "$ts_log" | sed 's/^/[tail] /' || warn "(could not read log)"
+        else
+            warn "(log file not present)"
+        fi
+        warn "------------------------------------------------------------"
+        warn "Run \`tailscale up --timeout=10m\` manually in another shell,"
+        warn "or use --tailscale-authkey for unattended installs."
     fi
 
-    if ts_wait_for_auth "$up_pid" "$ts_log"; then
+    # Wait up to 10 minutes for BackendState=Running. If the host is
+    # already authenticated, ts_authenticated returns immediately.
+    if ts_wait_for_auth; then
         kill "$up_pid" 2>/dev/null || true
         wait "$up_pid" 2>/dev/null || true
         ok "authenticated via browser login"
