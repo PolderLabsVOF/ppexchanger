@@ -3,11 +3,15 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static NEXT_CASE: AtomicUsize = AtomicUsize::new(0);
 
 fn update_case(download: bool, binary: bool, source: bool) -> (bool, String) {
     let root = std::env::temp_dir().join(format!(
-        "ppx-update-test-{}-{}",
+        "ppx-update-test-{}-{}-{}",
         std::process::id(),
+        NEXT_CASE.fetch_add(1, Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
