@@ -670,25 +670,42 @@ ts_authenticate() {
     # Browser-login flow. tailscale up prints the login URL to stderr and
     # blocks waiting for the user to click it in any browser.
     #
-    # Two terminal-routing pitfalls to avoid:
+    # Three terminal-routing pitfalls to avoid:
     #   1. Running `curl ... | sudo bash` makes the script's stderr land
     #      back at the curl pipe's source — not always the operator's
     #      terminal — so redirecting tailscale up's stderr to /dev/null
-    #      silently swallows the URL (which is what the previous version
-    #      did, and what the operator is currently hitting).
-    #   2. Even if stderr is visible, the URL can scroll past quickly under
-    #      buffered output and be missed.
+    #      silently swallows the URL (which is what an earlier version
+    #      did, and what operators on headless boxes were hitting).
+    #   2. Even if stderr is visible, the URL can scroll past quickly
+    #      under buffered output and be missed.
+    #   3. A Tailscale GUI client on the same machine can react to the
+    #      IPN BrowseToURL notification by silently launching the desktop
+    #      default browser. The installer's contract is "display the URL"
+    #      — never "silently open it" — even if the host has a desktop
+    #      session the operator is not looking at.
     #
-    # Fix: capture tailscale up's output to a log file, wait for the URL
-    # to appear, then print it loudly via the installer's own [relay]
-    # stream (which we know reaches the operator's terminal) and also
-    # write it to /run/ppx-relay-auth-url as a backup record.
+    # Fix: capture tailscale up's stderr to a log file with
+    # BROWSER=none + DISPLAY= + WAYLAND_DISPLAY= so no GUI helper launches,
+    # poll the log for the URL, then re-print it loudly through the
+    # installer's own [relay] stream and also write it to
+    # /run/ppx-relay-auth-url as a backup record.
     log "opening Tailscale browser login..."
     local ts_log="/run/ppx-relay-auth-url.log"
     : > "$ts_log" 2>/dev/null || ts_log="$(mktemp -t ppx-ts-auth.XXXXXX)"
     chmod 0644 "$ts_log" 2>/dev/null || true
 
-    tailscale up --timeout=10m >"$ts_log" 2>&1 &
+    # Never auto-open the URL in a browser. The Tailscale CLI honours
+    # $BROWSER (xdg-open, sensible-browser) and a Tailscale GUI client on
+    # the same machine can react to the IPN BrowseToURL notification by
+    # launching the desktop default browser. A headless server has no
+    # browser, but the installer's contract is "display the URL" — never
+    # "silently open it" — even if the host happens to have a desktop
+    # session the operator is not looking at. BROWSER=none disables the
+    # xdg-open path; clearing DISPLAY and WAYLAND_DISPLAY discourages GUI
+    # helpers from launching. PATH/HOME are preserved so the tailscale
+    # binary and its state dir resolve normally.
+    BROWSER=none DISPLAY= WAYLAND_DISPLAY= \
+        tailscale up --timeout=10m >"$ts_log" 2>&1 &
     local up_pid=$!
 
     # Wait up to ~15s for tailscale up to print the URL. Login URLs start
