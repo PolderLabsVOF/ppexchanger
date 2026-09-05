@@ -120,7 +120,9 @@ OPTIONS:
                           With --yes and no --funnel flag, defaults to direct.
     --print-tag           Resolve the latest (or pinned) tag and print it.
     --tag <tag>           Install a specific tag (for example v0.7.11-beta.1).
-                          Default: latest stable release.
+                          Default: latest stable release. Beta tags live at
+                          /releases/download/<tag>/install-relay.sh — the
+                          /releases/latest/download/ URL always serves stable.
     --uninstall           Remove the binary, the systemd unit, and (if it
                           was set up by this script) the Tailscale Funnel.
     --help                Show this help.
@@ -157,7 +159,11 @@ EXAMPLES:
 
     # Pin a specific release (e.g. rollback or install a beta):
     sudo bash install-relay.sh --tag v0.7.10
-    sudo bash install-relay.sh --funnel --tag v0.7.11-beta.1
+
+    # Install a beta — pre-release tags live at /releases/download/<tag>/,
+    # NOT /releases/latest/download/ (which always serves the latest stable):
+    curl -fsSL https://github.com/${REPO}/releases/download/v0.7.11-beta.1/install-relay.sh \\
+        | sudo bash -s -- --tag v0.7.11-beta.1
 EOF
 }
 

@@ -16,6 +16,17 @@ curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/latest/download
 
 Without flags, the installer prompts you to pick a mode. Pass `--yes` to skip the prompts and use the defaults, or pre-answer with flags such as `--bind 0.0.0.0 --max-clients 256`. Run `install-relay.sh --help` for the full list.
 
+### Beta / pre-release builds
+
+Pre-release tags (e.g. `v0.7.11-beta.1`) are tagged **Pre-release** on GitHub, so `/releases/latest/download/` always serves the most recent stable release. To install a beta, point the URL at the specific tag and pass `--tag` so the installer knows which binaries to fetch:
+
+```sh
+curl -fsSL https://github.com/PolderLabsVOF/ppexchanger/releases/download/v0.7.11-beta.1/install-relay.sh \
+    | sudo bash -s -- --tag v0.7.11-beta.1
+```
+
+The script and the binaries it installs always come from the same tag, so features like `--funnel` that are still in beta are guaranteed to work. Add `--funnel` and/or `--tailscale-authkey tskey-...` as usual.
+
 ### Tailscale Funnel (recommended for most setups)
 
 Funnel exposes the relay on the public Internet through Tailscale's edge. No port forwarding, no firewall rule, no public IP revealed. Requires a free Tailscale account.
