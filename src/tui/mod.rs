@@ -163,6 +163,7 @@ pub struct UiState {
     /// skips the footer rect entirely — the chat pane absorbs the
     /// freed vertical space via the layout splitter.
     pub show_footer: bool,
+    pub image_previews: bool,
     /// Modal state for an inbound file offer. `None` means no pending
     /// offer; otherwise the modal is shown over the chat and the user
     /// can accept or reject via Enter / Esc.
@@ -362,6 +363,7 @@ impl UiState {
             min_conversation_width: crate::tui::config::DEFAULT_MIN_CONVERSATION_WIDTH,
             status_format: crate::tui::config::StatusFormat::NameOnly,
             show_footer: true,
+            image_previews: true,
             file_offer: None,
             text_preview: None,
             expanded_text: None,
@@ -406,6 +408,8 @@ impl UiState {
     pub fn apply_live_cfg(&mut self, cfg: &crate::tui::UiConfig) {
         self.status_format = cfg.status_format;
         self.show_footer = cfg.show_footer;
+        self.image_previews = cfg.image_previews;
+        self.max_scrollback = cfg.scrollback;
         self.narrow_sidebar_below = cfg.narrow_sidebar_below;
         self.min_conversation_width = cfg.min_conversation_width;
     }
@@ -1458,6 +1462,14 @@ fn day_separator_label(bucket: u64, today_bucket: u64) -> String {
 /// to a zero-width sliver and the chat pane absorbs the freed column
 /// count — the layout is always the same shape, just narrower.
 pub fn compute_layout(area: Rect, sidebar_visible: bool) -> LayoutAreas {
+    compute_layout_with_footer(area, sidebar_visible, FOOTER_HEIGHT)
+}
+
+fn compute_layout_with_footer(
+    area: Rect,
+    sidebar_visible: bool,
+    footer_height: u16,
+) -> LayoutAreas {
     // Vertical: pinned menu on top, body absorbs the middle, footer on the
     // bottom. The menu row is opt-out of the body budget so the chat pane
     // can never be squeezed below BODY_MIN_HEIGHT by a tall menu.
@@ -1466,7 +1478,7 @@ pub fn compute_layout(area: Rect, sidebar_visible: bool) -> LayoutAreas {
         .constraints([
             Constraint::Length(MENU_HEIGHT),
             Constraint::Min(BODY_MIN_HEIGHT),
-            Constraint::Length(FOOTER_HEIGHT),
+            Constraint::Length(footer_height),
         ])
         .split(area);
     let cols = if sidebar_visible {
@@ -1498,12 +1510,19 @@ pub fn compute_layout(area: Rect, sidebar_visible: bool) -> LayoutAreas {
 }
 
 pub fn layout_for_state(area: Rect, state: &UiState) -> LayoutAreas {
-    compute_layout(
-        area,
-        !state.sidebar_hidden
-            && area.width >= state.narrow_sidebar_below
-            && area.width >= state.min_conversation_width.saturating_add(SIDEBAR_PERCENT),
-    )
+    let footer_height =
+        if state.show_footer && state.status_format != crate::tui::config::StatusFormat::Off {
+            FOOTER_HEIGHT
+        } else {
+            3
+        };
+    let visible = !state.sidebar_hidden && area.width >= state.narrow_sidebar_below;
+    let layout = compute_layout_with_footer(area, visible, footer_height);
+    if visible && layout.chat.width < state.min_conversation_width {
+        compute_layout_with_footer(area, false, footer_height)
+    } else {
+        layout
+    }
 }
 
 pub fn sidebar_peer_list_area(area: Rect, pending: bool) -> Rect {
@@ -1760,9 +1779,7 @@ pub fn render<B: ratatui::backend::Backend>(
         draw_sidebar(f, areas.sidebar, state, theme, glyphs);
         draw_chat(f, areas.chat, state, theme, glyphs);
         draw_command_palette(f, areas.chat, state, theme);
-        if state.show_footer {
-            draw_footer(f, areas.footer, state, theme, glyphs);
-        }
+        draw_footer(f, areas.footer, state, theme, glyphs);
 
         if state.show_help {
             help::render(f, theme, glyphs);
@@ -2397,7 +2414,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut UiState, theme: &Theme, glyp
             let image_preview = if let Some(img) = m
                 .image
                 .as_ref()
-                .filter(|img| img.mime.starts_with("image/"))
+                .filter(|img| state.image_previews && img.mime.starts_with("image/"))
             {
                 // Reserve a cell budget for the preview. The picker
                 // gives us the actual cell-pixel mapping, but for the
@@ -2773,7 +2790,7 @@ fn render_image_preview(
 /// shortcuts are highlighted in accent so they pop against muted gray
 /// descriptions.
 fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs: &Glyphs) {
-    if area.width < 4 || area.height < FOOTER_HEIGHT {
+    if area.width < 4 || area.height < 3 {
         return;
     }
     // Composer is 2 rows tall: 1 row title above the input + 1 row
@@ -2869,16 +2886,28 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &UiState, theme: &Theme, glyphs
         f.set_cursor_position((cursor_x, input_area.y));
     }
 
+    if !state.show_footer || state.status_format == crate::tui::config::StatusFormat::Off {
+        return;
+    }
+
     // Status row beneath the composer: connection state on the left,
     // keyboard hints on the right. Each shortcut is bracketed and
     // highlighted in accent; descriptions sit muted next to them.
-    let status = if state.status_format == crate::tui::config::StatusFormat::Off
-        || state.status.trim().is_empty()
-    {
-        "Ready".to_string()
-    } else {
-        truncate_tail(&state.status, area.width.saturating_sub(40) as usize)
+    let identity = match state.status_format {
+        crate::tui::config::StatusFormat::NameAddr => {
+            format!("{} :{}", state.self_name, state.bound_port)
+        }
+        _ => state.self_name.clone(),
     };
+    let message = if state.status.trim().is_empty() {
+        "Ready"
+    } else {
+        &state.status
+    };
+    let status = truncate_tail(
+        &format!("{identity} · {message}"),
+        area.width.saturating_sub(4) as usize,
+    );
     let status_style = status_style(&status, theme);
     let status_icon = if ["failed", "denied", "error", "aborted"]
         .iter()
@@ -3199,6 +3228,37 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn hiding_status_preserves_bordered_composer_and_reclaims_space() {
+        let mut state = test_state();
+        let cfg = UiConfig {
+            show_footer: false,
+            image_previews: false,
+            scrollback: 800,
+            ..UiConfig::default()
+        };
+        state.apply_live_cfg(&cfg);
+        assert!(!state.image_previews);
+        assert_eq!(state.max_scrollback, 800);
+        state.status = "status-hidden-marker".into();
+        let screen = Rect::new(0, 0, 100, 30);
+        assert_eq!(layout_for_state(screen, &state).footer.height, 3);
+        let theme = Theme::by_name(theme::ThemeName::Default);
+        let glyphs = theme::detect_glyphs();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        render(
+            &mut terminal,
+            &mut state,
+            &theme,
+            &glyphs,
+            SettingsView::default(),
+        )
+        .unwrap();
+        let text = frame_text(&terminal);
+        assert!(text.contains("choose a peer"));
+        assert!(!text.contains("status-hidden-marker"));
     }
 
     #[test]
@@ -3890,9 +3950,11 @@ mod tests {
         let cfg = UiConfig {
             theme: ThemeName::Default,
             show_footer: true,
+            image_previews: true,
             mouse: true,
             scrollback: 100,
             notify_sound: false,
+            desktop_notifications: true,
             auto_trust_seen: false,
             status_format: crate::tui::config::StatusFormat::NameOnly,
             narrow_sidebar_below: 72,

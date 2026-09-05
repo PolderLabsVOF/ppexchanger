@@ -1063,7 +1063,7 @@ dependencies = [
 
 [[package]]
 name = "ppexchanger"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "chacha20poly1305",
  "crossterm",

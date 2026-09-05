@@ -2,6 +2,13 @@
 
 All notable ppexchanger updates are listed here in plain language.
 
+## 0.7.8 — 2026-09-05
+
+- Settings now have clear Profile, Appearance, Chat, Privacy, and About sections, with explanations for each option.
+- Control desktop alerts and image previews separately, and adjust the sidebar layout from settings.
+- Hiding the status footer keeps the message box visible.
+- Cancel name edits with Escape; failed saves keep settings open for retry.
+
 ## 0.7.7 — 2026-09-05
 
 - Changed the default connection and discovery port to 47391, with reverse connections on 47392.

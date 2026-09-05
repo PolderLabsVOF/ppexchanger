@@ -1431,7 +1431,7 @@ fn start_tui(
             }
             // Stable sidebar ordering: Connected > Seen > Gone, then name.
             s.sort_peers();
-            if text_count > 0 {
+            if live_cfg.desktop_notifications && text_count > 0 {
                 if let Some((name, body)) = s
                     .messages
                     .iter()
@@ -1498,7 +1498,19 @@ fn start_tui(
                 // drop a bracketed paste. Peel them apart here.
                 if matches!(ev, crossterm::event::Event::Paste(_)) {
                     if let crossterm::event::Event::Paste(s) = &ev {
-                        let _ = editor.on_paste(s);
+                        let mut ui = state.lock().unwrap();
+                        if let Some(settings) = ui.settings.as_mut() {
+                            if settings.editing_name {
+                                for c in s.chars().filter(|c| !c.is_control()) {
+                                    if settings.name_draft.len() + c.len_utf8() > 256 {
+                                        break;
+                                    }
+                                    settings.name_draft.push(c);
+                                }
+                            }
+                        } else {
+                            let _ = editor.on_paste(s);
+                        }
                     }
                 } else if matches!(ev, crossterm::event::Event::Mouse(_)) {
                     if live_cfg.mouse {
@@ -1555,25 +1567,12 @@ fn start_tui(
                                             );
                                         }
                                         MouseTarget::Close => {
-                                            let name = {
-                                                let mut s = state.lock().unwrap();
-                                                let name = s
-                                                    .settings
-                                                    .as_ref()
-                                                    .unwrap()
-                                                    .name_draft
-                                                    .trim()
-                                                    .to_string();
-                                                if !name.is_empty() {
-                                                    s.self_name = name.clone();
-                                                }
-                                                s.close_settings();
-                                                name
-                                            };
-                                            let _ = save_ui_config(&live_cfg, &live_cfg_path);
-                                            if !name.is_empty() {
-                                                let _ = ppexchanger::identity::update_name(&name);
-                                            }
+                                            let mut s = state.lock().unwrap();
+                                            save_and_close_settings(
+                                                &mut s,
+                                                &live_cfg,
+                                                &live_cfg_path,
+                                            );
                                         }
                                     }
                                     continue;
@@ -1779,51 +1778,20 @@ fn start_tui(
                         if k.kind == crossterm::event::KeyEventKind::Press {
                             let (close_after, dirty) = {
                                 let mut s = state.lock().unwrap();
+                                let was_editing = s.settings.as_ref().unwrap().editing_name;
                                 route_settings_key(
                                     k,
                                     s.settings.as_mut().unwrap(),
                                     &mut live_cfg,
                                     &mut _guard,
                                 );
-                                let close = k.code == crossterm::event::KeyCode::Esc;
+                                let close =
+                                    k.code == crossterm::event::KeyCode::Esc && !was_editing;
                                 (close, s.settings.as_ref().unwrap().dirty)
                             };
                             if close_after {
-                                let name_draft = {
-                                    let mut s = state.lock().unwrap();
-                                    let name = s
-                                        .settings
-                                        .as_ref()
-                                        .map(|settings| settings.name_draft.trim().to_string())
-                                        .unwrap_or_default();
-                                    if !name.is_empty() && name != s.self_name {
-                                        s.self_name = name.clone();
-                                    }
-                                    s.close_settings();
-                                    name
-                                };
-                                match save_ui_config(&live_cfg, &live_cfg_path) {
-                                    Ok(()) => {
-                                        let _ = bus
-                                            .tx_events
-                                            .send(Event::Info("settings saved".into()));
-                                    }
-                                    Err(e) => {
-                                        let _ = bus.tx_events.send(Event::Info(format!(
-                                            "settings save failed: {}",
-                                            e
-                                        )));
-                                    }
-                                }
-                                if !name_draft.is_empty() {
-                                    if let Err(e) = ppexchanger::identity::update_name(&name_draft)
-                                    {
-                                        let _ = bus.tx_events.send(Event::Info(format!(
-                                            "display name save failed: {}",
-                                            e
-                                        )));
-                                    }
-                                }
+                                let mut s = state.lock().unwrap();
+                                save_and_close_settings(&mut s, &live_cfg, &live_cfg_path);
                             }
                             let _ = dirty;
                         }
@@ -2386,6 +2354,16 @@ fn handle_mouse(
 ) -> Option<ppexchanger::tui::EditorEvent> {
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut s = state.lock().unwrap();
+    if let Some(settings) = s.settings.as_mut() {
+        if !settings.editing_name {
+            match m.kind {
+                MouseEventKind::ScrollUp => settings.move_selection(-1),
+                MouseEventKind::ScrollDown => settings.move_selection(1),
+                _ => {}
+            }
+        }
+        return None;
+    }
     let areas = tui::layout_for_state(size, &s);
     let modal_open =
         s.text_preview.is_some() || s.show_help || s.discovery.is_some() || s.settings.is_some();
@@ -2913,31 +2891,93 @@ fn handle_command(
 
 /// Translate a single key event into a settings-modal mutation. Caller
 /// owns the lock and persists after `close_after` is reported.
+fn save_and_close_settings(state: &mut UiState, cfg: &tui::UiConfig, path: &std::path::Path) {
+    let name = state
+        .settings
+        .as_ref()
+        .map(|s| s.name_draft.trim().to_string())
+        .unwrap_or_default();
+    let result = if name.is_empty() {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "display name cannot be empty",
+        ))
+    } else {
+        save_ui_config(cfg, path).and_then(|()| {
+            if name != state.self_name {
+                ppexchanger::identity::update_name(&name)
+            } else {
+                Ok(())
+            }
+        })
+    };
+    match result {
+        Ok(()) => {
+            state.self_name = name;
+            state.close_settings();
+            state.status = "Settings saved".into();
+        }
+        Err(error) => {
+            if let Some(settings) = state.settings.as_mut() {
+                settings.save_error = Some(error.to_string());
+            }
+        }
+    }
+}
+
 fn route_settings_key(
     k: &crossterm::event::KeyEvent,
     st: &mut ppexchanger::tui::SettingsState,
     cfg: &mut ppexchanger::tui::UiConfig,
     guard: &mut ppexchanger::tui::TuiGuard,
 ) {
+    let old_mouse = cfg.mouse;
+    change_settings(k, st, cfg);
+    if cfg.mouse != old_mouse {
+        if let Err(error) = guard.set_mouse(cfg.mouse) {
+            cfg.mouse = old_mouse;
+            eprintln!("could not change terminal mouse mode: {error}");
+        }
+    }
+}
+
+fn change_settings(
+    k: &crossterm::event::KeyEvent,
+    st: &mut ppexchanger::tui::SettingsState,
+    cfg: &mut ppexchanger::tui::UiConfig,
+) {
     use crossterm::event::{KeyCode, KeyModifiers};
-    use ppexchanger::tui::settings_popup::Tab;
+    use ppexchanger::tui::settings_popup::{Setting, Tab};
+    if k.kind == crossterm::event::KeyEventKind::Release {
+        return;
+    }
     let code = k.code;
-    let mods = k.modifiers;
-    // The display-name field is a small inline editor inside Settings. It
-    // consumes printable keys before the normal dialog shortcuts so typing a
-    // name never changes tabs or toggles unrelated options.
     if st.editing_name {
         match code {
-            KeyCode::Enter => {
-                st.name_draft = st.name_draft.trim().to_string();
+            KeyCode::Esc => {
+                st.name_draft = st.name_before_edit.clone();
                 st.editing_name = false;
+            }
+            KeyCode::Enter => {
+                let name = st.name_draft.trim().to_string();
+                if !name.is_empty() {
+                    st.name_draft = name;
+                    st.editing_name = false;
+                    st.dirty = true;
+                    st.save_error = None;
+                } else {
+                    st.save_error = Some("display name cannot be empty".into());
+                }
             }
             KeyCode::Backspace => {
                 st.name_draft.pop();
             }
             KeyCode::Char(c)
-                if (mods.is_empty() || mods == KeyModifiers::SHIFT)
-                    && st.name_draft.len() < 256 =>
+                if !c.is_control()
+                    && !k.modifiers.intersects(
+                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                    )
+                    && st.name_draft.len() + c.len_utf8() <= 256 =>
             {
                 st.name_draft.push(c);
             }
@@ -2945,143 +2985,147 @@ fn route_settings_key(
         }
         return;
     }
-    // Auto-cancel a stale reset-confirm whenever the user does anything
-    // other than the 'y' that fires it. The earlier guard arm matches
-    // 'y' first; everything else falls through and clears the flag.
-    if st.confirm_reset && !matches!(code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-        st.confirm_reset = false;
+    if k.kind != crossterm::event::KeyEventKind::Press
+        || k.modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        return;
     }
-    // Number-row tab jump (1/2/3/4) — works without modifier.
-    if mods == KeyModifiers::NONE || mods == KeyModifiers::SHIFT {
-        match code {
-            KeyCode::Char('1') => st.switch_tab(Tab::Display),
-            KeyCode::Char('2') => st.switch_tab(Tab::Input),
-            KeyCode::Char('3') => st.switch_tab(Tab::Behavior),
-            KeyCode::Char('4') => st.switch_tab(Tab::About),
-            KeyCode::Left | KeyCode::Char('h') => match st.tab {
-                Tab::Display => match st.selected() {
-                    0 => {
-                        let _ = st.cycle_theme(-1);
-                        cfg.theme = ppexchanger::tui::settings_popup::THEME_CHOICES[st.theme_idx];
-                    }
-                    2 => st.bump_scrollback(cfg, -100),
-                    _ => {}
-                },
-                Tab::Input => match st.selected() {
-                    1 => {
-                        // Cycle backwards through status formats.
-                        let cur = cfg.status_format;
-                        let prev = match cur {
-                            StatusFormat::NameOnly => StatusFormat::Off,
-                            StatusFormat::NameAddr => StatusFormat::NameOnly,
-                            StatusFormat::Off => StatusFormat::NameAddr,
-                        };
-                        cfg.status_format = prev;
-                        st.dirty = true;
-                    }
-                    _ => {
-                        st.toggle_mouse(cfg);
-                        let _ = guard.set_mouse(cfg.mouse);
-                    }
-                },
-                Tab::Behavior => {
-                    if st.selected() == 2 {
-                        // Cycle backwards through status formats.
-                        let cur = cfg.status_format;
-                        let prev = match cur {
-                            StatusFormat::NameOnly => StatusFormat::Off,
-                            StatusFormat::NameAddr => StatusFormat::NameOnly,
-                            StatusFormat::Off => StatusFormat::NameAddr,
-                        };
-                        cfg.status_format = prev;
-                        st.dirty = true;
-                    }
-                }
-                Tab::About => {}
-            },
-            KeyCode::Right | KeyCode::Char('l') => match st.tab {
-                Tab::Display => match st.selected() {
-                    0 => {
-                        let _ = st.cycle_theme(1);
-                        cfg.theme = ppexchanger::tui::settings_popup::THEME_CHOICES[st.theme_idx];
-                    }
-                    2 => st.bump_scrollback(cfg, 100),
-                    _ => {}
-                },
-                Tab::Input => match st.selected() {
-                    1 => {
-                        let _ = st.cycle_status_format(cfg);
-                    }
-                    _ => {
-                        st.toggle_mouse(cfg);
-                        let _ = guard.set_mouse(cfg.mouse);
-                    }
-                },
-                Tab::Behavior => {
-                    if st.selected() == 2 {
-                        let _ = st.cycle_status_format(cfg);
-                    }
-                }
-                Tab::About => {}
-            },
-            KeyCode::Up | KeyCode::Char('k') => st.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => st.move_selection(1),
-            // Reset-confirm: when armed, the next Y fires the reset;
-            // any other key (including Enter) cancels. Pre-empts the
-            // normal Enter handler below so the selected row doesn't
-            // also trigger.
-            KeyCode::Char('y') | KeyCode::Char('Y') if st.confirm_reset => {
-                st.reset_to_defaults(cfg);
-                st.confirm_reset = false;
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => match st.tab {
-                Tab::Display => match st.selected() {
-                    0 => {
-                        let _ = st.cycle_theme(1);
-                        cfg.theme = ppexchanger::tui::settings_popup::THEME_CHOICES[st.theme_idx];
-                    }
-                    1 => st.toggle_footer(cfg),
-                    2 => st.bump_scrollback(cfg, 100),
-                    3 => st.toggle_notify_sound(cfg),
-                    4 => st.toggle_auto_trust_seen(cfg),
-                    _ => {}
-                },
-                Tab::Input => match st.selected() {
-                    0 => {
-                        st.toggle_mouse(cfg);
-                        let _ = guard.set_mouse(cfg.mouse);
-                    }
-                    1 => {
-                        let _ = st.cycle_status_format(cfg);
-                    }
-                    2 => {
-                        // Arm the reset confirm; next 'y' fires, anything
-                        // else cancels via the `_ =>` arm in move_selection.
-                        st.confirm_reset = true;
-                    }
-                    _ => {}
-                },
-                Tab::Behavior => match st.selected() {
-                    0 => st.toggle_notify_sound(cfg),
-                    1 => st.toggle_auto_trust_seen(cfg),
-                    2 => {
-                        let _ = st.cycle_status_format(cfg);
-                    }
-                    3 => st.editing_name = true,
-                    _ => {}
-                },
-                Tab::About => {}
-            },
-            KeyCode::Tab => st.switch_tab(st.tab.next_tab()),
-            KeyCode::BackTab => st.switch_tab(st.tab.prev_tab()),
-            _ => {}
+    if st.confirm_reset {
+        st.confirm_reset = false;
+        if matches!(code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+            st.reset_to_defaults(cfg);
+            return;
         }
+    }
+    match code {
+        KeyCode::Char(c @ '1'..='5') => st.switch_tab(Tab::ALL[(c as u8 - b'1') as usize]),
+        KeyCode::Tab => st.switch_tab(st.tab.next_tab()),
+        KeyCode::BackTab => st.switch_tab(st.tab.prev_tab()),
+        KeyCode::Up | KeyCode::Char('k') => st.move_selection(-1),
+        KeyCode::Down | KeyCode::Char('j') => st.move_selection(1),
+        KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ' | 'h' | 'l') => {
+            let delta = if matches!(code, KeyCode::Left | KeyCode::Char('h')) {
+                -1
+            } else {
+                1
+            };
+            match st.selected_setting() {
+                Some(Setting::DisplayName)
+                    if matches!(code, KeyCode::Enter | KeyCode::Char(' ')) =>
+                {
+                    st.name_before_edit = st.name_draft.clone();
+                    st.editing_name = true;
+                }
+                Some(Setting::Theme) => {
+                    cfg.theme = st.cycle_theme(delta);
+                }
+                Some(Setting::Mouse) => st.toggle_mouse(cfg),
+                Some(Setting::Footer) => st.toggle_footer(cfg),
+                Some(Setting::StatusFormat) => {
+                    cfg.status_format = match (cfg.status_format, delta) {
+                        (StatusFormat::NameOnly, -1) | (StatusFormat::NameAddr, 1) => {
+                            StatusFormat::Off
+                        }
+                        (StatusFormat::NameOnly, _) | (StatusFormat::Off, -1) => {
+                            StatusFormat::NameAddr
+                        }
+                        _ => StatusFormat::NameOnly,
+                    };
+                    st.dirty = true;
+                }
+                Some(Setting::Scrollback) => st.bump_scrollback(cfg, delta * 100),
+                Some(Setting::SidebarBreakpoint) => st.bump_sidebar_breakpoint(cfg, delta * 5),
+                Some(Setting::MinChatWidth) => st.bump_min_chat_width(cfg, delta * 5),
+                Some(Setting::NotifySound) => st.toggle_notify_sound(cfg),
+                Some(Setting::DesktopNotifications) => st.toggle_desktop_notifications(cfg),
+                Some(Setting::ImagePreviews) => st.toggle_image_previews(cfg),
+                Some(Setting::AutoTrust) => st.toggle_auto_trust_seen(cfg),
+                Some(Setting::Reset) if matches!(code, KeyCode::Enter | KeyCode::Char(' ')) => {
+                    st.confirm_reset = true
+                }
+                _ => {}
+            }
+        }
+        _ => {}
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_controls_change_only_the_selected_option() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use tui::settings_popup::{Setting, Tab};
+        let mut cfg = tui::UiConfig::default();
+        let mut st = tui::SettingsState::new(&cfg);
+        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        for (setting, field) in [
+            (Setting::DesktopNotifications, 0),
+            (Setting::ImagePreviews, 1),
+        ] {
+            st.switch_tab(Tab::Chat);
+            st.selected = Tab::Chat
+                .settings()
+                .iter()
+                .position(|s| *s == setting)
+                .unwrap();
+            change_settings(&press(KeyCode::Enter), &mut st, &mut cfg);
+            assert!(!if field == 0 {
+                cfg.desktop_notifications
+            } else {
+                cfg.image_previews
+            });
+            assert!(st.dirty);
+        }
+        st.switch_tab(Tab::Privacy);
+        st.selected = 1;
+        let mouse = cfg.mouse;
+        change_settings(&press(KeyCode::Left), &mut st, &mut cfg);
+        assert_eq!(cfg.mouse, mouse);
+        assert!(!st.confirm_reset);
+        change_settings(&press(KeyCode::Enter), &mut st, &mut cfg);
+        assert!(st.confirm_reset);
+        change_settings(&press(KeyCode::Char('y')), &mut st, &mut cfg);
+        assert!(cfg.desktop_notifications && cfg.image_previews);
+    }
+
+    #[test]
+    fn settings_name_edit_cancels_and_respects_utf8_limit() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut cfg = tui::UiConfig::default();
+        let mut st = tui::SettingsState::new(&cfg);
+        st.name_draft = "Alice".into();
+        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        change_settings(&press(KeyCode::Enter), &mut st, &mut cfg);
+        change_settings(&press(KeyCode::Char('x')), &mut st, &mut cfg);
+        change_settings(&press(KeyCode::Esc), &mut st, &mut cfg);
+        assert_eq!(st.name_draft, "Alice");
+        assert!(!st.editing_name);
+        change_settings(&press(KeyCode::Enter), &mut st, &mut cfg);
+        st.name_draft = "a".repeat(255);
+        change_settings(&press(KeyCode::Char('界')), &mut st, &mut cfg);
+        assert_eq!(st.name_draft.len(), 255);
+        st.name_draft.clear();
+        change_settings(&press(KeyCode::Enter), &mut st, &mut cfg);
+        assert!(st.editing_name);
+    }
+
+    #[test]
+    fn failed_settings_save_keeps_dialog_open() {
+        let mut state = UiState::from_identity(&ppexchanger::identity::Identity {
+            peer_id: [0; 16],
+            keypair: ppexchanger::crypto::Keypair::generate(),
+            name: "Alice".into(),
+            hostname: "test".into(),
+        });
+        let cfg = tui::UiConfig::default();
+        state.open_settings(&cfg);
+        save_and_close_settings(&mut state, &cfg, std::path::Path::new("/"));
+        assert!(state.settings.as_ref().unwrap().save_error.is_some());
+    }
 
     #[test]
     fn looks_like_existing_file_accepts_real_path() {

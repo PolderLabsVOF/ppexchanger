@@ -74,6 +74,8 @@ pub struct UiConfig {
     /// Emit a terminal bell on inbound messages. Off by default — most
     /// people don't want their terminal beeping during a quiet chat.
     pub notify_sound: bool,
+    pub desktop_notifications: bool,
+    pub image_previews: bool,
     /// Mark every newly-discovered peer as trusted instead of untrusted.
     /// Off by default; turning it on is a security regression unless the
     /// network is fully isolated (e.g. a single-room LAN party).
@@ -100,6 +102,8 @@ impl Default for UiConfig {
             mouse: true,
             scrollback: DEFAULT_SCROLLBACK,
             notify_sound: false,
+            desktop_notifications: true,
+            image_previews: true,
             auto_trust_seen: false,
             status_format: StatusFormat::NameOnly,
             narrow_sidebar_below: DEFAULT_NARROW_SIDEBAR_BELOW,
@@ -151,6 +155,16 @@ impl UiConfig {
                         unquote(value).or_else(|| value.parse().ok().map(|b: bool| b.to_string()))
                     {
                         out.show_footer = parse_bool(&v).unwrap_or(out.show_footer);
+                    }
+                }
+                "desktop_notifications" => {
+                    if let Some(v) = parse_bool(value) {
+                        out.desktop_notifications = v;
+                    }
+                }
+                "image_previews" => {
+                    if let Some(v) = parse_bool(value) {
+                        out.image_previews = v;
                     }
                 }
                 "mouse" => {
@@ -209,6 +223,11 @@ impl UiConfig {
         out.push_str(&format!("mouse = {}\n", self.mouse));
         out.push_str(&format!("scrollback = {}\n", self.scrollback));
         out.push_str(&format!("notify_sound = {}\n", self.notify_sound));
+        out.push_str(&format!(
+            "desktop_notifications = {}\n",
+            self.desktop_notifications
+        ));
+        out.push_str(&format!("image_previews = {}\n", self.image_previews));
         out.push_str(&format!("auto_trust_seen = {}\n", self.auto_trust_seen));
         out.push_str(&format!(
             "status_format = \"{}\"\n",
@@ -391,6 +410,8 @@ scrollback = 1024\n";
             mouse: false,
             scrollback: 2048,
             notify_sound: true,
+            desktop_notifications: false,
+            image_previews: false,
             auto_trust_seen: false,
             status_format: StatusFormat::NameAddr,
             narrow_sidebar_below: 72,
@@ -398,6 +419,8 @@ scrollback = 1024\n";
         };
         let toml = original.to_toml();
         let parsed = UiConfig::parse(&toml).expect("self-emitted TOML must parse");
+        assert_eq!(parsed.desktop_notifications, original.desktop_notifications);
+        assert_eq!(parsed.image_previews, original.image_previews);
         assert_eq!(parsed.theme, original.theme);
         assert_eq!(parsed.show_footer, original.show_footer);
         assert_eq!(parsed.mouse, original.mouse);

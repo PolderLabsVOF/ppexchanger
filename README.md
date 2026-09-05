@@ -484,7 +484,7 @@ selected, the first connected peer receives it.
 | `Ctrl-R`      | revoke the selected peer                               |
 | `Ctrl-L`      | clear input                                            |
 | `Ctrl-,`      | open the settings popup                                |
-| `1` / `2` / `3` | in settings popup: jump to Display / Input / About   |
+| `1` … `5` | in settings: Profile / Appearance / Chat / Privacy / About   |
 | `←` / `→`     | in settings popup: cycle theme / scrollback / toggle mouse |
 | `Enter` / `Space` | in settings popup: apply / toggle the selected row    |
 | `Esc`         | cancel / clear input / close modal                     |
@@ -518,19 +518,28 @@ or run with `--no-mouse` for unmodified terminal drag-selection.
 
 ### Settings popup
 
-`Ctrl-,` (or `/settings`) opens a live settings modal grouped into
-three tabs (`1`/`2`/`3` to jump):
+`Ctrl-,` (or `/settings`) opens five sections:
 
-* **Display** — Theme (cycles through the five built-in palettes),
-  Show footer (on / off), Scrollback (±100, clamped 16..50,000).
-* **Input** — Mouse capture (on / off; effective next launch).
-* **About** — read-only: version, fingerprint, config path, received
-  files directory.
+* **Profile** — change the name shown to peers. Enter starts editing and confirms
+  the field; Escape cancels an edit.
+* **Appearance** — color theme, status footer, name/port display, sidebar
+  collapse threshold, and minimum chat width. Hiding the footer keeps the
+  bordered message box available.
+* **Chat** — mouse interaction, retained message count, inline image previews,
+  terminal sound, and desktop notifications.
+* **Privacy** — automatic trust for new peers (off by default) and a confirmed
+  reset of preferences. Only enable automatic trust on a network you trust.
+* **About** — version, fingerprint, paths, and connection information.
 
-Every change is `dirty` until you press `Esc`, which persists the live
-config back to `config.toml`. Click the right half of any row to apply
-the same as `Enter`. The popup renders a `Tabs` widget for sub-nav and
-a `Table` for the rows — both with the active theme's accent color.
+Use Tab / Shift-Tab or 1–5 to change sections, Up / Down (or the mouse wheel)
+to select a setting, and Enter / Space to change it. Left / Right adjusts
+numeric values and cycles choices. The explanation below the list describes
+the selected option. Click a row to change it.
+
+Preferences apply live and are saved when you press Escape or click the close
+button. Save failures keep the dialog open so you can correct the problem
+and retry. Turning off image previews does not stop image transfers or saving
+files. Desktop notifications and terminal sound can be controlled separately.
 
 With `--no-mouse`, the terminal owns selection completely and selecting a
 region may include surrounding chrome, just like any terminal application.
@@ -608,7 +617,14 @@ The TUI ships a retro amber-phosphor CRT vibe out of the box:
 theme = "default"        # default | solarized | monochrome | neon | amber
 show_footer = true
 mouse = true               # pane clicks + scrolling; Shift-drag selects natively
-scrollback = 500          # max chat history lines; clamped to 16..50_000
+scrollback = 500          # messages across all chats; clamped to 16..50_000
+image_previews = true
+desktop_notifications = true
+notify_sound = false
+auto_trust_seen = false
+status_format = "name"    # name | name+addr (name + listening port) | off
+narrow_sidebar_below = 80
+min_conversation_width = 40
 ```
 
 Lines starting with `#` are comments. Unknown keys are ignored. Missing
