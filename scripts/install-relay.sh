@@ -252,10 +252,19 @@ unit_path() {
 # Tag / asset resolution
 # ---------------------------------------------------------------------------
 resolve_tag() {
-    local api="https://api.github.com/repos/${REPO}/releases/${VERSION}"
-    local body tag
+    # Two endpoint shapes:
+    #   /releases/latest           — when VERSION=latest
+    #   /releases/tags/<tag>       — when VERSION=vX.Y.Z...
+    # The bare /releases/<version> form only accepts numeric release IDs, so
+    # passing "v0.7.11-beta.1" there 404s. Route tag-shaped values correctly.
+    local api body tag
+    case "$VERSION" in
+        latest)          api="https://api.github.com/repos/${REPO}/releases/latest" ;;
+        v*)              api="https://api.github.com/repos/${REPO}/releases/tags/${VERSION}" ;;
+        *)               api="https://api.github.com/repos/${REPO}/releases/${VERSION}" ;;
+    esac
     body="$(curl "${CURL_COMMON[@]}" -fsSL "$api")" \
-        || die "could not resolve release ${VERSION} from ${REPO}"
+        || die "could not resolve release ${VERSION} from ${REPO} (URL: $api)"
     tag="$(printf '%s' "$body" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
     [ -n "$tag" ] || die "could not parse tag_name from release metadata"
     printf '%s' "$tag"
