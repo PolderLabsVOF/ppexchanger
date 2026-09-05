@@ -667,16 +667,23 @@ ts_install() {
 }
 
 ts_ensure_running() {
-    # systemctl is-active tailscaled returns "active" or "inactive" or an error.
+    # On distros where Tailscale was installed via its official script,
+    # tailscaled runs as a systemd unit. Use systemctl to start it when
+    # systemd is available — running `tailscaled --state=...` as a bare
+    # background process silently fails on Debian because the binary is
+    # configured for systemd (socket activation, environment files, ...).
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl is-active --quiet tailscaled \
-            || systemctl enable --now tailscaled >/dev/null 2>&1 \
-            || true
+        systemctl is-active --quiet tailscaled 2>/dev/null \
+            && return 0  # already running under systemd
+        log "starting tailscaled via systemd..."
+        systemctl enable --now tailscaled >/dev/null 2>&1 \
+            && { sleep 2; return 0; }
+        # systemctl failed — fall through to the raw-launch attempt
     fi
-    # Bring up the daemon if it is not yet running. `tailscale up` will error
-    # with a clear message if tailscaled is unreachable.
+    # No systemd or systemd start failed — try raw daemon launch as last
+    # resort. This works on some configs (e.g. macOS, Docker, WSL2).
     if ! ts_authenticated; then
-        log "starting tailscaled..."
+        log "starting tailscaled (raw daemon)..."
         tailscaled --state=/var/lib/tailscale/tailscaled.state >/dev/null 2>&1 &
         sleep 2
     fi
