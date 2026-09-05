@@ -667,15 +667,53 @@ ts_authenticate() {
         return 0
     fi
 
-    # Browser-login flow. tailscale up prints the URL to stderr and blocks
-    # waiting for the user to click it in any browser. Run it in the
-    # background so the URL appears on the operator's terminal and we can
-    # poll for completion.
+    # Browser-login flow. tailscale up prints the login URL to stderr and
+    # blocks waiting for the user to click it in any browser.
+    #
+    # Two terminal-routing pitfalls to avoid:
+    #   1. Running `curl ... | sudo bash` makes the script's stderr land
+    #      back at the curl pipe's source — not always the operator's
+    #      terminal — so redirecting tailscale up's stderr to /dev/null
+    #      silently swallows the URL (which is what the previous version
+    #      did, and what the operator is currently hitting).
+    #   2. Even if stderr is visible, the URL can scroll past quickly under
+    #      buffered output and be missed.
+    #
+    # Fix: capture tailscale up's output to a log file, wait for the URL
+    # to appear, then print it loudly via the installer's own [relay]
+    # stream (which we know reaches the operator's terminal) and also
+    # write it to /run/ppx-relay-auth-url as a backup record.
     log "opening Tailscale browser login..."
-    log "watch this terminal — a tailscale.com login URL will appear in a moment."
-    log "open it in any browser, sign in, and approve this device."
-    tailscale up --timeout=10m >/dev/null 2>&1 &
+    local ts_log="/run/ppx-relay-auth-url.log"
+    : > "$ts_log" 2>/dev/null || ts_log="$(mktemp -t ppx-ts-auth.XXXXXX)"
+    chmod 0644 "$ts_log" 2>/dev/null || true
+
+    tailscale up --timeout=10m >"$ts_log" 2>&1 &
     local up_pid=$!
+
+    # Wait up to ~15s for tailscale up to print the URL. Login URLs start
+    # with "https://login.tailscale.com/a/" or "https://<control-plane>/a/".
+    local login_url="" deadline=$((SECONDS + 15))
+    while [ "$SECONDS" -lt "$deadline" ] && [ -z "$login_url" ]; do
+        login_url="$(grep -oE 'https://[a-zA-Z0-9./_-]+/a/[a-f0-9]+' "$ts_log" 2>/dev/null | head -n1)"
+        [ -z "$login_url" ] && sleep 1
+    done
+
+    if [ -n "$login_url" ]; then
+        # Make the URL unmistakable: bold yellow header, repeated thrice in
+        # case the first line scrolls past, and dump the full log path.
+        warn "============================================================"
+        warn "Tailscale login URL (also written to: $ts_log):"
+        warn ""
+        warn "  $login_url"
+        warn ""
+        warn "Open this URL in any browser to authenticate this host."
+        warn "============================================================"
+        cp "$ts_log" /run/ppx-relay-auth-url 2>/dev/null || true
+    else
+        warn "Tailscale did not print a login URL within 15s."
+        warn "Run \`tailscale up --timeout=10m\` manually in another shell to log in."
+    fi
 
     if ts_wait_for_auth; then
         kill "$up_pid" 2>/dev/null || true
@@ -686,7 +724,7 @@ ts_authenticate() {
 
     kill "$up_pid" 2>/dev/null || true
     wait "$up_pid" 2>/dev/null || true
-    die "Tailscale login did not complete in 10 minutes. Re-run the installer or use --tailscale-authkey for unattended installs."
+    die "Tailscale login did not complete in 10 minutes. Re-run the installer, run \`tailscale up\` manually, or use --tailscale-authkey for unattended installs. Last login URL was saved to /run/ppx-relay-auth-url."
 }
 
 ts_enable_funnel() {
